@@ -1998,67 +1998,33 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         findPreference<PreferenceCategory>("pc_provider_empty_state")?.isVisible = !hasConfigProvider && !hasSpecificOptions
     }
 
+    // 2026-08-10 : voir SettingsMobileFragment — un seul code, celui du cadenas.
     private fun setupParentalControlPreferences() {
-        val pinPreference = findPreference<EditTextPreference>("PARENTAL_CONTROL_PIN")
-        val adminPinPreference = findPreference<EditTextPreference>("PARENTAL_CONTROL_ADMIN_PIN")
-        val removePinPreference = findPreference<Preference>("PARENTAL_CONTROL_REMOVE_PIN")
-        val removeAdminPinPreference = findPreference<Preference>("PARENTAL_CONTROL_REMOVE_ADMIN_PIN")
+        // Voir SettingsMobileFragment : l'âge doit être stocké en String.
+        UserPreferences.normalizeParentalMaxAgeStorage()
+        val codePreference = findPreference<Preference>("PARENTAL_CODE")
+        val lockedProvidersPreference = findPreference<Preference>("PARENTAL_LOCKED_PROVIDERS")
         val maxAgePreference = findPreference<ListPreference>("PARENTAL_CONTROL_MAX_AGE")
-        val unlockPreference = findPreference<Preference>("PARENTAL_CONTROL_UNLOCK")
 
-        fun bindPinEditText(editText: EditText) {
-            editText.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
-            editText.imeOptions = EditorInfo.IME_ACTION_DONE
-            editText.hint = getString(R.string.settings_parental_pin_hint)
-            editText.setText("")
-        }
-
-        pinPreference?.setOnBindEditTextListener(::bindPinEditText)
-        adminPinPreference?.setOnBindEditTextListener(::bindPinEditText)
-
-        pinPreference?.setOnPreferenceClickListener {
-            showParentalPinEditor(maxAgePreference)
+        codePreference?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.utils.ParentalSettingsUi
+                .showCodeManager(requireContext()) { updateParentalControlPreferenceState() }
             true
         }
 
-        adminPinPreference?.setOnPreferenceClickListener {
-            showAdminPinEditor()
-            true
-        }
-
-        removePinPreference?.setOnPreferenceClickListener {
-            changeParentalSettingWithPinCheck {
-                UserPreferences.parentalControlPin = ""
-                UserPreferences.parentalControlMaxAge = null
-                maxAgePreference?.value = ""
-                UserPreferences.unlockParentalControls()
-                Toast.makeText(requireContext(), getString(R.string.settings_parental_pin_removed), Toast.LENGTH_SHORT).show()
-                ProviderChangeNotifier.notifyProviderChanged()
-                updateParentalControlPreferenceState()
-            }
-            true
-        }
-
-        removeAdminPinPreference?.setOnPreferenceClickListener {
-            changeAdminSettingWithPinCheck {
-                UserPreferences.parentalControlAdminPin = ""
-                Toast.makeText(requireContext(), getString(R.string.settings_parental_admin_pin_removed), Toast.LENGTH_SHORT).show()
-                updateParentalControlPreferenceState()
-            }
+        lockedProvidersPreference?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.utils.ParentalSettingsUi
+                .showLockedProviders(requireContext()) { updateParentalControlPreferenceState() }
             true
         }
 
         maxAgePreference?.setOnPreferenceChangeListener { _, newValue ->
             if (!UserPreferences.enableTmdb) return@setOnPreferenceChangeListener false
-            if (UserPreferences.parentalControlPin.isBlank()) {
-                Toast.makeText(requireContext(), getString(R.string.settings_parental_set_pin_first), Toast.LENGTH_SHORT).show()
-                return@setOnPreferenceChangeListener false
-            }
 
             val newMaxAgeValue = newValue as String
             val newMaxAge = newMaxAgeValue.toIntOrNull()
 
-            changeParentalSettingWithPinCheck {
+            com.streamflixreborn.streamflix.utils.ParentalSettingsUi.requireCode(requireContext()) {
                 UserPreferences.parentalControlMaxAge = newMaxAge
                 maxAgePreference.value = newMaxAgeValue
                 Toast.makeText(requireContext(), getString(R.string.settings_parental_max_age_saved), Toast.LENGTH_SHORT).show()
@@ -2069,96 +2035,44 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             false
         }
 
-        unlockPreference?.setOnPreferenceClickListener {
-            if (UserPreferences.parentalControlAdminPin.isBlank()) {
-                Toast.makeText(requireContext(), getString(R.string.settings_parental_set_admin_pin_first), Toast.LENGTH_SHORT).show()
-            } else {
-                promptForAdminPin {
-                    UserPreferences.unlockParentalControls()
-                    Toast.makeText(requireContext(), getString(R.string.settings_parental_unlocked), Toast.LENGTH_SHORT).show()
-                    updateParentalControlPreferenceState()
-                }
-            }
-            true
-        }
-
         updateParentalControlPreferenceState()
     }
 
     private fun updateParentalControlPreferenceState() {
         val tmdbEnabled = UserPreferences.enableTmdb
-        val pinPreference = findPreference<EditTextPreference>("PARENTAL_CONTROL_PIN")
-        val adminPinPreference = findPreference<EditTextPreference>("PARENTAL_CONTROL_ADMIN_PIN")
-        val removePinPreference = findPreference<Preference>("PARENTAL_CONTROL_REMOVE_PIN")
-        val removeAdminPinPreference = findPreference<Preference>("PARENTAL_CONTROL_REMOVE_ADMIN_PIN")
-        val maxAgePreference = findPreference<ListPreference>("PARENTAL_CONTROL_MAX_AGE")
-        val unlockPreference = findPreference<Preference>("PARENTAL_CONTROL_UNLOCK")
-        val isLocked = UserPreferences.isParentalControlTemporarilyLocked || UserPreferences.parentalControlHardLocked
+        val ctx = requireContext()
+        val ui = com.streamflixreborn.streamflix.utils.ParentalSettingsUi
+        val hasCode = ui.hasCode(ctx)
 
-        pinPreference?.apply {
-            isEnabled = tmdbEnabled && !isLocked
-            text = ""
-            summary = when {
-                !tmdbEnabled -> getString(R.string.settings_parental_requires_tmdb)
-                UserPreferences.parentalControlHardLocked -> getString(R.string.settings_parental_locked_hard)
-                UserPreferences.isParentalControlTemporarilyLocked -> getString(
-                    R.string.settings_parental_locked_temporary,
-                    lockRemainingMinutes()
-                )
-                UserPreferences.parentalControlPin.isBlank() -> getString(R.string.settings_parental_pin_not_set)
-                else -> getString(R.string.settings_parental_pin_set)
-            }
-        }
-
-        adminPinPreference?.apply {
-            isEnabled = tmdbEnabled
-            text = ""
-            summary = when {
-                !tmdbEnabled -> getString(R.string.settings_parental_requires_tmdb)
-                UserPreferences.parentalControlAdminPin.isBlank() -> getString(R.string.settings_parental_admin_pin_not_set)
-                else -> getString(R.string.settings_parental_admin_pin_set)
-            }
-        }
-
-        removePinPreference?.apply {
-            isVisible = tmdbEnabled && UserPreferences.parentalControlPin.isNotBlank()
-            isEnabled = !isLocked
-        }
-
-        removeAdminPinPreference?.apply {
-            isVisible = tmdbEnabled && UserPreferences.parentalControlAdminPin.isNotBlank()
+        findPreference<Preference>("PARENTAL_CODE")?.apply {
             isEnabled = true
+            summary = getString(
+                if (hasCode) R.string.settings_parental_code_set
+                else R.string.settings_parental_code_not_set
+            )
         }
 
-        maxAgePreference?.apply {
-            isEnabled = tmdbEnabled && !isLocked
+        findPreference<Preference>("PARENTAL_LOCKED_PROVIDERS")?.apply {
+            isEnabled = true
+            val count = ui.lockedCount(ctx)
+            summary = when {
+                !hasCode -> getString(R.string.settings_parental_locked_providers_summary)
+                count == 0 -> getString(R.string.settings_parental_locked_providers_none)
+                else -> getString(R.string.settings_parental_locked_providers_count, count)
+            }
+        }
+
+        findPreference<ListPreference>("PARENTAL_CONTROL_MAX_AGE")?.apply {
+            isEnabled = tmdbEnabled
             value = UserPreferences.parentalControlMaxAge?.toString().orEmpty()
             summary = when {
                 !tmdbEnabled -> getString(R.string.settings_parental_requires_tmdb)
-                UserPreferences.parentalControlHardLocked -> getString(R.string.settings_parental_locked_hard)
-                UserPreferences.isParentalControlTemporarilyLocked -> getString(
-                    R.string.settings_parental_locked_temporary,
-                    lockRemainingMinutes()
-                )
-                UserPreferences.parentalControlPin.isBlank() -> getString(R.string.settings_parental_set_pin_first)
+                !hasCode -> getString(R.string.settings_parental_set_code_first)
                 UserPreferences.parentalControlMaxAge == null -> getString(R.string.settings_parental_max_age_disabled)
                 else -> "${UserPreferences.parentalControlMaxAge}+"
             }
         }
 
-        unlockPreference?.apply {
-            isVisible = isLocked
-            isEnabled = tmdbEnabled && UserPreferences.parentalControlAdminPin.isNotBlank()
-            summary = when {
-                UserPreferences.parentalControlAdminPin.isBlank() -> getString(R.string.settings_parental_set_admin_pin_first)
-                UserPreferences.parentalControlHardLocked -> getString(R.string.settings_parental_locked_hard)
-                UserPreferences.isParentalControlTemporarilyLocked -> getString(
-                    R.string.settings_parental_locked_temporary,
-                    lockRemainingMinutes()
-                )
-                else -> getString(R.string.settings_parental_unlock_summary)
-            }
-        }
     }
 
     private fun changeParentalSettingWithPinCheck(onVerified: () -> Unit) {
@@ -2575,30 +2489,67 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
     }
 
     // 2026-05-27 : dialog pour activer/désactiver + cœur par provider.
+    // 2026-08-11 : écran déplacé dans utils/SourcesPickerDialog (partagé mobile/télé) —
+    //   en-tête fixe avec les actions EN HAUT, recherche, bascule « tout ».
     private fun showExtractorToggleDialog() {
+        com.streamflixreborn.streamflix.utils.SourcesPickerDialog.show(requireContext())
+    }
+
+    @Suppress("unused")
+    private fun ancienSelecteurSourcesInutilise() {
         val store = com.streamflixreborn.streamflix.utils.ExtractorToggleStore
-        val allNames = store.allExtractorNames()
-        if (allNames.isEmpty()) return
+        // 2026-08-11 (user : « si je veux désactiver Cloudstream, ils doivent être affichés au
+        //   même endroit » ; « tous les serveurs devraient apparaître dans Gérer les sources,
+        //   sans exception ») — miroir exact de la version mobile. Voir SettingsMobileFragment.
+        val sourcesBackup = com.streamflixreborn.streamflix.utils.BackupRegistry.BACKUP_SOURCES
+        val actives = com.streamflixreborn.streamflix.utils.UserPreferences.sourcesBackupActives()
+            .toMutableSet()
+        val allNames = (store.allExtractorNames() + store.desactivesHorsRegistre())
+            .distinctBy { it.lowercase() }
+            .sortedBy { it.lowercase() }
+        if (allNames.isEmpty() && sourcesBackup.isEmpty()) return
         val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
         val disabled = store.getDisabled().toMutableSet()
         val favorites = if (providerName.isNotEmpty()) store.getFavorites(providerName).toMutableSet() else mutableSetOf()
+
+        // Désactivés en tête (user : « qu'ils soient réactivables plus facilement »).
+        val lignes = buildList {
+            sourcesBackup.forEach { (cle, libelle) ->
+                add(LigneSource(cle = cle, libelle = libelle, estSource = true))
+            }
+            allNames.forEach { nom ->
+                add(LigneSource(cle = nom.lowercase(), libelle = nom, estSource = false))
+            }
+        }.sortedWith(
+            compareBy<LigneSource> { ligne ->
+                val actif = if (ligne.estSource) ligne.cle in actives else ligne.cle !in disabled
+                if (actif) 1 else 0
+            }.thenBy { it.libelle.lowercase() }
+        ).let { triees ->
+            listOf(LigneSource("", "Tout activer / tout désactiver", false, estMaitre = true)) + triees
+        }
 
         val listView = android.widget.ListView(requireContext())
         // TV D-pad : sans ça la ListView sélectionne la rangée entière et le center déclenche
         //   l'item-click (absent) au lieu de descendre le focus sur la CheckBox → impossible de
         //   cocher/décocher à la télécommande (au tactile ça marchait car on tape direct dessus).
         listView.itemsCanFocus = true
-        val adapter = ExtractorToggleAdapter(requireContext(), allNames, disabled, favorites, providerName)
+        val adapter = ExtractorToggleAdapter(
+            requireContext(), lignes, disabled, actives, favorites, providerName,
+        )
         listView.adapter = adapter
 
         val titleSuffix = if (providerName.isNotEmpty()) " — $providerName" else ""
         android.app.AlertDialog.Builder(requireContext())
-            .setTitle("Gérer les sources (${allNames.size})$titleSuffix")
+            .setTitle("Gérer les sources (${lignes.size})$titleSuffix")
             .setView(listView)
             .setPositiveButton("OK") { _, _ ->
-                store.setDisabled(disabled)
+                store.setDisabled(disabled - store.forces)
+                com.streamflixreborn.streamflix.utils.UserPreferences
+                    .setSourcesBackupActives(actives)
                 if (providerName.isNotEmpty()) store.setFavorites(providerName, favorites)
-                val disCount = disabled.size
+                val disCount = (disabled - store.forces).size +
+                    (sourcesBackup.count { it.first !in actives })
                 val favCount = favorites.size
                 val msg = buildString {
                     if (disCount > 0) append("$disCount désactivée${if (disCount > 1) "s" else ""}")
@@ -2613,21 +2564,37 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             .setNegativeButton("Annuler", null)
             .setNeutralButton("Tout réinitialiser") { _, _ ->
                 store.setDisabled(emptySet())
+                com.streamflixreborn.streamflix.utils.UserPreferences.setSourcesBackupActives(
+                    com.streamflixreborn.streamflix.utils.BackupRegistry.BACKUP_SOURCE_KEYS,
+                )
                 if (providerName.isNotEmpty()) store.setFavorites(providerName, emptySet())
                 android.widget.Toast.makeText(requireContext(), "Sources réinitialisées", android.widget.Toast.LENGTH_SHORT).show()
             }
             .show()
     }
 
+    /**
+     * Une ligne du sélecteur : une SOURCE de backup, un EXTRACTEUR, ou la ligne MAÎTRE.
+     * 2026-08-11 (user : « il manque l'option pour désactiver toutes les sources ») — voir
+     * SettingsMobileFragment pour le détail.
+     */
+    private data class LigneSource(
+        val cle: String,
+        val libelle: String,
+        val estSource: Boolean,
+        val estMaitre: Boolean = false,
+    )
+
     private class ExtractorToggleAdapter(
         private val ctx: android.content.Context,
-        private val names: List<String>,
+        private val lignes: List<LigneSource>,
         private val disabled: MutableSet<String>,
+        private val activesSources: MutableSet<String>,
         private val favorites: MutableSet<String>,
         private val providerName: String,
     ) : android.widget.BaseAdapter() {
-        override fun getCount() = names.size
-        override fun getItem(pos: Int) = names[pos]
+        override fun getCount() = lignes.size
+        override fun getItem(pos: Int) = lignes[pos]
         override fun getItemId(pos: Int) = pos.toLong()
 
         override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
@@ -2635,20 +2602,53 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                 .inflate(com.streamflixreborn.streamflix.R.layout.item_extractor_toggle, parent, false)
             val cb = view.findViewById<android.widget.CheckBox>(com.streamflixreborn.streamflix.R.id.cb_enabled)
             val heart = view.findViewById<android.widget.ImageView>(com.streamflixreborn.streamflix.R.id.iv_favorite)
-            val nameLower = names[position].lowercase()
+            val ligne = lignes[position]
+            val nameLower = ligne.cle
 
             cb.setOnCheckedChangeListener(null)
-            cb.text = names[position]
-            cb.isChecked = nameLower !in disabled
+
+            // ── Ligne maître : coche/décoche TOUT ────────────────────────────────────────
+            if (ligne.estMaitre) {
+                heart.visibility = android.view.View.GONE
+                val toutActif = lignes.none { l ->
+                    !l.estMaitre &&
+                        (if (l.estSource) l.cle !in activesSources else l.cle in disabled)
+                }
+                cb.text = if (toutActif) "◼  TOUT DÉSACTIVER" else "◻  TOUT ACTIVER"
+                cb.isChecked = toutActif
+                cb.setOnCheckedChangeListener { _, coche ->
+                    lignes.filterNot { it.estMaitre }.forEach { l ->
+                        if (l.estSource) {
+                            if (coche) activesSources.add(l.cle) else activesSources.remove(l.cle)
+                        } else {
+                            if (coche) disabled.remove(l.cle) else disabled.add(l.cle)
+                        }
+                    }
+                    notifyDataSetChanged()
+                }
+                return view
+            }
+
+            // Le préfixe distingue les deux familles : « Source · Cloudstream » n'est pas un
+            // hébergeur, c'est un site interrogé.
+            cb.text = if (ligne.estSource) "Source · ${ligne.libelle}" else ligne.libelle
+            cb.isChecked = if (ligne.estSource) nameLower in activesSources else nameLower !in disabled
             cb.setOnCheckedChangeListener { _, isChecked ->
-                if (isChecked) disabled.remove(nameLower) else disabled.add(nameLower)
+                if (ligne.estSource) {
+                    if (isChecked) activesSources.add(nameLower) else activesSources.remove(nameLower)
+                } else {
+                    if (isChecked) disabled.remove(nameLower) else disabled.add(nameLower)
+                }
             }
 
             // TV D-pad : checkbox → droite → cœur, cœur → gauche → checkbox
             cb.nextFocusRightId = com.streamflixreborn.streamflix.R.id.iv_favorite
             heart.nextFocusLeftId = com.streamflixreborn.streamflix.R.id.cb_enabled
 
-            if (providerName.isNotEmpty()) {
+            // Le cœur « favori » n'a de sens que pour un extracteur.
+            if (ligne.estSource) {
+                heart.visibility = android.view.View.GONE
+            } else if (providerName.isNotEmpty()) {
                 heart.visibility = android.view.View.VISIBLE
                 updateHeartIcon(heart, nameLower in favorites)
                 heart.setOnClickListener {

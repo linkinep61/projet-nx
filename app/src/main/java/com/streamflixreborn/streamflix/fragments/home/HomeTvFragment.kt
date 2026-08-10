@@ -28,6 +28,7 @@ import com.streamflixreborn.streamflix.models.Episode
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.EpgStore
 import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import androidx.transition.TransitionManager
@@ -67,6 +68,20 @@ class HomeTvFragment : Fragment() {
 
     private val swiperHandler = Handler(Looper.getMainLooper())
     private var isBackgroundPinned = false
+
+    // ── EPG (guide des programmes), panneau à gauche du mini lecteur ─────────────────
+    // 2026-08-11 (user « regarde si sur les chaînes Vavoo on peut avoir l'EPG… pour la
+    //   version télé », puis « on a qu'à mettre l'EPG que sur la version télé ») : réservé à
+    //   cet écran, RIEN côté mobile.
+    private val epgHandler = Handler(Looper.getMainLooper())
+    private val epgTicker = object : Runnable {
+        override fun run() {
+            majEpg()
+            epgHandler.postDelayed(this, 30_000L)
+        }
+    }
+    /** Dernière chaîne pour laquelle on a journalisé un rapprochement (évite le spam). */
+    private var derniereChaineEpg: String? = null
 
     // 2026-06-09 — paging World Live grid (60 items/chunk).
     private var worldLivePagedItems: List<AppAdapter.Item> = emptyList()
@@ -242,6 +257,7 @@ class HomeTvFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        arreterEpg()
         appAdapter.onSaveInstanceState(binding.vgvHome)
         // Don't clear onIptvChannelClick — the new fragment's onViewCreated sets it,
         // but this onDestroyView can fire AFTER, causing a race condition.
@@ -394,10 +410,14 @@ class HomeTvFragment : Fragment() {
         val isIptv = UserPreferences.currentProvider is IptvProvider
         if (!isIptv || !UserPreferences.miniPlayerEnabled) {
             binding.miniPlayerContainer.visibility = View.GONE
+            arreterEpg()
             syncOverlayVisibility()
             MiniPlayerController.onIptvChannelClick = null
             return
         }
+
+        // Guide des programmes : chargé une seule fois (cache disque 12 h), en tâche de fond.
+        demarrerEpg()
 
         MiniPlayerController.initPlayer(requireContext())
         binding.miniPlayerView.player = MiniPlayerController.getPlayer()
@@ -575,7 +595,105 @@ class HomeTvFragment : Fragment() {
     private fun syncOverlayVisibility() {
         if (_binding == null) return
         binding.miniPlayerOverlay.visibility = binding.miniPlayerContainer.visibility
+        majEpg()
     }
+
+    // ── EPG ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Charge le guide en tâche de fond et démarre le rafraîchissement du panneau.
+     *
+     * Le guide est rapproché des chaînes PAR LEUR NOM (voir EpgStore), donc il ne dépend
+     * d'aucun provider en particulier : Vavoo était la demande, mais Mon IPTV et les autres
+     * en profitent gratuitement — sans EPG, le panneau reste simplement caché.
+     */
+    private fun demarrerEpg() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                EpgStore.prechargerSiNecessaire(requireContext().applicationContext)
+            } catch (e: Exception) {
+                Log.w("HomeTv", "EPG : préchargement KO — ${e.message}")
+            }
+            majEpg()
+        }
+        epgHandler.removeCallbacks(epgTicker)
+        epgHandler.postDelayed(epgTicker, 30_000L)
+    }
+
+    private fun arreterEpg() = epgHandler.removeCallbacks(epgTicker)
+
+    /**
+     * Remplit le panneau. Aucune requête réseau ici : tout est déjà en mémoire.
+     * Le panneau ne s'affiche QUE quand le mini lecteur vidéo est visible — c'est son
+     * emplacement (à sa gauche) et il n'aurait aucun sens tout seul.
+     */
+    private fun majEpg() {
+        val b = _binding ?: return
+        val panneau = b.llEpgPanel
+
+        val miniVisible = b.miniPlayerContainer.visibility == View.VISIBLE
+        val nom = MiniPlayerController.currentChannelName
+        if (!miniVisible || nom.isNullOrBlank() || !EpgStore.estPret()) {
+            panneau.visibility = View.GONE
+            return
+        }
+
+        val maintenant = System.currentTimeMillis()
+        val enCours = EpgStore.enCours(nom, maintenant)
+        val aSuivre = EpgStore.aSuivre(nom, maintenant)
+
+        if (nom != derniereChaineEpg) {
+            derniereChaineEpg = nom
+            Log.i(
+                "HomeTv",
+                "EPG « $nom » → " + (enCours?.let { "en cours : ${it.titre}" } ?: "aucun programme"),
+            )
+        }
+
+        panneau.visibility = View.VISIBLE
+        b.tvEpgChannel.text = nom
+
+        if (enCours == null) {
+            b.tvEpgNowLabel.visibility = View.GONE
+            b.tvEpgNowTime.visibility = View.GONE
+            b.pbEpgNow.visibility = View.GONE
+            b.tvEpgNextLabel.visibility = View.GONE
+            b.tvEpgNextTitle.visibility = View.GONE
+            b.tvEpgNowTitle.visibility = View.VISIBLE
+            b.tvEpgNowTitle.setTextColor(0x99FFFFFF.toInt())
+            b.tvEpgNowTitle.textSize = 13f
+            b.tvEpgNowTitle.text = getString(R.string.epg_indisponible)
+            return
+        }
+
+        b.tvEpgNowLabel.visibility = View.VISIBLE
+        b.tvEpgNowTime.visibility = View.VISIBLE
+        b.pbEpgNow.visibility = View.VISIBLE
+        b.tvEpgNowTitle.visibility = View.VISIBLE
+        b.tvEpgNowTitle.setTextColor(0xFFFFFFFF.toInt())
+        b.tvEpgNowTitle.textSize = 16f
+        b.tvEpgNowTitle.text = enCours.titre
+
+        val restantMin = ((enCours.finMs - maintenant) / 60_000L).coerceAtLeast(0L)
+        b.tvEpgNowTime.text = "${heure(enCours.debutMs)} – ${heure(enCours.finMs)}  ·  reste $restantMin min"
+
+        val duree = (enCours.finMs - enCours.debutMs).coerceAtLeast(1L)
+        b.pbEpgNow.progress = (((maintenant - enCours.debutMs) * 1000L) / duree)
+            .coerceIn(0L, 1000L).toInt()
+
+        if (aSuivre != null) {
+            b.tvEpgNextLabel.visibility = View.VISIBLE
+            b.tvEpgNextTitle.visibility = View.VISIBLE
+            b.tvEpgNextTitle.text = "${heure(aSuivre.debutMs)}   ${aSuivre.titre}"
+        } else {
+            b.tvEpgNextLabel.visibility = View.GONE
+            b.tvEpgNextTitle.visibility = View.GONE
+        }
+    }
+
+    private fun heure(ms: Long): String = java.text.SimpleDateFormat(
+        "HH:mm", java.util.Locale.FRANCE,
+    ).format(java.util.Date(ms))
 
     /**
      * 2026-06-28 : pour les radios, la surface vidéo (PlayerView) montre un gros
@@ -599,6 +717,9 @@ class HomeTvFragment : Fragment() {
             binding.miniPlayerFullscreen.visibility = View.VISIBLE
             updateHomeGridForMiniPlayer(true)
         }
+        // Cette méthode change la visibilité du container APRÈS syncOverlayVisibility() :
+        // le panneau EPG doit donc être réévalué ici aussi (une radio n'a pas de guide).
+        majEpg()
     }
 
     private fun updatePauseButton() {

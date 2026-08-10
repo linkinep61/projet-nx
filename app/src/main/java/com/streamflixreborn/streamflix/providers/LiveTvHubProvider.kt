@@ -690,7 +690,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   v13 : AVANT le filtre catégorie pour que les favoris soient visibles
         //   même quand un filtre est actif (= bug corrigé).
         try {
+            // 2026-08-13 (user : « les favoris de ce dossier ne doivent PAS apparaître sur le
+            //   TV Hub ni ailleurs, seulement dans le dossier ») : les clips Rutube mis en ★
+            //   sont la playlist DU DOSSIER (bouton ★ à l'intérieur), pas des favoris du hub.
+            //   Ils partagent le même magasin que les autres favoris replay — on les écarte
+            //   donc ICI, à l'affichage, plutôt que d'inventer un 2ᵉ magasin.
             val replayFavEntries = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all()
+                .filterNot { RutubeFolder.estClipDossier(it.id) }
             if (replayFavEntries.isNotEmpty()) {
                 val replayFavShows = replayFavEntries.map { e ->
                     TvShow(
@@ -741,12 +747,38 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   lieu de 200+ → moins de bitmaps chargés par Glide → moins de RAM.
         //   Au clic sur un dossier, LiveHubFolderDialog liste les
         //   sous-catégories puis les chaînes.
-        val foldered = groupSectionsIntoFolders(sections)
+        // 2026-08-13 (user : « il devrait être AVEC tous les dossiers, pas à part en haut ») :
+        //   la carte Rutube est ajoutée DANS la rangée des dossiers produite par le regroupement,
+        //   à côté des autres (Cinéma, Musique, OTF…). Si cette rangée n'existe pas (cas rare),
+        //   on retombe sur une section dédiée pour qu'elle reste accessible.
+        val grouped = groupSectionsIntoFolders(sections).toMutableList()
+        val idxDossiers = grouped.indexOfFirst { cat ->
+            (cat.list as? List<*>)?.any { it is TvShow && it.id.startsWith("livehub::folder::") } == true
+        }
+        if (idxDossiers >= 0) {
+            val existants = (grouped[idxDossiers].list as? List<*>)?.filterIsInstance<TvShow>().orEmpty()
+            if (existants.none { it.id == "livehub::folder::rutube" }) {
+                // 2026-08-13 (user : « mettre Rutube juste à côté du dossier Musique ») : on
+                //   l'insère APRÈS la carte Musique quand elle existe (voisinage thématique :
+                //   clips + musique), sinon en fin de rangée comme avant.
+                val iMusique = existants.indexOfFirst {
+                    it.title.contains("musique", ignoreCase = true) ||
+                        it.id.contains("music", ignoreCase = true)
+                }
+                val nouvelle = if (iMusique >= 0) {
+                    existants.toMutableList().apply { add(iMusique + 1, rutubeFolderCard()) }
+                } else existants + rutubeFolderCard()
+                grouped[idxDossiers] = Category(name = grouped[idxDossiers].name, list = nouvelle)
+            }
+        } else {
+            grouped.add(Category(name = "Rutube", list = listOf(rutubeFolderCard())))
+        }
+        val foldered = grouped.toList()
         // Stocke le résultat dans le cache mémoire pour les 60s suivantes.
-        cachedHome = foldered.toList()
+        cachedHome = foldered
         cachedHomeSignature = sig
         cachedHomeAt = System.currentTimeMillis()
-        Log.d(TAG, "getHome: built+cached ${foldered.size} sections (=>${sections.size} originales regroupées en dossiers) in ${System.currentTimeMillis() - tHomeStart}ms (TTL 60s)")
+        Log.d(TAG, "getHome: built+cached ${foldered.size} sections (dossier Rutube rangé avec les autres) in ${System.currentTimeMillis() - tHomeStart}ms (TTL 60s)")
         return foldered
     }
 
@@ -1242,6 +1274,60 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return allHomeChannels()
     }
 
+    // 2026-08-13 : DOSSIER RUTUBE — recherche LIBRE (comme le site), distincte du backup strict.
+    //   Ici on renvoie tout ce que Rutube a pour la requête (« Inspecteur Colombo » se trouve,
+    //   même si le matching strict des serveurs l'aurait écarté). Un clip = un TvShow direct-play
+    //   calqué sur les chaînes live (1 saison « Clip » / 1 épisode → getServers → RutubeProvider).
+    private val rutubeClipCache =
+        java.util.concurrent.ConcurrentHashMap<String, com.streamflixreborn.streamflix.providers.RutubeProvider.RutubeClip>()
+
+    private fun rutubeClipToTvShow(
+        clip: com.streamflixreborn.streamflix.providers.RutubeProvider.RutubeClip,
+    ): TvShow {
+        rutubeClipCache[clip.id] = clip
+        return TvShow(id = "livehub::rutube::${clip.id}", title = clip.title)
+            .copy(poster = clip.thumbnail.takeIf { it.isNotBlank() })
+            .apply { providerName = "TV Hub" }
+    }
+
+    private fun rutubeClipShow(id: String): TvShow {
+        val hex = id.removePrefix("livehub::rutube::")
+        val clip = rutubeClipCache[hex]
+            ?: com.streamflixreborn.streamflix.providers.RutubeProvider.fetchClipMeta(hex)
+                ?.also { rutubeClipCache[hex] = it }
+        val title = clip?.title?.takeIf { it.isNotBlank() } ?: "Clip Rutube"
+        val poster = clip?.thumbnail?.takeIf { it.isNotBlank() }
+        return TvShow(id = id, title = title).copy(
+            poster = poster,
+            seasons = listOf(
+                Season(
+                    id = id, number = 1, title = "Clip",
+                    episodes = listOf(
+                        Episode(id = id, number = 1, title = "Lire le clip", poster = poster),
+                    ),
+                ),
+            ),
+        ).apply { providerName = "TV Hub" }
+    }
+
+    /** Carte-DOSSIER Rutube, rangée AVEC les autres dossiers du TV Hub (pas de rangée à part).
+     *  id `livehub::folder::rutube` → le clic ouvre le MÊME dialog que les autres dossiers
+     *  (grille + mini-lecteur + ★), sa barre de recherche interrogeant Rutube. */
+    private fun rutubeFolderCard(): TvShow =
+        TvShow(id = "livehub::folder::rutube", title = "📁 Rutube")
+            .copy(poster = RUTUBE_LOGO)
+            .apply { providerName = "TV Hub" }
+
+    /** Jaquette du dossier (logo Rutube).
+     *  ⚠ 2026-08-13 — trois pistes ÉCARTÉES, vérifiées au logcat, ne pas les refaire :
+     *    • Wikimedia / clearbit / favicon rutube.ru → 404 (« Load failed » Glide) ;
+     *    • drawable local `android.resource://…/drawable/logo_rutube` → Glide répond
+     *      « Resource does not exist » (le chargement d'images passe par le proxy images).
+     *  Ce qui MARCHE (testé 200, image/webp) : l'icône du domaine servie par le proxy
+     *  images.weserv.nl, celui-là même que l'app utilise déjà pour toutes ses jaquettes. */
+    private val RUTUBE_LOGO =
+        "https://images.weserv.nl/?url=icons.duckduckgo.com/ip3/rutube.ru.ico&w=400&output=webp&q=60"
+
     override suspend fun search(query: String, page: Int): List<TvShow> {
         if (page > 1) return emptyList()
         val q = query.trim().lowercase()
@@ -1267,7 +1353,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
             Log.w(TAG, "search: replay filter failed: ${e.message}")
             emptyList()
         }
-        return (liveHits + replayHits).distinctBy { it.id }
+        // 2026-08-13 : RECHERCHE LIBRE RUTUBE — appended après live+replay. Contrairement aux
+        //   serveurs (matching strict), ici on trouve n'importe quoi (« Inspecteur Colombo »)
+        //   comme sur le site. Cap 30, jamais bloquant.
+        val rutubeHits = try {
+            com.streamflixreborn.streamflix.providers.RutubeProvider
+                .searchClips(query.trim())
+                .take(30)
+                .map { rutubeClipToTvShow(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "search: Rutube libre KO: ${e.message}"); emptyList()
+        }
+        return (liveHits + replayHits + rutubeHits).distinctBy { it.id }
     }
 
     /**
@@ -1352,6 +1449,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
             return TvShow(id = id, title = "📁 $key").apply {
                 providerName = "TV Hub"
             }
+        }
+        // 2026-08-13 : clip Rutube (dossier navigable) → show direct-play (1 saison / 1 épisode).
+        if (id.startsWith("livehub::rutube::")) {
+            return rutubeClipShow(id)
         }
         // 2026-06-18 v24 : REPLAY TF1+ programme → fetch les épisodes via TF1+ HTML
         //   Pipeline :
@@ -2082,6 +2183,24 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  "canalplus", mais le Hub cherchait sous "canal" (witvKey) → fallback
      *  déclenché à tort, l'user voyait toute la liste agrégée. */
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-08-13 : clip Rutube (dossier navigable) → serveur Rutube (m3u8 résolu à la lecture).
+        if (id.startsWith("livehub::rutube::")) {
+            val hex = id.removePrefix("livehub::rutube::")
+            return listOf(
+                Video.Server(id = "rutube::$hex", name = "Rutube", src = "https://rutube.ru/video/$hex/"),
+            )
+        }
+        // 2026-08-13 : clip YouTube du même dossier (via NewPipe) → flux DIRECT, donc sans
+        //   les publicités du lecteur YouTube. Résolu à la lecture (URL signée, éphémère).
+        if (id.startsWith("livehub::ytclip::")) {
+            val vid = id.removePrefix("livehub::ytclip::")
+            return listOf(
+                Video.Server(
+                    id = "ytclip::$vid", name = "YouTube",
+                    src = "https://www.youtube.com/watch?v=$vid",
+                ),
+            )
+        }
         // v24 : épisode replay TF1+ (= id "livehub::replay::tf1ep::<slug>")
         //   → résout via TF1Resolver avec le slug video complet, qui fait :
         //   slug → fetch page video → extrait UUID → mediainfo → délivery URL.
@@ -2352,6 +2471,54 @@ object LiveTvHubProvider : Provider, IptvProvider {
     /** getVideo : délègue au provider d'origine selon le prefix de l'id.
      *  Couvre tous les providers IPTV via IptvCrossDelegate. */
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-08-13 : clip Rutube → RutubeProvider (API play/options → master HLS, à la lecture).
+        if (server.id.startsWith("rutube::") || server.src.contains("rutube.ru", ignoreCase = true)) {
+            return com.streamflixreborn.streamflix.providers.RutubeProvider.getVideo(server)
+        }
+        // 2026-08-13 : clip YouTube (même dossier) → NewPipe donne l'URL du fichier servi par
+        //   le CDN. On ne charge JAMAIS le lecteur YouTube, donc pas de publicité insérée.
+        if (server.id.startsWith("ytclip::")) {
+            val vid = server.id.removePrefix("ytclip::")
+            // HD : manifeste DASH (pistes séparées assemblées par ExoPlayer, jusqu'au 4K si la
+            //   vidéo l'a), avec repli automatique sur le fichier tout-en-un 360p.
+            // 2026-08-14 (user : « sur Bbox 4K, lancer une vidéo YouTube fait planter l'appli,
+            //   le crash est quasi instantané ») : l'extracteur tombe sur une Error, qui
+            //   traversait tout et tuait le process. Ici il ne peut plus rien casser — et
+            //   s'il échoue, on bascule sur la voie de secours (HTTP + JSON, sans extracteur).
+            // 2026-08-15 (user : « le flux charge jusqu'à un certain moment mais ne reprend
+            //   pas, la vidéo se coupe ») : les adresses rendues par la voie de secours sont
+            //   délivrées AU CLIENT QUI LES A DEMANDÉES. Le CDN de YouTube sert le premier
+            //   morceau puis cesse de répondre si les requêtes suivantes arrivent avec un
+            //   autre User-Agent — c'est ce qui coupait la lecture vers la première minute.
+            //   On transporte donc l'identité utilisée jusqu'au lecteur : UA de l'app iPhone
+            //   pour la voie de secours, UA habituel pour la voie normale.
+            val flux = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val parExtracteur = try {
+                    com.streamflixreborn.streamflix.providers.NewPipeAudio.resolveVideoPlayable(vid)
+                } catch (t: Throwable) {
+                    android.util.Log.w("LiveTvHubProvider",
+                        "YouTube extracteur KO (${t.javaClass.simpleName}) → lecture de secours")
+                    null
+                }
+                if (parExtracteur != null) {
+                    Triple(
+                        parExtracteur.first,
+                        if (parExtracteur.second) androidx.media3.common.MimeTypes.APPLICATION_MPD
+                        else androidx.media3.common.MimeTypes.VIDEO_MP4,
+                        CHROME_UA,
+                    )
+                } else {
+                    // La voie de secours rend aussi l'identité à employer : YouTube ne
+                    //   sert le fichier qu'au client qui a demandé l'adresse.
+                    com.streamflixreborn.streamflix.providers.NewPipeAudio.lectureSecours(vid)
+                }
+            } ?: throw Exception("YouTube : aucun flux lisible pour $vid")
+            return Video(
+                source = flux.first,
+                type = flux.second,
+                headers = mapOf("User-Agent" to flux.third),
+            )
+        }
         // 2026-07-10 (user : « le CF ne se résout pas au boot ») : VOIE FIABLE Stream4Free = les liens
         //   `data-stream.top` DÉJÀ RÉSOLUS (poussés sur git par le scraper serveur, token stable, SANS
         //   CF). On les joue DIRECT avec le Referer stream4free obligatoire → zéro CF côté app.

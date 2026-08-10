@@ -1040,8 +1040,289 @@ object MiniPlayerController {
     //   sur live IPTV qui a déjà joué (iptvCurrentStreamHasWorked=true),
     //   STATE_ENDED/IDLE = stream coupé → full MediaItem reload pour
     //   forcer ExoPlayer à re-ouvrir HTTP au CDN. Anti-flap 3/15s.
+    // ── 2026-08-13 : FILE DE LECTURE RUTUBE (user : « la lecture ne s'enchaîne pas sur une
+    //   autre… elles doivent s'enchaîner aussi dans le dossier favoris ») ─────────────────
+    //   Un clip Rutube est de la VOD, pas du direct : quand il se termine, on passe au SUIVANT
+    //   de la liste affichée (résultats de recherche OU favoris ★ du dossier).
+    //   ⚠ Sans ça, son id `livehub::rutube::…` tombait dans la branche « live IPTV » de
+    //   handleEndedOrIdle, qui RECHARGEAIT le même flux — d'où l'absence d'enchaînement.
+    data class ClipFile(val id: String, val titre: String, val poster: String?)
+    @Volatile private var fileRutube: List<ClipFile> = emptyList()
+    @Volatile private var indexRutube: Int = -1
+    @Volatile var lectureAleatoireRutube: Boolean = false
+
+    /** Garde-fou anti-double-saut en fin de clip (remis à zéro à chaque lecture). */
+    @Volatile private var finClipTraitee: Boolean = false
+
+    /** Mémorise la liste visible du dossier + la position lancée, pour enchaîner à la fin. */
+    fun definirFileRutube(items: List<ClipFile>, index: Int, aleatoire: Boolean = false) {
+        fileRutube = items
+        indexRutube = index
+        lectureAleatoireRutube = aleatoire
+        Log.d(TAG, "file Rutube : ${items.size} clips, départ #$index, aléatoire=$aleatoire")
+    }
+
+    /**
+     * ── 2026-08-14 (user : « pourquoi les lecteurs ne passent pas automatiquement à la
+     *   lecture suivante ? … c'est pareil pour le grand lecteur ») ──────────────────────
+     * La file n'était remplie qu'au clic dans la grille du dossier. Tout clip lancé
+     * AUTREMENT — depuis le ❤ Favoris du home, depuis la recherche du hub, à la reprise
+     * d'une lecture, ou en ouvrant le plein écran sans passer par le mini — démarrait donc
+     * avec une file VIDE : plus rien derrière lui, ni enchaînement ni ⏭. Les deux lecteurs
+     * étaient touchés puisqu'ils lisent la même file.
+     * On la reconstruit ici, à partir de la première liste qui contient ce clip :
+     * la grille du dossier, sinon les favoris ★ du dossier, sinon la dernière recherche.
+     */
+    fun assurerFileClip(clipId: String?) {
+        if (clipId == null) return
+        if (!clipId.startsWith("livehub::rutube::") && !clipId.startsWith("livehub::ytclip::")) return
+        val dejaLa = fileRutube.indexOfFirst { it.id == clipId }
+        if (dejaLa >= 0) {
+            indexRutube = dejaLa
+            return
+        }
+        try {
+            val grille = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                .folderContents["__grid_active"]
+                ?.flatMap { cat -> (cat.list as? List<*>)?.filterIsInstance<TvShow>() ?: emptyList() }
+                .orEmpty()
+                .filter { it.id.startsWith("livehub::rutube::") || it.id.startsWith("livehub::ytclip::") }
+            val affichee = com.streamflixreborn.streamflix.providers.RutubeFolder.listeAfficheeCourante
+            val favoris = com.streamflixreborn.streamflix.providers.RutubeFolder.favorites()
+            val derniers = com.streamflixreborn.streamflix.providers.RutubeFolder.resultatsCourants
+            // L'ordre compte : la liste AFFICHÉE au moment du lancement gagne (150 résultats
+            //   de recherche → les 150 ; vue ★ → les favoris). Les autres ne servent que de
+            //   filet quand le clip vient d'ailleurs (reprise, lien direct).
+            val source = listOf(affichee, grille, favoris, derniers).firstOrNull { liste ->
+                liste.any { it.id == clipId }
+            } ?: affichee.ifEmpty { grille.ifEmpty { favoris.ifEmpty { derniers } } }
+            if (source.isEmpty()) {
+                Log.w(TAG, "file Rutube : aucune liste de référence pour $clipId")
+                return
+            }
+            val items = source.map { ClipFile(it.id, it.title, it.poster) }
+            val i = items.indexOfFirst { it.id == clipId }
+            definirFileRutube(items, if (i >= 0) i else 0, lectureAleatoireRutube)
+        } catch (t: Throwable) {
+            Log.w(TAG, "assurerFileClip KO: ${t.message}")
+        }
+    }
+
+    /**
+     * ── 2026-08-14 (user : « le premier enchaînement répète l'épisode en cours, et ensuite
+     *   ça fonctionne ») ──────────────────────────────────────────────────────────────────
+     * Cause : « le suivant » se calculait à partir d'un COMPTEUR de position (`indexRutube`),
+     * pas à partir du clip réellement en train de jouer. Au tout premier enchaînement ce
+     * compteur peut être en retard d'un cran — la file venait d'être (re)construite depuis
+     * une autre liste, ou le clip figure deux fois (même titre en version Rutube ET YouTube)
+     * et c'est la PREMIÈRE occurrence qui était pointée. « Position + 1 » retombait alors
+     * pile sur le clip en cours → il se rejouait. Une fois cette répétition passée, le
+     * compteur était enfin aligné, d'où « ensuite ça enchaîne bien ».
+     *
+     * Correction : on part de l'IDENTIFIANT du clip qui vient de se terminer. C'est un fait,
+     * pas une supposition. Et on refuse de rendre ce même identifiant comme suivant.
+     */
+    private fun positionDeDepart(liste: List<ClipFile>, idTermine: String?): Int {
+        val parId = idTermine?.let { id -> liste.indexOfFirst { it.id == id } } ?: -1
+        return if (parId >= 0) parId else indexRutube
+    }
+
+    /** Commandes manuelles depuis la barre du dossier (⏮ ⏭) — pour rester au mini-lecteur. */
+    fun clipRutubeSuivant(): Boolean = lireClipRutubeSuivant()
+
+    fun clipRutubePrecedent(): Boolean {
+        val liste = fileRutube
+        val precedent = indexRutube - 1
+        if (liste.isEmpty() || precedent !in liste.indices) return false
+        val clip = liste[precedent]
+        indexRutube = precedent
+        Log.i(TAG, "file Rutube → clip précédent #$precedent : ${clip.titre}")
+        playChannel(clip.id, clip.titre, clip.poster)
+        return true
+    }
+
+    /**
+     * ── 2026-08-13 (user : « en plein écran, que ça zappe sur la vidéo suivante
+     *   automatiquement à la fin ») ───────────────────────────────────────────────────
+     * L'enchaînement automatique vivait UNIQUEMENT dans le mini-lecteur : en plein écran,
+     * c'est un autre composant qui joue, avec sa propre fin de lecture (prévue pour les
+     * épisodes de séries). Un clip s'arrêtait donc net.
+     * On avance ici dans la MÊME file (celle armée par le dossier), puis on relance le
+     * lecteur plein écran sur le clip suivant — même chemin de navigation que le passage
+     * mini → plein écran, donc rien de nouveau côté lecteur.
+     */
+    fun clipSuivantPourPleinEcran(idTermine: String? = null): ClipFile? {
+        val liste = fileRutube
+        if (liste.isEmpty()) return null
+        val depart = positionDeDepart(liste, idTermine)
+        val idCourant = idTermine ?: liste.getOrNull(depart)?.id
+        var suivant = if (lectureAleatoireRutube) {
+            if (liste.size == 1) 0 else {
+                liste.getOrNull(depart)?.let { titresJoues.add(cleTitre(it.titre)) }
+                var candidats = liste.indices.filter { i ->
+                    i != depart && liste[i].id != idCourant && cleTitre(liste[i].titre) !in titresJoues
+                }
+                if (candidats.isEmpty()) {
+                    titresJoues.clear()
+                    liste.getOrNull(depart)?.let { titresJoues.add(cleTitre(it.titre)) }
+                    candidats = liste.indices.filter { it != depart && liste[it].id != idCourant }
+                }
+                if (candidats.isEmpty()) return null
+                candidats.random()
+            }
+        } else depart + 1
+        // Filet : jamais deux fois de suite le même clip, quoi qu'il arrive en amont.
+        if (suivant in liste.indices && liste[suivant].id == idCourant) suivant += 1
+        if (suivant !in liste.indices) return null
+        indexRutube = suivant
+        return liste[suivant]
+    }
+
+    /** ⏮ en plein écran : recule d'un cran dans la file et relance le lecteur dessus. */
+    fun clipPrecedentEnPleinEcran(idCourant: String? = null): Boolean {
+        assurerFileClip(idCourant)
+        val liste = fileRutube
+        val precedent = indexRutube - 1
+        if (liste.isEmpty() || precedent !in liste.indices) return false
+        indexRutube = precedent
+        return lancerClipEnPleinEcran(liste[precedent])
+    }
+
+    /** Relance le PLEIN ÉCRAN sur le clip suivant de la file. false = fin de liste. */
+    fun enchainerClipEnPleinEcran(idCourant: String? = null): Boolean {
+        assurerFileClip(idCourant)
+        val clip = clipSuivantPourPleinEcran(idCourant) ?: return false
+        return lancerClipEnPleinEcran(clip)
+    }
+
+    /** Ouvre le lecteur plein écran sur un clip donné (utilisé par ⏮, ⏭ et l'enchaînement). */
+    private fun lancerClipEnPleinEcran(clip: ClipFile): Boolean {
+        val activity = com.streamflixreborn.streamflix.StreamFlixApp.currentActivity ?: return false
+        return try {
+            val videoType = com.streamflixreborn.streamflix.models.Video.Type.Episode(
+                id = clip.id, number = 1, title = clip.titre, poster = clip.poster,
+                overview = null,
+                tvShow = com.streamflixreborn.streamflix.models.Video.Type.Episode.TvShow(
+                    id = clip.id, title = clip.titre, poster = clip.poster,
+                    banner = null, releaseDate = null, imdbId = null,
+                ),
+                season = com.streamflixreborn.streamflix.models.Video.Type.Episode.Season(
+                    number = 1, title = "Clip",
+                ),
+            )
+            val args = android.os.Bundle().apply {
+                putString("id", clip.id)
+                putString("title", clip.titre)
+                putString("subtitle", clip.titre)
+                putSerializable("videoType", videoType)
+            }
+            val navHost = (activity as? androidx.fragment.app.FragmentActivity)
+                ?.supportFragmentManager
+                ?.findFragmentById(com.streamflixreborn.streamflix.R.id.nav_main_fragment)
+                as? androidx.navigation.fragment.NavHostFragment
+            if (navHost == null) {
+                Log.w(TAG, "enchaînement plein écran : NavHostFragment introuvable")
+                return false
+            }
+            Log.i(TAG, "plein écran → clip suivant : ${clip.titre}")
+            // 2026-08-13 (user : « le bouton retour revient sur la lecture d'avant au lieu de
+            //   quitter la vidéo ») : chaque clip enchaîné empilait un écran de lecture, donc
+            //   RETOUR les redescendait un par un. On REMPLACE désormais l'écran courant.
+            //   ⚠ La destination est `R.id.player` — surtout PAS `action_global_player`, qui
+            //   est l'ACTION : un popUpTo dessus ne dépile rien et la navigation échoue (c'est
+            //   ce qui avait provoqué la lecture en boucle plus tôt dans la soirée).
+            val options = androidx.navigation.NavOptions.Builder()
+                .setPopUpTo(com.streamflixreborn.streamflix.R.id.player, true)
+                .build()
+            navHost.navController.navigate(
+                com.streamflixreborn.streamflix.R.id.action_global_player, args, options,
+            )
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "enchaînement plein écran KO: ${e.message}"); false
+        }
+    }
+
+    /** Bascule lecture/pause du mini-lecteur. Retourne true si ça joue après l'appel. */
+    fun basculerLecture(): Boolean {
+        val p = player ?: return false
+        return if (p.isPlaying) { p.pause(); false } else { p.play(); true }
+    }
+
+    // ── 2026-08-13 (user : « pour pas qu'il tombe 2 fois sur le même nom de musique
+    //   d'affilée… sur 90 musiques, qu'il repasse vers la fin les autres qui sont
+    //   similaires ») ────────────────────────────────────────────────────────────────
+    //   En fusionnant Rutube + YouTube, un même morceau apparaît en PLUSIEURS versions
+    //   (« Numb », « Numb (Official Video) », « Numb [HD] »…). Un tirage purement au
+    //   hasard rejouait donc le même titre juste après. On tire désormais parmi les
+    //   morceaux DONT LE NOM n'a pas encore été joué ; quand tous sont passés, on repart
+    //   d'un tour neuf. Les doublons ne reviennent qu'en fin de cycle, comme demandé.
+    private val titresJoues = HashSet<String>()
+
+    /** Nom d'œuvre « nu » : sans accents, sans ponctuation, sans mentions de release. */
+    private fun cleTitre(t: String): String {
+        val sansAccents = java.text.Normalizer.normalize(t, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+        return sansAccents.lowercase()
+            .replace(Regex("\\((?:[^)]*)\\)|\\[[^\\]]*\\]"), " ")   // (Official Video), [HD]
+            .replace(
+                Regex(
+                    "\\b(official|officiel|officielle|video|videoclip|clip|audio|lyrics?|" +
+                        "paroles|hd|hq|4k|full|remaster(?:ed)?|live|version|mv|m/v)\\b",
+                ),
+                " ",
+            )
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+    }
+
+    /** Enchaîne le clip suivant (ou un au hasard). Retourne false s'il n'y a plus rien. */
+    private fun lireClipRutubeSuivant(): Boolean {
+        val liste = fileRutube
+        if (liste.isEmpty()) return false
+        // Le clip qui vient de finir est celui du mini-lecteur : on part de LUI (cf.
+        //   `positionDeDepart`), pas du compteur, qui pouvait être en retard d'un cran.
+        val idCourant = currentChannelId
+        val depart = positionDeDepart(liste, idCourant)
+        var suivant = if (lectureAleatoireRutube) {
+            if (liste.size == 1) 0 else {
+                // Marque le morceau courant comme joué, puis tire parmi les NOMS inédits.
+                liste.getOrNull(depart)?.let { titresJoues.add(cleTitre(it.titre)) }
+                var candidats = liste.indices.filter { i ->
+                    i != depart && liste[i].id != idCourant && cleTitre(liste[i].titre) !in titresJoues
+                }
+                if (candidats.isEmpty()) {
+                    // Tour complet : on repart à zéro (en gardant le morceau courant hors jeu)
+                    //   → les versions similaires ne reviennent qu'à ce moment-là.
+                    Log.d(TAG, "aléatoire Rutube : tous les titres joués → nouveau tour")
+                    titresJoues.clear()
+                    liste.getOrNull(depart)?.let { titresJoues.add(cleTitre(it.titre)) }
+                    candidats = liste.indices.filter { it != depart && liste[it].id != idCourant }
+                }
+                if (candidats.isEmpty()) return false
+                candidats.random()
+            }
+        } else depart + 1
+        // Filet : jamais deux fois de suite le même clip.
+        if (suivant in liste.indices && liste[suivant].id == idCourant) suivant += 1
+        if (suivant !in liste.indices) {
+            Log.d(TAG, "file Rutube terminée (fin de liste)")
+            return false
+        }
+        val clip = liste[suivant]
+        indexRutube = suivant
+        Log.i(TAG, "file Rutube → clip suivant #$suivant : ${clip.titre}")
+        playChannel(clip.id, clip.titre, clip.poster)
+        return true
+    }
+
     private fun handleEndedOrIdle(playbackState: Int) {
         val curChIdForEnd = currentChannelId ?: return
+        // Clip Rutube/YouTube terminé → on enchaîne, on ne recharge PAS (ce n'est pas du direct).
+        if (curChIdForEnd.startsWith("livehub::rutube::") || curChIdForEnd.startsWith("livehub::ytclip::")) {
+            if (playbackState == Player.STATE_ENDED && lireClipRutubeSuivant()) return
+            return
+        }
         val isLiveIptvForEnd = curChIdForEnd.startsWith("ch::") || curChIdForEnd.startsWith("sport::") ||
             curChIdForEnd.startsWith("ola::") || curChIdForEnd.startsWith("ola_ep::") ||
             curChIdForEnd.startsWith("vegeta::") || curChIdForEnd.startsWith("vegeta_ep::") ||
@@ -1353,6 +1634,29 @@ object MiniPlayerController {
                 counter++
                 val p = player ?: continue
                 try {
+                    // ── 2026-08-14 (user : « j'ai bien peur que le mini lecteur ne passe pas
+                    //   à la lecture suivante, il n'est pas équipé comme le grand ») ─────────
+                    //   Exact : le mini n'avait QUE `STATE_ENDED`, que ces flux n'envoient pas
+                    //   toujours. On lui donne donc le MÊME déclencheur que le grand (celui
+                    //   des séries) : « la position a atteint la fin ». Placé AVANT le test
+                    //   `isPlaying`, car en fin de vidéo la lecture s'arrête justement.
+                    val idClip = currentChannelId
+                    if (!finClipTraitee && idClip != null &&
+                        (idClip.startsWith("livehub::rutube::") || idClip.startsWith("livehub::ytclip::"))
+                    ) {
+                        val duree = try { p.duration } catch (_: Throwable) { 0L }
+                        val position = try { p.currentPosition } catch (_: Throwable) { 0L }
+                        val marge = com.streamflixreborn.streamflix.utils.UserPreferences
+                            .autoplayBuffer * 1000L
+                        if (duree > 0 && duree != androidx.media3.common.C.TIME_UNSET &&
+                            position >= duree - marge
+                        ) {
+                            finClipTraitee = true
+                            val ok = lireClipRutubeSuivant()
+                            Log.i(TAG, "fin de clip mini ($position/$duree) → clip suivant : $ok")
+                            continue
+                        }
+                    }
                     if (!p.isPlaying) continue
                     val pos = p.currentPosition
                     val buf = p.bufferedPosition
@@ -1700,6 +2004,17 @@ object MiniPlayerController {
 
             override fun getMinimumLoadableRetryCount(dataType: Int): Int = 6
         }
+
+    /**
+     * 2026-08-11 — Hôtes qui refusent la pile HTTP d'Android (`HttpURLConnection`).
+     * Ils renvoient un corps vide à ce client et servent normalement OkHttp.
+     * Symptôme : « Source error » en ~100 ms sur tous les serveurs de la chaîne, avec
+     * `ParserException: Input does not start with the #EXTM3U header`.
+     * Suffixe de nom d'hôte, comparé en minuscules.
+     */
+    private val HOTES_REFUSANT_PILE_ANDROID = listOf(
+        "rtp.pt",
+    )
 
     fun initPlayer(context: Context) {
         // 2026-06-09 : stocker l'appContext pour le foreground service.
@@ -2304,6 +2619,46 @@ object MiniPlayerController {
         } catch (e: Exception) {
             Log.w(TAG, "playChannel: could not configure text tracks: ${e.message}")
         }
+        // ── 2026-08-13 (user : « j'ai lancé la lecture 1080p à la main, ça fonctionne ; faut
+        //   que l'ExoPlayer prenne directement la meilleure ») ──────────────────────────────
+        //   VOILÀ POURQUOI LA QUALITÉ RESTAIT BASSE, ET CE N'ÉTAIT PAS YOUTUBE :
+        //   un plafond FIXE de 854x480 est posé sur le lecteur à sa création (16/06, pour
+        //   empêcher le yoyo ABR 576p↔720p qui provoquait des resets de codec sur les chaînes
+        //   EN DIRECT). Il s'appliquait à TOUT, donc aussi aux clips — d'où le 1080p présent
+        //   dans la liste mais jamais choisi tout seul.
+        //   Un clip est de la VOD : pas de bord live, pas de yoyo à craindre. On lève donc le
+        //   plafond POUR LUI SEUL, et on le remet pour le direct — le comportement des chaînes
+        //   ne change pas d'un pouce.
+        try {
+            val p = player
+            if (p != null) {
+                val estClip = channelId.startsWith("livehub::rutube::") ||
+                    channelId.startsWith("livehub::ytclip::")
+                p.trackSelectionParameters = p.trackSelectionParameters.buildUpon().apply {
+                    if (estClip) {
+                        setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+                        // Démarre d'emblée sur la meilleure piste au lieu de monter par paliers.
+                        setForceHighestSupportedBitrate(true)
+                    } else {
+                        setMaxVideoSize(854, 480)
+                        setForceHighestSupportedBitrate(false)
+                    }
+                }.build()
+                Log.d(TAG, "qualité : ${if (estClip) "PLAFOND LEVÉ (clip VOD)" else "cap 854x480 (direct)"}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "playChannel: cap qualité non appliqué: ${e.message}")
+        }
+        // ── 2026-08-13 : ARMEMENT DE LA FILE, ICI ET PAS AILLEURS ────────────────────────
+        //   L'enchaînement ne partait jamais et ⏭ ne faisait rien : la file était VIDE.
+        //   Elle n'était remplie qu'au clic dans la grille du dossier — donc dès qu'un clip
+        //   démarrait autrement (favoris ❤, recherche du hub, reprise, passage en plein
+        //   écran), il n'y avait plus rien derrière lui. Angle mort de ma conception.
+        //   On l'arme donc au SEUL endroit par lequel TOUTE lecture passe : ici.
+        //   La liste vient de la dernière grille affichée, que le dossier publie déjà dans
+        //   `folderContents["__grid_active"]` — aucune requête réseau, aucun état en plus.
+        finClipTraitee = false
+        assurerFileClip(channelId)
         // 2026-06-10 (user "comme Wiseplay : dossiers explorables") : si
         //   l'ID est un folder World Live → ouvre le dialog explorer au lieu
         //   de tenter de jouer (un folder n'a pas de stream).
@@ -2912,7 +3267,20 @@ object MiniPlayerController {
             //   Cronet pour son JA3 fingerprint anti-pub VYPN), on bascule
             //   sur le même pattern que le grand. Vavoo garde OkHttp+Cronet.
             val isVavoo = channelId.startsWith("vavoo::")
-            val isIptvNonVavoo = isLiveChannel && !isVavoo
+            // ⚠ 2026-08-11 — CERTAINS CDN REFUSENT LA PILE HTTP D'ANDROID.
+            //   `DefaultHttpDataSource` s'appuie sur `HttpURLConnection`. Le CDN de la RTP
+            //   lui renvoie un corps vide : ExoPlayer lève « Input does not start with the
+            //   #EXTM3U header » en une centaine de millisecondes, sur tous les serveurs.
+            //   Preuve sur cet appareil, même URL, même `User-Agent: IE`, à treize minutes
+            //   d'écart :
+            //     DefaultHttpDataSource → Source error, six fois de suite
+            //     OkHttpDataSource      → « Playback ready » en 2,8 s
+            //   Vavoo faisait déjà exception dans l'autre sens (il lui faut Cronet).
+            val hoteFlux = runCatching {
+                java.net.URI(video.source).host.orEmpty().lowercase()
+            }.getOrDefault("")
+            val exigeOkHttp = HOTES_REFUSANT_PILE_ANDROID.any { hoteFlux.endsWith(it) }
+            val isIptvNonVavoo = isLiveChannel && !isVavoo && !exigeOkHttp
             val dsFactory: androidx.media3.datasource.DataSource.Factory? = if (isIptvNonVavoo) {
                 val ua = perVideoHeaders["User-Agent"]
                     ?: com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT
@@ -2925,8 +3293,32 @@ object MiniPlayerController {
                 Log.d(TAG, "Using DefaultHttpDataSource + LiveReconnecting (aligné grand lecteur) ua=$ua")
                 com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
             } else {
+                if (exigeOkHttp) {
+                    // Le User-Agent de la playlist doit suivre sur cette pile aussi : sans
+                    //   lui le CDN de la RTP répond 204 avec un corps vide (mesuré).
+                    val ua = perVideoHeaders["User-Agent"]
+                    if (ua != null) runCatching {
+                        (httpDataSourceFactory as? androidx.media3.datasource.okhttp.OkHttpDataSource.Factory)
+                            ?.setUserAgent(ua)
+                    }
+                    Log.d(TAG, "Using OkHttpDataSource (hôte $hoteFlux refuse la pile Android) ua=$ua")
+                }
                 httpDataSourceFactory
             }
+            // 2026-08-11 — JOURNAL DE COMPARAISON ENTRE PROVIDERS.
+            //   RTP Notícias lit depuis Mon IPTV et pas depuis World Live, avec la même URL,
+            //   le même User-Agent et la même pile réseau. La différence restante ne peut
+            //   être que dans ce qu'on remet au lecteur : on l'imprime pour comparer les
+            //   deux providers ligne à ligne au lieu de continuer à supposer.
+            Log.d(
+                TAG,
+                "DIAG lecture — cid=$channelId type=${video.type} drm=${video.drmType} " +
+                    "entetes=${perVideoHeaders.keys.sorted()} " +
+                    "ua=${perVideoHeaders["User-Agent"]} " +
+                    "referer=${perVideoHeaders["Referer"] ?: perVideoHeaders["Referrer"]} " +
+                    "origin=${perVideoHeaders["Origin"]} " +
+                    "isHls=$isHls isDash=$isDash url=${video.source.take(90)}"
+            )
             // 2026-06-22 : marquer la génération du media qui va être chargé.
             //   onPlayerError ne traitera que les erreurs de CETTE génération.
             activeMediaGeneration = gen
@@ -2987,7 +3379,23 @@ object MiniPlayerController {
                 p.setMediaSource(hlsSource)
                 Log.d(TAG, "HlsMediaSource inline mini (mirror grand, cid=$channelId, cache=${cache != null})")
             } else if (isDash && dsFactory != null) {
-                val dashFactory = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dsFactory)
+                // 2026-08-13 — POURQUOI LE HD YOUTUBE ÉCHOUAIT (« Source error » en 13 ms) :
+                //   `dsFactory` est une fabrique HTTP (elle porte les en-têtes par vidéo). Elle
+                //   ne sait PAS ouvrir un `file://`, et notre manifeste DASH YouTube est un
+                //   fichier local. Le refus était donc immédiat, avant tout réseau — le
+                //   manifeste, lui, était valide (vérifié dans les logs : 1080p, plages
+                //   d'octets cohérentes, durée correcte).
+                //   `DefaultDataSource` aiguille selon le schéma : `file://` en local, `https://`
+                //   vers la fabrique HTTP d'origine. Les segments gardent donc leurs en-têtes.
+                //   N'entre en jeu QUE pour un manifeste local : tous les DASH distants
+                //   (TF1+, M6+, Pluto…) passent exactement comme avant.
+                val dsFactoryDash: androidx.media3.datasource.DataSource.Factory =
+                    if (video.source.startsWith("file://")) {
+                        androidx.media3.datasource.DefaultDataSource.Factory(
+                            com.streamflixreborn.streamflix.StreamFlixApp.instance, dsFactory,
+                        ).also { Log.d(TAG, "DASH local → DefaultDataSource (file:// + https)") }
+                    } else dsFactory
+                val dashFactory = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dsFactoryDash)
                 // v38 : Widevine DRM pour TF1+ VOD aussi dans le mini-lecteur.
                 //   Sans ça, films TF1+ écran noir + son crypté (cf v34/v37 fullscreen).
                 // 2026-06-19 : étendu pour M6+ (même pattern).

@@ -83,6 +83,9 @@ object ArtworkRepair {
         //   "📁 adrar" / "📁 sport" sur TMDB → erreur "Channel inconnue" +
         //   alloc CPU/RAM gratuit + logs spam.
         if (tvShow.id.startsWith("livehub::folder::")) return null
+        // 2026-08-13 : cartes Rutube (dossier « 🎵 Rutube » + clips) = synthétiques, pas de
+        //   repair TMDB (évite un getTvShow réseau répété par le worker sur ces ids).
+        if (tvShow.id.startsWith("livehub::rutube")) return null
         // Skip aussi les autres cards IPTV synthétiques (login, refresh, replay)
         if (tvShow.id.startsWith("livehub::replay::__")) return null
         if (tvShow.id == "livehub::replay::__refresh__") return null

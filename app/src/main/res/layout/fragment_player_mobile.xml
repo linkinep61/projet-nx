@@ -376,7 +376,7 @@
         android:padding="0dp"
         android:visibility="gone"
         app:layout_constraintWidth_default="percent"
-        app:layout_constraintWidth_percent="0.2"
+        app:layout_constraintWidth_percent="0.33"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toBottomOf="parent">

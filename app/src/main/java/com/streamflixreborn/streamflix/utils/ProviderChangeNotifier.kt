@@ -57,6 +57,11 @@ object ProviderChangeNotifier {
         if (forceRelaunch) forceRelaunchSequence++
         _flow.tryEmit(Unit)
         purgePreviousProviderArtwork()
+        // 2026-08-13 (user : « à la fermeture du TV Hub, ça devrait effacer les derniers
+        //   résultats — pas avant ») : on quitte le provider → le dossier Rutube oublie sa
+        //   grille. Tant qu'on RESTE dans le TV Hub, elle est gardée en mémoire et le dossier
+        //   se rouvre instantanément ; en sortant, la prochaine entrée repart propre.
+        try { com.streamflixreborn.streamflix.providers.RutubeFolder.oublierResultats() } catch (_: Throwable) {}
         try { com.streamflixreborn.streamflix.providers.AnimeSamaProvider.resetState() } catch (_: Throwable) {}
     }
 

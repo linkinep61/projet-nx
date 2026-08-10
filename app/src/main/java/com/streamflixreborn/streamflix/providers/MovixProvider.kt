@@ -102,6 +102,84 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     private var serviceInitialized = false
     private val initializationMutex = Mutex()
 
+    // ══════════════════════════════════════════════════════════════════════════════════
+    // 2026-08-11 — CONTRÔLE D'IDENTITÉ DE L'ÉPISODE SERVI (user : « faut éviter d'avoir
+    //   des mauvais matchs, c'est la priorité dans cette application »)
+    //
+    // LE PROBLÈME. Sur « La Quatrième Dimension » (TMDB 6357, 1959, noir et blanc,
+    //   26 min), l'endpoint tmdb-tv rendait 12 lecteurs pointant sur un fichier EN
+    //   COULEUR de 47 min. On demande pourtant le bon identifiant.
+    //
+    // LA CAUSE. Quatre séries portent le titre « The Twilight Zone » chez TMDB :
+    //     6357   1959   La Quatrième Dimension
+    //     1918   1985   La Cinquième Dimension
+    //     16399  2002   La Treizième Dimension
+    //     83135  2019   The Twilight Zone : La Quatrième Dimension
+    //   Movix les confond et sert le remake de 2019.
+    //
+    // LA PREUVE, capturée en direct sur l'Oppo. Movix SE CONTREDIT dans sa propre réponse :
+    //     "tmdb_details":  {"title":"La Quatrième Dimension","release_date":"1959-10-02"}
+    //     "current_episode":{"title":"The Twilight Zone : La Quatrième Dimension - S01E04…"}
+    //   Il confirme l'œuvre demandée, puis annonce l'épisode d'une autre. Le titre déclaré
+    //   est mot pour mot celui de la série 2019.
+    //
+    // POURQUOI PAS LA DURÉE (piste abandonnée, décision user). Une pub incrustée dans le
+    //   flux fausse la mesure, et on supprimerait alors un bon serveur. Ici on ne mesure
+    //   rien : on compare deux chaînes que Movix nous donne lui-même, dans la même
+    //   réponse, sans une seule requête de plus. Un encodage ne change pas un titre.
+    //
+    // POURQUOI UNE ÉGALITÉ ET PAS UN « CONTAINS » NI UN CONTRÔLE DE MOTS EN TROP. Le titre
+    //   de 2019 CONTIENT celui de 1959, et il est entièrement bâti sur les mots des deux
+    //   titres connus de 1959 (« The Twilight Zone » + « La Quatrième Dimension »). Un
+    //   test d'inclusion le laisse passer ; un contrôle de vocabulaire aussi, puisqu'il
+    //   n'introduit aucun mot étranger. Seule l'égalité tranche.
+    // ══════════════════════════════════════════════════════════════════════════════════
+
+    /** Retire accents, ponctuation et espaces multiples. */
+    private fun normTitre(s: String?): String {
+        if (s.isNullOrBlank()) return ""
+        val sansAccent = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+        return sansAccent.lowercase()
+            .replace(Regex("[^a-z0-9 ]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    /**
+     * Isole le nom de l'ŒUVRE dans le titre d'épisode déclaré par Movix.
+     *
+     * Format observé : `<œuvre> - S01E04 <œuvre> 1x4`. On coupe au premier marqueur de
+     * position, et on retire une éventuelle année entre parenthèses.
+     */
+    private fun oeuvreDansTitreEpisode(titreEpisode: String?): String {
+        if (titreEpisode.isNullOrBlank()) return ""
+        val coupe = Regex("(?i)\\s*[-–|]?\\s*(s\\d{1,3}\\s*e\\d{1,3}|\\d{1,3}x\\d{1,3}|episode\\s*\\d+)")
+            .find(titreEpisode)?.range?.first
+        val brut = if (coupe != null && coupe > 0) titreEpisode.substring(0, coupe) else titreEpisode
+        return normTitre(brut.replace(Regex("\\(\\s*\\d{4}\\s*\\)"), " "))
+    }
+
+    /**
+     * L'épisode annoncé appartient-il bien à l'œuvre demandée ?
+     *
+     * @return `true` si on garde (correspondance, ou information absente — dans le doute on
+     *   ne supprime jamais), `false` si Movix déclare explicitement une autre œuvre.
+     */
+    private fun titreOeuvreCorrespond(
+        titreEpisode: String?,
+        details: TmdbMovixDetails?,
+        titresConnus: List<String>,
+    ): Boolean {
+        val declare = oeuvreDansTitreEpisode(titreEpisode)
+        if (declare.isBlank()) return true          // rien de déclaré → on ne juge pas
+        val attendus = (
+            listOfNotNull(details?.title, details?.original_title) + titresConnus
+            ).map { normTitre(it) }.filter { it.isNotBlank() }.distinct()
+        if (attendus.isEmpty()) return true         // rien à comparer → on ne juge pas
+        return attendus.any { it == declare }
+    }
+
     private const val TMDB_API_KEY = "f3d757824f08ea2cff45eb8f47ca3a1e"
     private const val TMDB_BASE_URL = "https://api.themoviedb.org/3/"
     private const val TMDB_IMG_W500 = "https://image.tmdb.org/t/p/w500"
@@ -747,7 +825,21 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val player_links: List<TmdbMovixPlayerLink>?
     )
 
+    /**
+     * Fiche de l'œuvre telle que Movix la RENVOIE pour l'id qu'on lui a demandé.
+     * 2026-08-11 : ce bloc existait dans la réponse depuis toujours ; Gson le jetait
+     *   silencieusement faute de champ correspondant. C'est lui qui permet de confondre
+     *   Movix quand il attache l'épisode d'une AUTRE série — voir [titreOeuvreCorrespond].
+     */
+    data class TmdbMovixDetails(
+        val id: Int?,
+        val title: String?,
+        val original_title: String?,
+        val release_date: String?
+    )
+
     data class TmdbMovixTvResponse(
+        val tmdb_details: TmdbMovixDetails?,
         val current_episode: TmdbMovixEpisode?,
         val seasons: List<Any>?
     )
@@ -2240,6 +2332,14 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         }
                     }
 
+                    // 2026-08-14 (user : « j'ai des serveurs toujours énumérés TMDb alors que
+                    //   TMDB ne fournit aucun serveur, j'avais demandé de retirer cette étiquette
+                    //   car ce n'est pas vrai ») : il avait raison. Ces serveurs viennent de
+                    //   l'endpoint `api/tmdb/movie/{id}` de MOVIX — « tmdb » n'y désigne que la
+                    //   CLÉ DE RECHERCHE (on interroge Movix par identifiant TMDB), pas la source
+                    //   du flux. L'étiquette annonçait donc un fournisseur qui n'existe pas.
+                    //   Le vrai fournisseur est Movix, comme pour les autres endpoints du fichier
+                    //   (« Wiflix · », « FS · », « CPasMal · »).
                     val tmdbMovixDeferred = async {
                         runEndpoint("tmdb-movie") {
                             val tmdbMovix = movixServiceInstance.getTmdbMovixMovie(tmdbId)
@@ -2251,7 +2351,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     else link.language ?: ""
                                 val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
                                 val playerName = guessPlayerName(url)
-                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "TMDb · $playerName - $qualityLabel ($lang)", src = url))
+                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "Movix · $playerName - $qualityLabel ($lang)", src = url))
                             }
                             list
                         }
@@ -2502,6 +2602,25 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         runEndpoint("tmdb-tv") {
                             val tmdbMovix = movixServiceInstance.getTmdbMovixTv(tmdbId, seasonNum, episodeNum)
                             val list = mutableListOf<Video.Server>()
+                            // ── CONTRÔLE D'IDENTITÉ ────────────────────────────────────
+                            // Movix déclare le titre de l'épisode qu'il sert. S'il annonce une
+                            //   AUTRE œuvre que celle demandée, on jette les 12 lecteurs d'un
+                            //   coup : ils pointent tous sur la mauvaise série. Voir le pavé
+                            //   explicatif près de `titreOeuvreCorrespond`.
+                            val ep = tmdbMovix.current_episode
+                            val titresOeuvre = listOfNotNull(
+                                videoType.tvShow.title.takeIf { it.isNotBlank() },
+                            )
+                            if (ep != null && !titreOeuvreCorrespond(ep.title, tmdbMovix.tmdb_details, titresOeuvre)) {
+                                Log.w(
+                                    "MovixProvider",
+                                    "tmdb-tv ÉCARTÉ — mauvaise œuvre. Demandé « ${
+                                        tmdbMovix.tmdb_details?.title ?: videoType.tvShow.title
+                                    } » (tmdb=$tmdbId, S${seasonNum}E$episodeNum), Movix déclare " +
+                                        "« ${ep.title} » → ${ep.player_links?.size ?: 0} lecteur(s) supprimé(s)",
+                                )
+                                return@runEndpoint list
+                            }
                             tmdbMovix.current_episode?.player_links?.forEach { link ->
                                 val url = link.decoded_url ?: return@forEach
                                 if (url.isBlank()) return@forEach
@@ -2509,7 +2628,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     else link.language ?: ""
                                 val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
                                 val playerName = guessPlayerName(url)
-                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "TMDb · $playerName - $qualityLabel ($lang)", src = url))
+                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "Movix · $playerName - $qualityLabel ($lang)", src = url))
                             }
                             list
                         }

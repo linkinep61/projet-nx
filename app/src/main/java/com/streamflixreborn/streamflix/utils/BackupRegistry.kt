@@ -63,14 +63,27 @@ object BackupRegistry {
     //   de backup, avec un libellé lisible. La VALEUR (1er) doit correspondre EXACTEMENT au nom
     //   passé à emit(...) — c'est la clé du gate (UserPreferences.isBackupSourceEnabled). Le 2ᵉ =
     //   libellé affiché dans le toggle. Sert à peupler le MultiSelect des Paramètres.
+    // ⚠ 2026-08-11 (user : « j'ai vu ok.ru, Cloudstream qui sont toujours présents » après un
+    //   « tout désactiver ») : QUATRE sources émises manquaient à cette liste — `archive.org`,
+    //   `Moviebox`, `NetMirror` et `ok.ru`. Comme `isBackupSourceEnabled` renvoyait `true` pour
+    //   tout nom absent d'ici, elles étaient INDÉSACTIVABLES et n'apparaissaient nulle part.
+    //   Vérification faite en extrayant les 23 `emit("…")` du fichier et en les comparant à
+    //   cette liste — c'est la seule méthode fiable, l'œil ne suffit pas sur 2 000 lignes.
+    //   ⚠ RÈGLE : tout nouvel `emit("X")` DOIT ajouter "X" ici, sinon la source échappe au
+    //   réglage utilisateur sans que personne ne s'en aperçoive.
     val BACKUP_SOURCES: List<Pair<String, String>> = listOf(
         "Cloudstream" to "Cloudstream",
+        "ok.ru" to "ok.ru (VF/VOSTFR)",
+        "archive.org" to "archive.org (vieux films/séries)",
+        "Moviebox" to "Moviebox",
+        "NetMirror" to "NetMirror (Netflix/Prime/Hotstar)",
         "Movix" to "Movix",
         "Frembed" to "Frembed",
         "Vidzy" to "Vidzy (par TMDB)",
         "Nakios" to "Nakios",
         "LoiFlix" to "LoiFlix",
         "Nabistream" to "Nabistream (dramas)",
+        "Rutube" to "Rutube (films/séries FR)",
         "TV Hub" to "TV Hub (France.tv/Arte gratuit)",
         "FileSearch" to "FileSearch (fichiers directs)",
         "Webflix" to "Webflix",
@@ -145,7 +158,7 @@ object BackupRegistry {
     //   VAGUE 2 : tout le reste (5 à 10 s), léger décalage.
     private val SOURCES_VAGUE_1 = setOf(
         "NetMirror", "Vidzy", "Frembed", "Movix", "Embed", "Yablom",
-        "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios",
+        "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios", "Rutube",
     )
     private val SOURCES_VAGUE_3 = setOf(
         "aplouf", "FrenchStream", "1Jour1Film", "Papadustream V2", "Papadustream",
@@ -186,6 +199,7 @@ object BackupRegistry {
         "LoiFlix" -> "https://zoolingz.com"
         "AfterDark" -> "https://afterdark06.mom"
         "Nabistream" -> "https://nabistream.mom"
+        "Rutube" -> "https://rutube.ru"
         "TV Hub" -> "https://api.arte.tv"
         "FileSearch" -> "https://filesearch.tools"
         "Movix" -> "https://movix.date"
@@ -929,6 +943,20 @@ object BackupRegistry {
         //   (dramas asiatiques…) sur un contenu qui n'en relève pas. null = inconnue → on ne
         //   saute rien (filtre à sens unique, comme pour l'animation).
         var langueOriginale: String? = null
+        // 2026-08-11 — DURÉE ATTENDUE (secondes), lue sur la fiche TMDB déjà chargée juste en
+        //   dessous : aucune requête supplémentaire. Sert de discriminant aux backups par
+        //   TITRE qui, sans elle, ne savent pas distinguer une bande-annonce du film.
+        //   Mesuré sur archive.org / « La Nuit des morts-vivants » : trois items au titre,
+        //   à l'année et à la langue exacts, contenant des fichiers de 200 s et 68 s.
+        //   ⚠ AJOUT SEULEMENT : rien d'existant ne la consomme, ok.ru continue de recevoir
+        //   `runtimeS = null` et son garde-fou interne, inchangé.
+        //   ⚠ DEUX bornes, pas une. TMDB rend une LISTE de durées pour une série, et beaucoup
+        //   de séries mélangent les formats — La Quatrième Dimension a des épisodes de 25 min
+        //   (saisons 1-3 et 5) et de 51 min (saison 4). Un plancher calculé sur la plus longue
+        //   écarte tous les courts : mesuré, l'épisode S1E03 de 1471 s était rejeté face à un
+        //   plancher de 2448 s. Plancher sur la plus COURTE, plafond sur la plus LONGUE.
+        var runtimeSecondes: Int? = null
+        var runtimeMaxSecondes: Int? = null
         if (!resolvedTmdbId.isNullOrBlank()) {
             try {
                 val idInt = resolvedTmdbId.toIntOrNull()
@@ -953,6 +981,10 @@ object BackupRegistry {
                         langueOriginale = d.originalLanguage?.lowercase()
                         // Confirmé PAS de l'animation : genres connus ET genre 16 (Animation) absent
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
+                        // Durée du FILM (TMDB la donne en minutes) : une seule valeur, les
+                        //   deux bornes sont donc identiques.
+                        runtimeSecondes = d.runtime?.takeIf { it > 0 }?.times(60)
+                        runtimeMaxSecondes = runtimeSecondes
                         // Année déduite si le provider n'en a pas fourni.
                         if (effectiveYear == null) effectiveYear = d.releaseDate?.take(4)?.toIntOrNull()
                     } else {
@@ -972,6 +1004,14 @@ object BackupRegistry {
                         if (d.originalLanguage == "ja") isAnimeContent = true
                         langueOriginale = d.originalLanguage?.lowercase()
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
+                        // Durée d'un ÉPISODE. TMDB rend une LISTE parce qu'une série peut
+                        //   mélanger les formats : La Quatrième Dimension déclare 25 ET 51 min.
+                        //   On garde les DEUX extrêmes — la plus courte fait le plancher, la
+                        //   plus longue le plafond. (Première version : `maxOrNull()` pour les
+                        //   deux, ce qui écartait tous les épisodes courts de la série.)
+                        val durees = d.episodeRuntime.filter { it > 0 }
+                        runtimeSecondes = durees.minOrNull()?.times(60)
+                        runtimeMaxSecondes = durees.maxOrNull()?.times(60)
                         // Année déduite si le provider n'en a pas fourni.
                         if (effectiveYear == null) effectiveYear = d.firstAirDate?.take(4)?.toIntOrNull()
                     }
@@ -1354,6 +1394,28 @@ object BackupRegistry {
                 val servers = mutableListOf<Video.Server>()
                 // Videasy "fr" → taggé "VOSTFR" par l'extracteur.
                 runCatching { VideasyExtractor().server(tmdbVt, "fr") }.getOrNull()?.let { servers.add(it) }
+
+                // ⚠ 2026-08-11 — NE PAS RAJOUTER VixSrc / Vidsrc.net / VidLink / Vidsrc.Ru /
+                //   2Embed ICI. Fait ce jour-là, puis défait le jour même, deux fois.
+                //
+                //   Ils vivaient dans TmdbProvider. Quand le user a demandé que TMDb cesse
+                //   d'émettre des serveurs (« il peut recevoir, mais il n'émet pas »), je les
+                //   ai déplacés ici pour ne rien lui faire perdre. Erreur : ce sont des
+                //   services d'embed INTERNATIONAUX, leur défaut est l'anglais.
+                //
+                //   Sans marqueur de langue dans leur nom, le tri les prenait pour du VF et
+                //   les mettait EN TÊTE, devant les vrais serveurs français. Le user l'a vu en
+                //   une ouverture : « ils me proposent des serveurs qui ne sont pas dans la
+                //   bonne langue ». J'ai alors proposé de les étiqueter « VO » pour qu'ils
+                //   descendent au fond — il a tranché, et il a raison : « si tu penses que ces
+                //   serveurs ne diffuseront jamais du VF ou du VOSTFR, ça sert à rien de les
+                //   garder là ». C'est le cas. Ils ne servent pas de français.
+                //
+                //   C'était déjà la décision du 2026-07-03 (« que du VF/VOSTFR, le reste ça
+                //   sert à rien »). Règle de l'app : VF ou VOSTFR, rien d'autre.
+                //
+                //   Seul Videasy « fr » reste, parce qu'il sert bien du VOSTFR et que son
+                //   extracteur l'étiquette comme tel — donc trié correctement.
                 if (servers.isNotEmpty()) Log.i(TAG, "Embed TMDB → Videasy VOSTFR pour tmdbId=$resolvedTmdbId")
                 servers
             } }
@@ -1471,6 +1533,65 @@ object BackupRegistry {
                             //   en passant le vrai runtime quand on l'aura sous la main.
                             runtimeS = null,
                             titreEpisodeFr = null,
+                        )
+                }
+            }
+
+            // ── ARCHIVE.ORG (par titre) — vieilles séries et films FR du domaine public ──
+            // 2026-08-11 (user : « tu vas ajouter archivesorg à l'application comme tu as fait
+            //   pour ok.ru… on peut choper des très vieilles séries dedans ») : Internet Archive
+            //   héberge des séries des années 50-70 doublées en français que plus aucun site de
+            //   streaming n'indexe — La Quatrième Dimension, Zorro, Les Envahisseurs, Chapeau
+            //   melon et bottes de cuir…
+            //
+            //   Un « item » archive.org est un CONTENEUR : celui de La Quatrième Dimension porte
+            //   310 vidéos, soit la série entière. Le provider cherche donc l'item par titre,
+            //   puis l'ÉPISODE par son nom de fichier — voir l'en-tête d'ArchiveOrgProvider.
+            //
+            //   Règle de langue STRICTE (la même que pour ok.ru) : VF ou VOSTFR prouvés, jamais
+            //   de VO. Les sources qui n'ont que du VOSTFR sont étiquetées « VOSTFR » en clair.
+            //
+            //   ⚠ `runtimeSecondes` est le discriminant décisif ici : mesuré sur « La Nuit des
+            //   morts-vivants », archive.org rend trois items au titre, à l'année et à la langue
+            //   exacts dont les fichiers font 200 s et 68 s — des bandes-annonces. Seule la durée
+            //   les écarte.
+            launch {
+                emit("archive.org") {
+                    com.streamflixreborn.streamflix.providers.ArchiveOrgProvider
+                        .fetchArchiveOrgBackupServers(
+                            titres = knownTitles.toList(),
+                            saison = key.season,
+                            episode = key.episode,
+                            annee = effectiveYear,
+                            runtimeMinS = runtimeSecondes,
+                            runtimeMaxS = runtimeMaxSecondes,
+                        )
+                }
+            }
+
+            // ── RUTUBE (par titre) — plateforme vidéo russe, films/séries FR sans pub ──
+            // 2026-08-13 (user : « j'ai trouvé un nouveau site à intégrer… ça va faire comme
+            //   ok.ru / archive.org, on aura du contenu supplémentaire ») : Rutube héberge des
+            //   films et de vieilles séries doublés/sous-titrés FR que les sites de l'app
+            //   n'indexent pas (l'exemple du user : « Inspecteur Derrick » en VF). API propre,
+            //   anonyme, sans Cloudflare. Matching STRICT (titre complet + année/SxxExx + durée
+            //   TMDB), langue par le titre (marqueur VF/VOSTFR ou titre FR demandé), is_paid
+            //   écarté (anti-DRM). Voir RutubeProvider.
+            launch {
+                emit("Rutube") {
+                    com.streamflixreborn.streamflix.providers.RutubeProvider
+                        .fetchRutubeBackupServers(
+                            titres = knownTitles.toList(),
+                            titreFr = key.title,
+                            saison = key.season,
+                            episode = key.episode,
+                            annee = effectiveYear,
+                            runtimeMinS = runtimeSecondes,
+                            runtimeMaxS = runtimeMaxSecondes,
+                            // Titre FR de l'épisode : Rutube nomme les épisodes par leur NOM
+                            //   (« Inspecteur Derrick- Appel De Nuit »), jamais « S01E02 ». Sans
+                            //   lui, aucun épisode Rutube ne matchait — l'exemple même du user.
+                            titreEpisodeFr = (videoType as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.title,
                         )
                 }
             }
@@ -1934,6 +2055,29 @@ object BackupRegistry {
                                 if (altQuery.isBlank()) continue
                                 val altResults = try { p.search(altQuery, 1) } catch (_: Exception) { emptyList() }
                                 Log.i(TAG, "DIAG [${p.name}] alt search('$altQuery') → ${altResults.size} résultats")
+                                // 2026-08-13 (user « Inspecteur Derrick n'a aucun serveur alors
+                                //   qu'il y en a ») : la recherche alternative REMONTE des
+                                //   résultats (« Derrick » → 4 sur 1Jour1Film, 1 sur
+                                //   FrenchStream) puis les jette sans dire pourquoi — seule la
+                                //   recherche PRINCIPALE détaillait ses candidats. On journalise
+                                //   ici chaque candidat et le verdict de CHAQUE garde-fou, pour
+                                //   savoir lequel rejette au lieu de le deviner.
+                                altResults.take(6).forEachIndexed { iAlt, cand ->
+                                    val tc = (cand as? com.streamflixreborn.streamflix.models.Movie)?.title
+                                        ?: (cand as? com.streamflixreborn.streamflix.models.TvShow)?.title
+                                    if (tc != null) {
+                                        Log.i(
+                                            TAG,
+                                            "DIAG [${p.name}]   alt[$iAlt] '$tc' type=${typeOk(cand)} " +
+                                                "annee=${anneeDe(cand)} " +
+                                                "work=${workMatchesStrict(tc, knownTitles, effectiveYear, key.isMovie)} " +
+                                                "saison=${seasonTitleOk(tc, key.isMovie, key.season)} " +
+                                                "sousTitre=${sousTitreCompatible(tc, key.title)}",
+                                        )
+                                    } else {
+                                        Log.i(TAG, "DIAG [${p.name}]   alt[$iAlt] (ni Movie ni TvShow) → ignoré")
+                                    }
+                                }
                                 match = altResults.firstOrNull { item ->
                                     if (!typeOk(item)) return@firstOrNull false
                                     val t = (item as? com.streamflixreborn.streamflix.models.Movie)?.title
@@ -2174,6 +2318,12 @@ object BackupRegistry {
             "Papadustream V2" -> PapadustreamV2Provider.getVideo(orig)
             // 2026-08-08 : ok.ru — flux résolu À LA LECTURE (URLs liées à l'IP + `expires`).
             "ok.ru" -> com.streamflixreborn.streamflix.providers.OkRuProvider.getVideo(server)
+            // 2026-08-13 : Rutube — flux résolu À LA LECTURE (m3u8 à token éphémère via
+            //   /api/play/options). server.id = "rutube::<32hex>".
+            "Rutube" -> com.streamflixreborn.streamflix.providers.RutubeProvider.getVideo(server)
+            // 2026-08-11 : archive.org — `src` EST déjà l'URL du fichier (stable, pas de
+            //   signature ni d'expiration). Le getVideo ne fait qu'y poser le bon type MIME.
+            "archive.org" -> com.streamflixreborn.streamflix.providers.ArchiveOrgProvider.getVideo(server)
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
                 dynamicBackups[source]?.let { dyn ->

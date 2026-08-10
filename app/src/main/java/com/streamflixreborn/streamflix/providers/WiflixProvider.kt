@@ -1652,6 +1652,28 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         //    année est trouvée dans le lien. Séries : pas de gate (année peu fiable).
         val targetYear = (videoType as? Video.Type.Movie)?.releaseDate?.take(4)?.toIntOrNull()
         val targetSeason = (videoType as? Video.Type.Episode)?.season?.number
+        // ── 2026-08-11 : GATE ANNÉE ÉTENDU AUX SÉRIES (user : « y a toujours un mauvais
+        //   match avec Wiflix »). Le commentaire ci-dessus disait « séries : pas de gate,
+        //   année peu fiable » — c'est précisément ce trou qui laissait passer le remake.
+        //
+        //   Mesuré sur La Quatrième Dimension (TMDB 6357, 1959). Le registre avait pourtant
+        //   fait le bon travail :
+        //     DIAG [Wiflix] [0] 'La Quatrième Dimension'                       workMatch=true
+        //     DIAG [Wiflix] [1] 'The Twilight Zone : La Quatrième Dimension'   workMatch=false
+        //     DIAG [Wiflix] MATCH trouvé: 'La Quatrième Dimension' id=6357
+        //   Puis `getServers` reçoit un id TMDB numérique, retombe ici, refait une recherche
+        //   PAR TITRE sur le site — et le site range les deux séries sous le même nom :
+        //     searchServersByTitle('La Quatrième Dimension')
+        //       → slug=16071-the-twilight-zone-2019-saison-1.html
+        //   Trois serveurs sur le remake de 2019, en couleur, 47 min au lieu de 26.
+        //
+        //   ⚠ TOLÉRANCE LARGE (3 ans, contre 1 pour les films) : Wiflix nomme parfois ses
+        //   slugs avec l'année de LA SAISON et non celle du début de la série (« from-2022-
+        //   saison-4 »). Trois ans absorbent ce décalage sans rien laisser passer d'un
+        //   écart de soixante ans. Et comme pour les films, on ne gate QUE si l'année cible
+        //   est connue ET qu'une année figure dans le lien — sinon on ne juge pas.
+        val targetYearSerie = (videoType as? Video.Type.Episode)
+            ?.tvShow?.releaseDate?.take(4)?.toIntOrNull()
         val resultLinks = searchDoc.select("div.mov a[href], div.short-item a[href], article a[href]")
         // Candidats qui matchent le TITRE (+ gate année pour les films).
         val titleMatched = resultLinks.filter { a ->
@@ -1660,9 +1682,50 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 ?: a.text()
             if (titresConnus.none { com.streamflixreborn.streamflix.utils.BackupRegistry.titleMatches(linkTitle, it) }) return@filter false
             if (videoType is Video.Type.Movie && targetYear != null) {
-                val href = a.attr("href")
-                val candYear = Regex("(19|20)\\d{2}").findAll(href).map { it.value.toInt() }.lastOrNull()
+                // `anneeDuSlug` et pas une regex sur le href brut : l'identifiant numérique
+                //   de tête contient des chiffres qui ressemblent à une année (31982 → 1982).
+                val candYear = anneeDuSlug(a.attr("href"))
                 if (candYear != null && kotlin.math.abs(candYear - targetYear) > 1) return@filter false
+            }
+            // ── 2026-08-11 : ÉGALITÉ DE TITRE SUR LE SLUG (user : « Wiflix, encore un
+            //   mauvais match sur la saison 2 »).
+            //
+            //   Le contrôle d'année ci-dessous avait bien écarté
+            //   « 16071-the-twilight-zone-2019-saison-1.html », mais Wiflix a servi
+            //   « 18737-the-twilight-zone-la-quatrieme-dimension-saison-2.html » :
+            //   MÊME série de 2019, slug SANS année. Rien à gater.
+            //
+            //   Le slug porte pourtant le nom de la série en clair. Nettoyé, il donne
+            //   « the twilight zone la quatrieme dimension » — le titre de la série 2019.
+            //   Les titres connus de l'œuvre demandée sont « La Quatrième Dimension » et
+            //   « The Twilight Zone ». Aucun n'est égal → rejet.
+            //
+            //   ⚠ ÉGALITÉ, et pas inclusion ni « mots en trop » : le titre de 2019 contient
+            //   celui de 1959 et n'est bâti qu'avec les mots de ses deux titres connus. Les
+            //   deux autres tests le laissent passer. Même piège que côté Movix.
+            if (videoType is Video.Type.Episode && titresConnus.isNotEmpty()) {
+                val nomSlug = titreDepuisSlug(a.attr("href"))
+                if (nomSlug.isNotBlank() &&
+                    titresConnus.none { normPourEgalite(it) == nomSlug }
+                ) {
+                    Log.w(
+                        "Wiflix",
+                        "candidat ÉCARTÉ (titre) : ${a.attr("href")} → « $nomSlug », " +
+                            "attendu ${titresConnus.joinToString(" / ") { normPourEgalite(it) }}",
+                    )
+                    return@filter false
+                }
+            }
+            if (videoType is Video.Type.Episode && targetYearSerie != null) {
+                val href = a.attr("href")
+                val candYear = anneeDuSlug(href)
+                if (candYear != null && kotlin.math.abs(candYear - targetYearSerie) > 3) {
+                    Log.w(
+                        "Wiflix",
+                        "candidat ÉCARTÉ (année) : $href → $candYear, attendu ~$targetYearSerie",
+                    )
+                    return@filter false
+                }
             }
             true
         }
@@ -1690,6 +1753,65 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         return serveursDepuisSlug(slug, title, videoType)
     }
 
+    /**
+     * Année portée par un slug Wiflix, ou `null`.
+     *
+     * ⚠ 2026-08-11 — RÉGRESSION CORRIGÉE. La 1ʳᵉ version cherchait `(19|20)\d{2}` dans le
+     *   href BRUT. Sur `https://flemmix.men/vf/31982-silo-saison-2.html`, elle lisait
+     *   « 1982 » — qui n'est pas une année, mais les quatre derniers chiffres de
+     *   l'identifiant 31982. Résultat : Silo (2023) écarté, un match parfaitement bon perdu.
+     *   Mesuré sur l'appareil du user, S2E2 : « candidat ÉCARTÉ (année) : …31982-silo-
+     *   saison-2.html → 1982, attendu ~2023 ».
+     *
+     *   On retire donc le nom de domaine, le chemin, puis l'IDENTIFIANT NUMÉRIQUE de tête,
+     *   avant de chercher une année. `16071-the-twilight-zone-2019-saison-1.html` rend bien
+     *   2019 ; `31982-silo-saison-2.html` ne rend plus rien, donc aucun filtrage.
+     */
+    private fun anneeDuSlug(href: String): Int? {
+        val fichier = href.substringAfterLast('/').substringBeforeLast(".html")
+        val sansId = fichier.replace(Regex("^\\d+-"), "")
+        return Regex("(?<![0-9])(19|20)\\d{2}(?![0-9])")
+            .findAll(sansId).map { it.value.toInt() }.lastOrNull()
+    }
+
+    /** Accents retirés, ponctuation gommée, espaces normalisés — pour comparer deux titres. */
+    private fun normPourEgalite(s: String): String =
+        java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+            .lowercase()
+            .replace(Regex("[^a-z0-9 ]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    /**
+     * Nom de l'œuvre lu dans un slug Wiflix.
+     *
+     * `https://…/vf/18737-the-twilight-zone-la-quatrieme-dimension-saison-2.html`
+     *   → « the twilight zone la quatrieme dimension »
+     *
+     * On retire l'identifiant numérique de tête, l'extension, le numéro de saison, une
+     * éventuelle année, et le vocabulaire de release qui ne dit rien de l'œuvre (vf,
+     * vostfr, complete, integrale…). Ce qui reste est le titre, et rien d'autre.
+     */
+    private fun titreDepuisSlug(href: String): String {
+        val fichier = href.substringAfterLast('/').substringBeforeLast(".html")
+        val sansId = fichier.replace(Regex("^\\d+-"), "")
+        val mots = sansId.split('-', '_')
+            .map { normPourEgalite(it) }
+            .filter { it.isNotBlank() }
+            .filterNot { it in MOTS_SLUG_NEUTRES }
+            .filterNot { Regex("^(19|20)\\d{2}$").matches(it) }
+            .filterNot { Regex("^s?\\d{1,2}$").matches(it) }
+        return mots.joinToString(" ")
+    }
+
+    /** Vocabulaire de slug qui n'identifie aucune œuvre. */
+    private val MOTS_SLUG_NEUTRES = setOf(
+        "saison", "season", "serie", "series", "vf", "vostfr", "vost", "vo", "multi",
+        "complete", "complet", "integrale", "integral", "streaming", "en", "hd", "uhd",
+        "final", "finale", "partie", "part",
+    )
+
     /** Saison visée, ou 0 pour un film. Sert de clé de cache (un slug par saison). */
     private fun targetSeasonPour(videoType: Video.Type): Int =
         (videoType as? Video.Type.Episode)?.season?.number ?: 0
@@ -1715,6 +1837,50 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             try { getDocument("${baseUrl}serie-en-streaming/$slug") }
             catch (_: Exception) { return emptyList() }
         }
+        // ── 2026-08-11 : CONTRÔLE D'IDENTITÉ SUR LA PAGE ELLE-MÊME ────────────────────
+        //   (user : « c'est un gros bug, une série de 1959 et une de 2019 font le même
+        //   match, c'est pas bon du tout » — puis « vas-y, implémente »)
+        //
+        //   Les deux contrôles précédents lisent l'ADRESSE du lien (année dans le slug,
+        //   nom dans le slug). Celui-ci lit la PAGE, ce qui ne dépend plus de la façon dont
+        //   le site nomme ses URL. Wiflix y affiche l'identité en clair :
+        //     TITRE ORIGINAL: The Twilight Zone (2019)
+        //     DATE DE SORTIE: 2020
+        //     DURÉE: 45min
+        //   Relevé en direct sur 18737-the-twilight-zone-la-quatrieme-dimension-saison-2.
+        //
+        //   ⚠ COÛT NUL : `showDoc` vient d'être téléchargé juste au-dessus pour extraire les
+        //   serveurs. On lit dedans, aucune requête de plus. (Je pensais d'abord que ça
+        //   coûterait un aller-retour — c'est faux, la page est déjà là.)
+        //
+        //   ⚠ C'est l'ANNÉE qui tranche, pas le titre : le titre original de la série 2019
+        //   est « The Twilight Zone », soit exactement celui de la série de 1959. Comparer
+        //   les titres ne sépare rien ici. L'année entre parenthèses, si.
+        //
+        //   Tolérance 3 ans : « DATE DE SORTIE » porte souvent l'année de LA SAISON (2020
+        //   pour une série lancée en 2019). Trois ans absorbent ça sans rien laisser passer
+        //   d'un écart de soixante. Et on ne juge QUE si une année est trouvée.
+        val anneeAttendue = (videoType as? Video.Type.Episode)
+            ?.tvShow?.releaseDate?.take(4)?.toIntOrNull()
+        if (anneeAttendue != null) {
+            val texte = showDoc.text()
+            val anneeTitreOrig = Regex("(?i)titre\\s+original\\s*:.{0,120}?\\((\\d{4})\\)")
+                .find(texte)?.groupValues?.get(1)?.toIntOrNull()
+            val anneeSortie = Regex("(?i)date\\s+de\\s+sortie\\s*:\\s*(?:\\D{0,20})?((?:19|20)\\d{2})")
+                .find(texte)?.groupValues?.get(1)?.toIntOrNull()
+            val anneePage = anneeTitreOrig ?: anneeSortie
+            if (anneePage != null && kotlin.math.abs(anneePage - anneeAttendue) > 3) {
+                Log.w(
+                    "Wiflix",
+                    "PAGE ÉCARTÉE (identité) : slug=$slug annonce $anneePage " +
+                        "(titre original=$anneeTitreOrig, date de sortie=$anneeSortie), " +
+                        "attendu ~$anneeAttendue → 0 serveur",
+                )
+                return emptyList()
+            }
+            Log.d("Wiflix", "identité page OK : slug=$slug année=$anneePage attendu ~$anneeAttendue")
+        }
+
         // 2026-07-09 (user « FROM S2E2 : Wiflix absent → 0 serveur ») — STRUCTURE RÉELLE des
         //   séries Wiflix (vérifiée en direct) : les serveurs sont dans UN bloc PAR ÉPISODE et
         //   PAR LANGUE : div.ep<N>vf (VF) / div.ep<N>vs (VOSTFR). L'ancien blocvostfr/blocfr

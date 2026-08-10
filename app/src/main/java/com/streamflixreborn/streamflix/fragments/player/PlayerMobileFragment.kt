@@ -2380,6 +2380,28 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("vavoo::")
+        // 2026-08-13 (user : « toujours pas le bouton suivant ») — LA CAUSE DES BOUTONS :
+        //   un clip a un id `livehub::…`, donc il tombait dans `isIptvChannel` juste en
+        //   dessous et les flèches étaient câblées en ZAPPING DE CHAÎNE, pas sur la file
+        //   du dossier. On les branche donc AVANT ce test, sur la file des clips.
+        val estClipVod = args.id.startsWith("livehub::rutube::") ||
+            args.id.startsWith("livehub::ytclip::")
+        if (estClipVod) {
+            val MPC = com.streamflixreborn.streamflix.utils.MiniPlayerController
+            btnPrevious.isVisible = true
+            btnNext.isVisible = true
+            btnPrevious.setOnClickListener {
+                val ok = MPC.clipPrecedentEnPleinEcran(args.id)
+                Log.i("PlayerMobileFragment", "⏮ clip précédent : $ok")
+                if (!ok) Toast.makeText(requireContext(), "Début de la liste", Toast.LENGTH_SHORT).show()
+            }
+            btnNext.setOnClickListener {
+                val ok = MPC.enchainerClipEnPleinEcran(args.id)
+                Log.i("PlayerMobileFragment", "⏭ clip suivant : $ok")
+                if (!ok) Toast.makeText(requireContext(), "Fin de la liste", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         if (isIptvChannel) {
             setupChannelNavigationButtons(btnPrevious, btnNext)
             return
@@ -3874,6 +3896,14 @@ class PlayerMobileFragment : Fragment() {
         override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): VH {
             val ctx = parent.context
             val row = android.widget.LinearLayout(ctx).apply {
+                // 2026-08-11 (bug user : noms de chaînes coupés « Fran… » alors qu'il reste plein de
+                //   place à droite) : la ligne n'avait AUCUNE largeur → WRAP_CONTENT par défaut, donc
+                //   le nom (MATCH_PARENT d'un parent qui ne remplit pas) restait étroit et se coupait.
+                //   On force la ligne en pleine largeur.
+                layoutParams = androidx.recyclerview.widget.RecyclerView.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                )
                 orientation = android.widget.LinearLayout.HORIZONTAL
                 setPadding(40, 24, 40, 24)
                 gravity = android.view.Gravity.CENTER_VERTICAL
@@ -3894,8 +3924,9 @@ class PlayerMobileFragment : Fragment() {
                 ellipsize = android.text.TextUtils.TruncateAt.END
             }
             row.addView(name, android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f,
             ))
             return VH(row)
         }
@@ -5392,6 +5423,24 @@ class PlayerMobileFragment : Fragment() {
                 //   peut sauter le isPlaying=false et passer direct STATE_ENDED.
                 //   Le handler autoplay dans onIsPlayingChanged ne se déclenche
                 //   pas alors. On déclenche aussi sur STATE_ENDED pour VOD.
+                // 2026-08-13 : clip du dossier Rutube terminé en plein écran → clip suivant de
+                //   la file (mêmes règles que le mini-lecteur). Un clip n'est pas un épisode,
+                //   il n'entrait donc dans aucun enchaînement existant. Cf. PlayerTvFragment.
+                //   ⚠ PAS de `!isLiveIptvStream` : un clip a un id `livehub::…` que le lecteur
+                //   classe comme du direct → la condition n'était jamais vraie. Cf. PlayerTvFragment.
+                if (playbackState == Player.STATE_ENDED &&
+                    (args.id.startsWith("livehub::rutube::") ||
+                        args.id.startsWith("livehub::ytclip::"))
+                ) {
+                    val enchaine = com.streamflixreborn.streamflix.utils.MiniPlayerController
+                        .enchainerClipEnPleinEcran(args.id)
+                    Log.i("PlayerMobileFragment", "clip terminé → suivant en plein écran : $enchaine")
+                    // `return` DANS TOUS LES CAS — sinon on retombe dans la branche « direct »
+                    //   plus bas (un clip a un id `livehub::…`), qui recharge le même flux et
+                    //   fait repartir le clip en boucle. Cf. PlayerTvFragment.
+                    return
+                }
+
                 if (!isLiveIptvStream && playbackState == Player.STATE_ENDED
                     && args.videoType is Video.Type.Episode
                     && UserPreferences.autoplay
@@ -5531,6 +5580,24 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                         args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+                    // ── 2026-08-14 (user : « pourquoi tu n'utilises pas le truc déjà en place
+                    //   pour les séries qui fait lecture suivante automatiquement ? ») ─────────
+                    //   C'est exactement ce déclencheur-là (celui des épisodes, éprouvé) qui
+                    //   manquait aux clips : `isLiveIptvNoAutoSkip` est vrai pour tout id
+                    //   `livehub::…`, donc un clip en était exclu. Sur ces flux Rutube, le
+                    //   lecteur ne signale pas toujours STATE_ENDED ; « la position a atteint
+                    //   la fin », si. On branche donc le clip ICI, sur le MÊME chemin que le
+                    //   bouton ⏭ (qui, lui, marche) — rien de neuf, juste le bon déclencheur.
+                    val estClipVodFin = args.id.startsWith("livehub::rutube::") ||
+                        args.id.startsWith("livehub::ytclip::")
+                    if (estClipVodFin && player.hasReallyFinished() && !clipFinDejaTraitee) {
+                        clipFinDejaTraitee = true
+                        val ok = com.streamflixreborn.streamflix.utils.MiniPlayerController
+                            .enchainerClipEnPleinEcran(args.id)
+                        Log.i("PlayerMobileFragment",
+                            "fin de clip (pos=${player.currentPosition}/${player.duration}) → clip suivant : $ok")
+                        return
+                    }
                     if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
                         if (UserPreferences.autoplay) {
                             Log.w("AutoplayDiag", "[TRIGGER B] hasReallyFinished ep=${(args.videoType as? Video.Type.Episode)?.id} pos=${player.currentPosition} dur=${player.duration} → playNextEpisodeAcrossSeasons(autoplay=true)")
@@ -6474,7 +6541,24 @@ class PlayerMobileFragment : Fragment() {
                     //   Conséquence : pas de swap doux possible sur Mobile (pas de backup
                     //   en queue), PREEMPTIVE fallback sur displayVideo destructif.
                     //   Le visual dual-bar fonctionne quand même (boost +60s reste à 0).
-                    if (consecutiveDrainTicks >= 5 && aheadSec < 12 && bufferEverHealthy &&
+                    // 2026-08-13 (user : « l'épisode suivant ne passe toujours pas en plein
+                    //   écran ») — LA CAUSE ÉTAIT ICI, et pas dans l'enchaînement.
+                    //   Ce garde-fou surveille l'avance du tampon pour rattraper une chaîne EN
+                    //   DIRECT qui se meurt. Or un clip a un id `livehub::…` : il y passait
+                    //   aussi. En fin de vidéo l'avance tombe forcément (il ne reste plus rien
+                    //   à charger, c'est normal), donc à ~11 s de la fin il RECHARGEAIT le clip
+                    //   — mesuré dans les logs du user : « PREEMPTIVE reload (CRITIQUE) —
+                    //   buffer 11s ». La vidéo n'atteignait donc JAMAIS sa fin, et
+                    //   l'enchaînement, lui, n'avait rien à se mettre sous la dent.
+                    //   Un clip a une fin : il n'a pas besoin d'un filet conçu pour un flux
+                    //   sans fin. Les chaînes en direct gardent le leur, intact.
+                    val estClipVod = args.id.startsWith("livehub::rutube::") ||
+                        args.id.startsWith("livehub::ytclip::")
+                    // 2026-08-14 : le filet « détection par position » qui vivait ici a été
+                    //   RETIRÉ — l'enchaînement passe désormais par le déclencheur des séries
+                    //   (`hasReallyFinished`, cf. onIsPlayingChanged), déjà éprouvé. Ce tick ne
+                    //   sert plus qu'à protéger les flux EN DIRECT, ce pour quoi il est fait.
+                    if (!estClipVod && consecutiveDrainTicks >= 5 && aheadSec < 12 && bufferEverHealthy &&
                         iptvCurrentStreamHasWorked && !preemptiveReloadInFlight) {
                         preemptiveReloadInFlight = true
                         consecutiveDrainTicks = 0
@@ -6552,6 +6636,9 @@ class PlayerMobileFragment : Fragment() {
     // les 3 min, AVANT expiry → cut court et prévisible vs 25s subi.
     private var proactiveRefreshHandler: android.os.Handler? = null
     @Volatile private var emergencyRefreshInFlight = false
+    // 2026-08-13 : garde anti-double-enchaînement des clips (le tick passe toutes les 5 s,
+    //   on ne doit avancer qu'UNE fois dans la file).
+    @Volatile private var clipFinDejaTraitee = false
     // 2026-05-09 PISTE A : flag anti-reload-en-rafale pour le préemptif drain.
     @Volatile private var preemptiveReloadInFlight = false
     // 2026-05-20 (parité PlayerTvFragment) : reprise live BUFFERING silencieux +
@@ -7338,7 +7425,30 @@ class PlayerMobileFragment : Fragment() {
      *  ou se déconnecte (STATE_IDLE), on re-prepare() pour re-fetch l'URL. */
     private fun attachTransferRecoveryListener() {
         val recoveryListener = object : androidx.media3.common.Player.Listener {
+            private val estClipVodTransfert: Boolean
+                get() = args.id.startsWith("livehub::rutube::") ||
+                    args.id.startsWith("livehub::ytclip::")
+
             override fun onPlaybackStateChanged(state: Int) {
+            // ── 2026-08-14 (user : « sur le grand lecteur ça a bouclé sur la même
+            //   musique » / « les lecteurs ne passent pas à la lecture suivante ») ──────
+            //   CE listener-ci est celui du lecteur TRANSFÉRÉ depuis le mini (passage en
+            //   plein écran sans coupure). Il est minimal et ne connaît QUE le direct :
+            //   à la fin du flux il faisait `seekToDefaultPosition() + prepare()`, donc
+            //   sur un clip — qui a une vraie fin — il le RELANÇAIT AU DÉBUT : la boucle
+            //   constatée. Et comme le listener complet (celui qui enchaîne) n'est pas
+            //   attaché dans ce chemin, l'enchaînement ne partait jamais non plus.
+            //   Un clip est de la VOD : on enchaîne sur le suivant de la file, et surtout
+            //   on ne re-prépare JAMAIS le même flux.
+                if (estClipVodTransfert) {
+                    if (state == androidx.media3.common.Player.STATE_ENDED) {
+                        val ok = com.streamflixreborn.streamflix.utils.MiniPlayerController
+                            .enchainerClipEnPleinEcran(args.id)
+                        Log.i("PlayerMobileFragment",
+                            "clip terminé (lecteur transféré) → clip suivant : $ok")
+                    }
+                    return
+                }
                 when (state) {
                     androidx.media3.common.Player.STATE_ENDED,
                     androidx.media3.common.Player.STATE_IDLE -> {
@@ -7355,6 +7465,14 @@ class PlayerMobileFragment : Fragment() {
                 }
             }
             override fun onPlayerError(error: PlaybackException) {
+                if (estClipVodTransfert) {
+                    // Clip illisible : on passe au suivant plutôt que de reboucler dessus.
+                    val ok = com.streamflixreborn.streamflix.utils.MiniPlayerController
+                        .enchainerClipEnPleinEcran(args.id)
+                    Log.w("PlayerMobileFragment",
+                        "clip en erreur (${error.errorCodeName}) → clip suivant : $ok")
+                    return
+                }
                 Log.e("PlayerMobileFragment", "Transfer recovery: error ${error.errorCodeName} → prepare()")
                 try {
                     player.seekToDefaultPosition()

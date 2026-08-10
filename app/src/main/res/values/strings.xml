@@ -509,6 +509,26 @@
     <string name="settings_parental_remove_admin_pin_title">Remove admin PIN</string>
     <string name="settings_parental_remove_admin_pin_summary">Remove the recovery PIN used to unlock parental controls</string>
     <string name="settings_parental_max_age_title">Maximum age rating</string>
+    <!-- 2026-08-10 : le contrôle parental utilise désormais le PIN du cadenas
+         (ProviderLockStore), le même que celui qui verrouille les providers.
+         Plus de PIN parental séparé ni de PIN administrateur de secours. -->
+    <string name="settings_parental_code_title">Parental code</string>
+    <string name="settings_parental_code_not_set">No code set — tap to create one</string>
+    <string name="settings_parental_code_set">Code set — tap to change it</string>
+    <string name="settings_parental_code_created">Parental code created</string>
+    <string name="settings_parental_code_changed">Parental code updated</string>
+    <string name="settings_parental_code_wrong_old">Wrong current code</string>
+    <string name="settings_parental_code_current_hint">Current code</string>
+    <string name="settings_parental_code_new_hint">New code (4 to 8 digits)</string>
+    <string name="settings_parental_code_remove">Remove code</string>
+    <string name="settings_parental_code_remove_message">Enter the current code. Removing it also unlocks every locked provider.</string>
+    <string name="settings_parental_code_removed">Parental code removed</string>
+    <string name="settings_parental_locked_providers_title">Locked providers</string>
+    <string name="settings_parental_locked_providers_summary">Choose which providers ask for the code</string>
+    <string name="settings_parental_locked_providers_count">%1$d provider(s) locked</string>
+    <string name="settings_parental_locked_providers_none">No provider locked</string>
+    <string name="settings_parental_locked_providers_dialog">Lock providers</string>
+    <string name="settings_parental_set_code_first">Create a parental code first.</string>
     <string name="settings_parental_max_age_summary">Only show titles up to this TMDb age rating</string>
     <string name="settings_parental_max_age_disabled">Disabled</string>
     <string name="settings_parental_requires_tmdb">Parental control only works when TMDb is enabled.</string>
@@ -539,4 +559,9 @@
     <string name="settings_force_extra_buffer_summary">Enable extra buffering for all servers by default</string>
     <string name="settings_adaptive_quality_title">Automatic quality reduction</string>
     <string name="settings_adaptive_quality_summary">Off: always keep the highest available quality. On: temporarily lower the resolution when playback stutters, then restore it.</string>
+
+    <!-- EPG (guide des programmes) — panneau à gauche du mini lecteur, version TV -->
+    <string name="epg_en_ce_moment">EN CE MOMENT</string>
+    <string name="epg_a_suivre">À SUIVRE</string>
+    <string name="epg_indisponible">Programme non disponible pour cette chaîne</string>
 </resources>

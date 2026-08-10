@@ -31,6 +31,30 @@ object LiveHubFolderDialog {
      *  espaces, apostrophes et ponctuation. Ainsi "90 IS GOOD", "90's", "90 s"
      *  et "90s" deviennent comparables ("90isgood" / "90s"), et taper "90"
      *  matche toutes ces variantes. Mieux que le simple `contains` lowercase. */
+    /** 2026-08-14 : une recherche reseau qui echoue previent l'utilisateur — et ne
+     *  fait jamais tomber l'appli (cf. crash YouTube constate sur un Samsung). */
+    private fun avertirRechercheKO(ctx: Context, t: Throwable) {
+        android.util.Log.w("LiveHubFolderDialog", "recherche reseau KO", t)
+        try {
+            android.widget.Toast.makeText(
+                ctx, "Recherche impossible (${t.javaClass.simpleName})", android.widget.Toast.LENGTH_LONG,
+            ).show()
+        } catch (_: Throwable) {}
+    }
+
+    /** Publie la liste RÉELLEMENT affichée comme grille de référence du hub (frères de
+     *  navigation + file de lecture des clips). Appelée à l'ouverture ET à chaque
+     *  remplacement de la grille (recherche réseau, favoris ★). */
+    private fun publierGrilleActive(nom: String, items: List<TvShow>) {
+        try {
+            LiveTvHubProvider.folderContents["__grid_active"] = listOf(
+                Category(name = nom, list = items)
+            )
+            // La file de lecture des clips suit la liste affichée (résultats OU favoris ★).
+            RutubeFolder.publierListeAffichee(items)
+        } catch (_: Throwable) {}
+    }
+
     private fun normSearch(s: String): String =
         java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
             .replace(Regex("\\p{Mn}+"), "")
@@ -231,6 +255,29 @@ object LiveHubFolderDialog {
         folderName: String,
         onChannelSelected: (TvShow) -> Unit,
     ) {
+        // 2026-08-13 : DOSSIER RUTUBE — MÊME dialog que les autres dossiers (grille de jaquettes,
+        //   mini-lecteur, clic qui ne ferme pas, ★ appui long), mais sa barre de recherche
+        //   interroge RUTUBE (réseau) au lieu de filtrer une liste locale. On y trouve n'importe
+        //   quoi (« Inspecteur Colombo »), comme sur le site. Au 1er affichage : l'historique des
+        //   recherches (ou une sélection d'accueil si aucun historique).
+        if (folderKey == "rutube") {
+            val hist = RutubeFolder.history(ctx)
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                val initial = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    RutubeFolder.initialItems(ctx)
+                }
+                showPosterGrid(
+                    ctx,
+                    Category(name = if (hist.isEmpty()) "Rutube" else "Rutube — ${hist.first()}", list = initial),
+                    initial,
+                    onChannelSelected,
+                    networkSearch = { q -> RutubeFolder.search(ctx, q) },
+                    searchHistory = { RutubeFolder.history(ctx) },
+                    favoritesProvider = { RutubeFolder.favorites() },
+                )
+            }
+            return
+        }
         // 2026-06-24 : sub-folder World Live TV — ouvert depuis le rebadge
         //   ligne `livehub::folder::wlsub_<folderPath>`. Lit folderContents
         //   du provider et affiche via displayCategories (= même style que
@@ -2152,6 +2199,16 @@ object LiveHubFolderDialog {
         category: Category,
         channels: List<TvShow>,
         onChannelSelected: (TvShow) -> Unit,
+        // 2026-08-13 : dossier RUTUBE — recherche RÉSEAU (au lieu du filtre local sur la liste).
+        //   Fournie → la barre de recherche interroge Rutube (sur validation) et repeuple la grille.
+        networkSearch: (suspend (String) -> List<TvShow>)? = null,
+        // 2026-08-13 (user : « le petit logo accessible à la télécommande pour l'historique »,
+        //   « les favoris devraient atterrir dans un dossier à part À L'INTÉRIEUR de ce dossier »,
+        //   « une lecture aléatoire du dossier ») : trois boutons optionnels, rendus SEULEMENT
+        //   si fournis → les autres dossiers du hub sont strictement inchangés. Focusables =
+        //   atteignables à la télécommande comme au doigt.
+        searchHistory: (() -> List<String>)? = null,
+        favoritesProvider: (() -> List<TvShow>)? = null,
     ) {
         // 2026-07-05 (user "chaînes du même dossier affiche des IPTV au lieu du
         //   dossier") : persiste les chaînes de la grille dans folderContents
@@ -2159,9 +2216,7 @@ object LiveHubFolderDialog {
         //   du dossier courant. La clé "__grid_active" est écrasée à chaque
         //   ouverture de grille = toujours les chaînes de la dernière grille vue.
         //   N'est PAS touchée par groupSectionsIntoFolders (clé interne __).
-        LiveTvHubProvider.folderContents["__grid_active"] = listOf(
-            Category(name = category.name, list = channels)
-        )
+        publierGrilleActive(category.name, channels)
         val MPC = com.streamflixreborn.streamflix.utils.MiniPlayerController
         val dp = ctx.resources.displayMetrics.density
         val isTV = ctx.resources.configuration.uiMode and
@@ -2316,6 +2371,19 @@ object LiveHubFolderDialog {
             if (ch.id == MPC.currentChannelId) {
                 // 2e clic sur le même film = plein écran → ferme tout
                 dismissAllDialogs()
+            }
+            // 2026-08-13 : clip Rutube lancé → on arme la FILE avec la liste affichée
+            //   (résultats OU favoris ★) pour que la lecture s'enchaîne toute seule à la fin,
+            //   et que ⏮/⏭ marchent sans quitter le mini-lecteur.
+            if (RutubeFolder.estClipDossier(ch.id)) {
+                MPC.definirFileRutube(
+                    filteredChannels.map {
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController
+                            .ClipFile(it.id, it.title, it.poster)
+                    },
+                    pos,
+                    aleatoire = false,
+                )
             }
             onChannelSelected(ch)
             gridAdapter.notifyDataSetChanged()
@@ -2476,6 +2544,202 @@ object LiveHubFolderDialog {
         )
         gridView.clipToPadding = false
 
+        // ── 2026-08-13 : barre d'outils du dossier Rutube (🕘 historique · ★ favoris · 🔀 aléatoire).
+        //   Construite UNIQUEMENT si les callbacks sont fournis → aucun autre dossier n'est touché.
+        fun boutonOutil(libelle: String, action: () -> Unit): android.widget.TextView =
+            android.widget.TextView(ctx).apply {
+                text = libelle
+                setTextColor(android.graphics.Color.WHITE)
+                textSize = if (isTV) 15f else 13f
+                gravity = android.view.Gravity.CENTER
+                setPadding((14 * dp).toInt(), (7 * dp).toInt(), (14 * dp).toInt(), (7 * dp).toInt())
+                isFocusable = true            // atteignable à la télécommande
+                isClickable = true
+                background = android.graphics.drawable.StateListDrawable().apply {
+                    val actif = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(android.graphics.Color.parseColor("#33FFFFFF"))
+                        setStroke((2 * dp).toInt(), android.graphics.Color.parseColor("#E23B3B"))
+                        cornerRadius = 8 * dp
+                    }
+                    val repos = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(android.graphics.Color.parseColor("#22FFFFFF"))
+                        cornerRadius = 8 * dp
+                    }
+                    addState(intArrayOf(android.R.attr.state_focused), actif)
+                    addState(intArrayOf(android.R.attr.state_pressed), actif)
+                    addState(intArrayOf(), repos)
+                }
+                setOnClickListener { action() }
+            }
+
+        fun remplacerGrille(items: List<TvShow>, titre: String) {
+            filteredChannels.clear()
+            filteredChannels.addAll(items)
+            titleTv.text = titre
+            gridAdapter.notifyDataSetChanged()
+            gridView.post { gridView.requestFocus() }
+            // 2026-08-14 : la grille de référence doit suivre CE qui est affiché. Sans ça
+            //   elle restait figée sur la liste d'ouverture (souvent vide) et un clip lancé
+            //   autrement que par un clic n'avait aucune file → aucun enchaînement.
+            publierGrilleActive(category.name, items)
+        }
+
+        val barreOutils = if (networkSearch != null) android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding((6 * dp).toInt(), (2 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt())
+            // 2026-08-13 (user : « le choix de changer avec un petit icône ») : bascule de
+            //   SOURCE — 🌐 Rutube + YouTube · 🔴 Rutube seul · ▶ YouTube seul. Relance la
+            //   recherche en cours pour voir le résultat tout de suite.
+            val btnSource = boutonOutil(RutubeFolder.source(ctx).icone) { }
+            btnSource.setOnClickListener { try {
+                val nouvelle = RutubeFolder.sourceSuivante(ctx)
+                btnSource.text = nouvelle.icone
+                android.widget.Toast.makeText(
+                    ctx, "Source : ${nouvelle.libelle}", android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                val q = searchInput.text.toString().trim()
+                if (q.isNotEmpty()) {
+                    titleTv.text = "Recherche « $q »…"
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                        val res = try {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { networkSearch(q) }
+                        } catch (t: Throwable) { avertirRechercheKO(ctx, t); emptyList() }
+                        remplacerGrille(res, "${nouvelle.libelle} — $q (${res.size})")
+                        RutubeFolder.derniereErreurYoutube?.let { err ->
+                            android.widget.Toast.makeText(
+                                ctx, "YouTube indisponible ($err)", android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                // 2026-08-14 (user : « sur un Samsung, activer l'option YouTube fait crasher
+                //   l'appli ») : ce bouton ne doit JAMAIS tuer l'appli, quoi qu'il arrive.
+                android.util.Log.w("LiveHubFolderDialog", "bascule de source KO", t)
+                android.widget.Toast.makeText(
+                    ctx, "Source indisponible sur cet appareil", android.widget.Toast.LENGTH_LONG,
+                ).show()
+            } }
+            addView(btnSource, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { setMargins(0, 0, (6 * dp).toInt(), 0) })
+            // 🕘 Historique des recherches — relance une requête d'un simple clic.
+            if (searchHistory != null) {
+                addView(boutonOutil("🕘") {
+                    val hist = searchHistory()
+                    if (hist.isEmpty()) {
+                        android.widget.Toast.makeText(ctx, "Aucune recherche récente", android.widget.Toast.LENGTH_SHORT).show()
+                    } else {
+                        android.app.AlertDialog.Builder(ctx)
+                            .setTitle("Recherches récentes")
+                            .setItems(hist.toTypedArray()) { _, i ->
+                                val q = hist[i]
+                                searchInput.setText(q)
+                                titleTv.text = "Recherche « $q »…"
+                                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                                    val res = try {
+                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { networkSearch(q) }
+                                    } catch (t: Throwable) { avertirRechercheKO(ctx, t); emptyList() }
+                                    remplacerGrille(res, "Rutube — $q (${res.size})")
+                                }
+                            }
+                            // 2026-08-14 (user : « on a oublie de mettre une corbeille pour
+                            //   effacer l'historique de recherche ») : bouton neutre du meme
+                            //   dialogue, avec confirmation — l'historique est le seul moyen
+                            //   de retrouver une requete passee, on ne l'efface pas par megarde.
+                            .setNeutralButton("\uD83D\uDDD1 Effacer l'historique") { _, _ ->
+                                android.app.AlertDialog.Builder(ctx)
+                                    .setTitle("Effacer l'historique ?")
+                                    .setMessage("Les ${hist.size} recherches memorisees seront supprimees. Tes favoris ne sont pas touches.")
+                                    .setNegativeButton("Annuler", null)
+                                    .setPositiveButton("Effacer") { _, _ ->
+                                        RutubeFolder.clearHistory(ctx)
+                                        android.widget.Toast.makeText(
+                                            ctx, "Historique efface", android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                    .show()
+                            }
+                            .show()
+                    }
+                }, android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { setMargins(0, 0, (6 * dp).toInt(), 0) })
+            }
+            // ★ Favoris = le « dossier à part À L'INTÉRIEUR » du dossier Rutube.
+            if (favoritesProvider != null) {
+                addView(boutonOutil("★") {
+                    val favs = favoritesProvider()
+                    if (favs.isEmpty()) {
+                        android.widget.Toast.makeText(
+                            ctx, "Aucun favori — appui long sur un clip pour l'ajouter",
+                            android.widget.Toast.LENGTH_SHORT,
+                        ).show()
+                    } else remplacerGrille(favs, "Rutube ★ Favoris (${favs.size})")
+                }, android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { setMargins(0, 0, (6 * dp).toInt(), 0) })
+            }
+            // 🔀 Lecture aléatoire de ce qui est affiché (résultats OU favoris) — et la file
+            //   reste en mode aléatoire, donc l'enchaînement automatique pioche au hasard.
+            addView(boutonOutil("🔀") {
+                val pool = filteredChannels.toList()
+                if (pool.isEmpty()) {
+                    android.widget.Toast.makeText(ctx, "Rien à lire", android.widget.Toast.LENGTH_SHORT).show()
+                } else {
+                    val i = pool.indices.random()
+                    val choisi = pool[i]
+                    android.widget.Toast.makeText(ctx, "🔀 ${choisi.title}", android.widget.Toast.LENGTH_SHORT).show()
+                    MPC.definirFileRutube(
+                        pool.map {
+                            com.streamflixreborn.streamflix.utils.MiniPlayerController
+                                .ClipFile(it.id, it.title, it.poster)
+                        },
+                        i, aleatoire = true,
+                    )
+                    onChannelSelected(choisi)
+                    gridAdapter.notifyDataSetChanged()
+                }
+            }, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { setMargins(0, 0, (6 * dp).toInt(), 0) })
+
+            // ── 2026-08-13 (user : « des boutons précédent, pause et play au même endroit,
+            //   ça permettrait de rester en petit écran ») : commandes du MINI-LECTEUR, ici
+            //   même. On ne quitte pas le dossier, on ne passe pas en plein écran.
+            addView(boutonOutil("⏮") {
+                if (!MPC.clipRutubePrecedent()) {
+                    android.widget.Toast.makeText(ctx, "Début de la liste", android.widget.Toast.LENGTH_SHORT).show()
+                } else gridAdapter.notifyDataSetChanged()
+            }, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { setMargins(0, 0, (6 * dp).toInt(), 0) })
+
+            val btnLecture = boutonOutil("⏯") { }
+            btnLecture.setOnClickListener {
+                val joue = MPC.basculerLecture()
+                btnLecture.text = if (joue) "⏸" else "▶"
+            }
+            addView(btnLecture, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { setMargins(0, 0, (6 * dp).toInt(), 0) })
+
+            addView(boutonOutil("⏭") {
+                if (!MPC.clipRutubeSuivant()) {
+                    android.widget.Toast.makeText(ctx, "Fin de la liste", android.widget.Toast.LENGTH_SHORT).show()
+                } else gridAdapter.notifyDataSetChanged()
+            }, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+        } else null
+
         // Contenu principal = titre(WRAP) + recherche + grille (vertical)
         // Le titre est DANS le flux (pas en overlay) pour ne pas empiéter sur la recherche
         val contentCol = android.widget.LinearLayout(ctx).apply {
@@ -2487,6 +2751,12 @@ object LiveHubFolderDialog {
             ).apply {
                 setMargins((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt())
             })
+            barreOutils?.let {
+                addView(it, android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                ))
+            }
             addView(searchInput, android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
@@ -2516,6 +2786,7 @@ object LiveHubFolderDialog {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: android.text.Editable?) {
+                if (networkSearch != null) return  // Rutube : recherche RÉSEAU sur validation
                 val query = s?.toString()?.trim() ?: ""
                 filteredChannels.clear()
                 if (query.isEmpty()) {
@@ -2531,13 +2802,55 @@ object LiveHubFolderDialog {
                 gridAdapter.notifyDataSetChanged()
             }
         })
+        // 2026-08-13 : DOSSIER RUTUBE — la barre interroge Rutube (réseau) sur validation
+        //   (Entrée/OK) et repeuple la grille, au lieu du filtre local sur une liste vide.
+        if (networkSearch != null) {
+            searchInput.hint = "🔍 Rechercher sur Rutube…"
+            searchInput.setOnEditorActionListener { _, _, _ ->
+                val q = searchInput.text.toString().trim()
+                if (q.isNotEmpty()) {
+                    titleTv.text = "Recherche « $q »…"
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                        val res = try {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { networkSearch(q) }
+                        } catch (t: Throwable) { avertirRechercheKO(ctx, t); emptyList() }
+                        filteredChannels.clear()
+                        filteredChannels.addAll(res)
+                        titleTv.text = "Rutube — $q (${res.size})"
+                        gridAdapter.notifyDataSetChanged()
+                        gridView.post { gridView.requestFocus() }
+                        publierGrilleActive(category.name, res)
+                    }
+                }
+                true
+            }
+        }
 
         // Dialog sans titre ni bouton → pas de barres noires
         val dlg = android.app.AlertDialog.Builder(ctx)
             .setView(container)
             .create()
         dlgRef = dlg
-        retourBtn.setOnClickListener { dlg.dismiss() }
+        // 2026-08-13 (user : « quand je fais une recherche et que je fais Retour, il retourne
+        //   sur la recherche précédente… alors qu'il devrait retourner au menu ») :
+        //   plusieurs vues du dossier peuvent s'empiler (contenu d'ouverture, résultats d'une
+        //   recherche, favoris ★). `dlg.dismiss()` ne fermait QUE la vue du dessus : on
+        //   retombait sur la recherche d'avant au lieu de sortir. Pour le dossier à recherche
+        //   réseau (Rutube), RETOUR ferme donc TOUTE la pile → on revient droit au menu.
+        //   Les autres dossiers gardent leur comportement d'origine (fermeture simple).
+        retourBtn.setOnClickListener {
+            if (networkSearch != null) dismissAllDialogs() else dlg.dismiss()
+        }
+        // Même règle pour la touche RETOUR de la télécommande / du téléphone : sur la TV c'est
+        //   elle qu'on utilise, pas le bouton à l'écran. Sans ça les deux se comporteraient
+        //   différemment dans le même dossier.
+        if (networkSearch != null) {
+            dlg.setOnKeyListener { _, keyCode, event ->
+                if (keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+                    event.action == android.view.KeyEvent.ACTION_UP
+                ) { dismissAllDialogs(); true } else false
+            }
+        }
 
         try { dlg.show() } catch (_: android.view.WindowManager.BadTokenException) { return }
         pushDialog(dlg)

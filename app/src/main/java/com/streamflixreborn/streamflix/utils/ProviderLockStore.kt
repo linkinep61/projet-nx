@@ -64,12 +64,29 @@ object ProviderLockStore {
         return true
     }
 
-    /** Change le PIN existant. Vérifie l'ancien d'abord. */
+    /** Un code valide : 4 à 8 chiffres. */
+    fun isPinFormatValid(pin: String): Boolean = pin.length in 4..8 && pin.all { it.isDigit() }
+
+    /** Change le PIN existant. Vérifie l'ancien d'abord.
+     *  2026-08-10 (user « on dirait que le code parental ne s'enregistre pas ») :
+     *  le `require` sur le nouveau code levait une exception au lieu de refuser —
+     *  un champ vide ou mal saisi faisait planter au lieu d'afficher une erreur.
+     *  On retourne false, l'appelant explique ce qui ne va pas. */
     fun changePin(context: Context, oldPin: String, newPin: String): Boolean {
         if (!verifyPin(context, oldPin)) return false
-        require(newPin.length in 4..8 && newPin.all { it.isDigit() })
+        if (!isPinFormatValid(newPin)) return false
         prefs(context).edit().putString(KEY_PIN_HASH, hashPin(newPin)).apply()
         return true
+    }
+
+    /** Supprime le code ET tous les verrous — sans code, un provider verrouillé
+     *  ne serait plus déblocable. Réservé à l'appelant qui a validé le code actuel. */
+    fun clearPin(context: Context) {
+        prefs(context).edit()
+            .remove(KEY_PIN_HASH)
+            .putStringSet(KEY_LOCKED_PROVIDERS, emptySet())
+            .apply()
+        synchronized(sessionUnlocked) { sessionUnlocked.clear() }
     }
 
     /** Vérifie qu'un PIN saisi correspond à celui stocké. */

@@ -834,7 +834,39 @@ class TmdbProvider(override val language: String) : Provider, ProgressiveServers
         return people
     }
 
+    /**
+     * ⚠ 2026-08-11 (user : « TMDb ne devrait pas émettre de serveur vu qu'il n'en a pas
+     *   lui-même de natif — il peut recevoir, mais il n'émet pas »).
+     *
+     * TMDb est un CATALOGUE : fiches, affiches, saisons, épisodes viennent de l'API TMDB.
+     * Il n'héberge aucun fichier. Tout ce qu'il affichait comme serveur, il allait le
+     * chercher ailleurs — et de deux façons, dont une mauvaise :
+     *
+     *   • par IDENTIFIANT TMDB (VixSrc, VidSrc, VidLink, Videasy) — sain, aucune collision
+     *     possible, mais ce n'est pas à lui de le faire ;
+     *   • par TITRE (1Jour1Film, FrenchStream, aplouf) — avec son propre matcher `isMatchFR`,
+     *     plus laxiste que celui du registre de backup qui interroge DÉJÀ ces mêmes sites.
+     *     Son test `nItem.contains(nTarget)` avec garde de longueur accepte « The Twilight
+     *     Zone : La Quatrième Dimension » (2019) quand on demande « La Quatrième Dimension »
+     *     (1959) : 20 caractères contre 35, la garde passe, le contains passe. Aucun
+     *     contrôle d'année nulle part. C'est le même piège que celui corrigé le même jour
+     *     dans Wiflix et Movix, en troisième exemplaire.
+     *
+     * Désormais il n'émet plus rien. Les serveurs lui arrivent uniquement du registre de
+     * backup, qui matche strictement — il REÇOIT, il n'ÉMET pas.
+     *
+     * ⚠ CE QUE ÇA COÛTE, vérifié avant de le faire : le registre couvre déjà Videasy (source
+     *   « Embed ») et les sites FR, mais PAS VixSrc, VidSrc ni VidLink. Ces trois-là
+     *   disparaissent. Repasser la constante à `true` restaure exactement le comportement
+     *   d'avant, le code est intact en dessous.
+     */
+    private val EMET_SES_PROPRES_SERVEURS = false
+
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        if (!EMET_SES_PROPRES_SERVEURS) {
+            Log.i("TmdbProvider", "getServers : catalogue seul, aucun serveur émis (les serveurs viennent du registre de backup)")
+            return emptyList()
+        }
         val servers = mutableListOf<Video.Server>()
         val lang = language.lowercase().substringBefore("-")
 

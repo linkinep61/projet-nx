@@ -206,10 +206,22 @@ class TvShowsMobileFragment : Fragment() {
             binding.llIptvActions.visibility = View.VISIBLE
             binding.ivIptvCategories.visibility = View.VISIBLE
             binding.ivIptvLanguage.visibility = View.VISIBLE
+            // 2026-08-12 (user « les 2 icônes de l'onglet Séries sont cachées
+            //   derrière une jaquette et ne réagissent pas ») : la barre est
+            //   déclarée AVANT le RecyclerView dans le layout, donc dessinée
+            //   dessous. Si la grille se retrouve ancrée trop haut — c'est le
+            //   cas des versions antérieures, où elle est ancrée sous
+            //   `tab_language` masqué et démarre donc en haut de l'écran —
+            //   elle recouvre les icônes ET capte leurs touchers, puisque
+            //   c'est la vue du dessus qui reçoit l'événement.
+            //   Les traces ci-dessous disent si le toucher atteint le
+            //   gestionnaire ou s'il est intercepté par la grille.
             binding.ivIptvCategories.setOnClickListener {
+                Log.d("IptvActions", "clic CATÉGORIES (Séries)")
                 showIptvSeriesCategoryPicker()
             }
             binding.ivIptvLanguage.setOnClickListener {
+                Log.d("IptvActions", "clic LANGUE (Séries)")
                 showIptvLanguageFilterPicker()
             }
         } else {
@@ -533,6 +545,23 @@ class TvShowsMobileFragment : Fragment() {
         val container = binding.miniPlayerContainer
         val recycler = binding.rvTvShows
         val tabLang = binding.tabLanguage
+        // 2026-08-12 (user « dans l'onglet Séries les 2 icônes sont coincées
+        //   derrière les jaquettes, c'est pour ça qu'elles ne sont pas
+        //   fonctionnelles ») : CAUSE RÉELLE. Le layout XML ancre bien la
+        //   grille sous `ll_iptv_actions`, mais ce ConstraintSet, appliqué à
+        //   l'exécution pour le mini-lecteur, la rebranchait sous
+        //   `tab_language` — un bandeau masqué resté collé en haut. La grille
+        //   repartait donc du haut de l'écran, recouvrait la barre d'icônes,
+        //   et captait leurs touchers (c'est la vue du dessus qui reçoit
+        //   l'événement) : icônes visibles mais inertes.
+        //   Mesuré sur l'Oppo : grille à y=118, icônes à y=142–262.
+        //   L'onglet Films n'a pas de mini-lecteur, donc pas ce code — d'où
+        //   la différence de comportement entre les deux onglets.
+        //   Correctif : réinsérer la barre dans la chaîne, exactement comme
+        //   le fait le XML des Films. Quand elle est masquée (providers hors
+        //   Mon IPTV), ConstraintLayout la réduit à un point et la grille
+        //   revient d'elle-même sous les onglets — aucun changement pour eux.
+        val actions = binding.llIptvActions
         val root = binding.root as ConstraintLayout
         val cs = ConstraintSet()
         cs.clone(root)
@@ -546,7 +575,9 @@ class TvShowsMobileFragment : Fragment() {
             cs.connect(tabLang.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
             cs.connect(tabLang.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
             cs.connect(tabLang.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
-            cs.connect(recycler.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(actions.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(actions.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+            cs.connect(recycler.id, ConstraintSet.TOP, actions.id, ConstraintSet.BOTTOM)
             cs.connect(recycler.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
             cs.connect(recycler.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
             cs.connect(recycler.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
@@ -568,8 +599,12 @@ class TvShowsMobileFragment : Fragment() {
             cs.connect(tabLang.id, ConstraintSet.END, container.id, ConstraintSet.START)
             cs.connect(tabLang.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
 
+            // Barre d'icônes IPTV : sous les onglets, calée sur le bord du lecteur
+            cs.connect(actions.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(actions.id, ConstraintSet.END, container.id, ConstraintSet.START)
+
             // RecyclerView: fill left 2/3 below tabs
-            cs.connect(recycler.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(recycler.id, ConstraintSet.TOP, actions.id, ConstraintSet.BOTTOM)
             cs.connect(recycler.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
             cs.connect(recycler.id, ConstraintSet.END, container.id, ConstraintSet.START)
             cs.connect(recycler.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
@@ -590,8 +625,12 @@ class TvShowsMobileFragment : Fragment() {
             cs.connect(tabLang.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
             cs.connect(tabLang.id, ConstraintSet.TOP, container.id, ConstraintSet.BOTTOM)
 
+            // Barre d'icônes IPTV : sous les onglets, à droite
+            cs.connect(actions.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(actions.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+
             // RecyclerView: below tabs
-            cs.connect(recycler.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(recycler.id, ConstraintSet.TOP, actions.id, ConstraintSet.BOTTOM)
             cs.connect(recycler.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
             cs.connect(recycler.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
             cs.connect(recycler.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)

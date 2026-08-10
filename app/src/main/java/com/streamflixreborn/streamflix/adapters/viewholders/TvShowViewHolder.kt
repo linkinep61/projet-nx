@@ -1088,6 +1088,31 @@ class TvShowViewHolder(
                 ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
         }
         binding.tvTvShowTitle.text = tvShow.title
+        majEpgJaquette(binding)
+    }
+
+    /**
+     * Guide des programmes SUR la jaquette (mobile uniquement).
+     *
+     * 2026-08-11 (user : « tu prends toute la jaquette pour le faire, mais la forme de mes
+     * jaquettes ne bouge pas » + « ça s'affiche que quand on a cliqué sur la chaîne, ça sert
+     * à rien de l'afficher avant »).
+     *
+     * Règles, dans l'ordre où elles sont vérifiées :
+     *  1. UNIQUEMENT la chaîne en cours de lecture. Les autres affiches gardent leur logo —
+     *     c'est ce qui permet de continuer à reconnaître les chaînes en balayant la liste.
+     *  2. UNIQUEMENT si le guide connaît un programme en cours. Une chaîne inconnue du guide
+     *     garde son logo, on n'affiche pas un cadre vide.
+     *  3. Un film ou une série (VOD de Mon IPTV) n'a jamais de programme en cours : le calque
+     *     ne s'affichera donc jamais dessus, sans avoir à tester le type de contenu.
+     *
+     * Aucun accès réseau : le guide est déjà en mémoire, c'est un accès à une table de
+     * hachage. Appelée à chaque liaison de vue, donc elle doit rester triviale.
+     */
+    private fun majEpgJaquette(binding: ItemTvShowMobileBinding) {
+        com.streamflixreborn.streamflix.utils.EpgJaquette.appliquer(
+            binding.llEpgPoster, tvShow.id, tvShow.title,
+        )
     }
 
     private fun displayTvItem(binding: ItemTvShowTvBinding) {

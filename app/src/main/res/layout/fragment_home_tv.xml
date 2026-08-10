@@ -161,6 +161,114 @@
             tools:ignore="ContentDescription" />
     </FrameLayout>
 
+    <!-- 2026-08-11 (user « comme dans mon IPTV, on a la place sur la gauche quand on a le
+         mini lecteur qui s'affiche… pour la version télé » puis « on a qu'à mettre l'EPG que
+         sur la version télé ») : guide des programmes.
+
+         L'emplacement existait déjà et n'est occupé par RIEN : le mini lecteur est collé en
+         haut à DROITE (55 % de large), et updateHomeGridForMiniPlayer() repousse toute la
+         grille SOUS lui. La bande haut-gauche était donc vide. Aucun réagencement, on
+         remplit un trou (user : « sinon on t'ajoute seulement le menu EPG, pas besoin de
+         tout refaire »).
+
+         Non focusable de bout en bout : la navigation D-pad ne doit pas changer d'un poil.
+         Données : EpgStore (rapprochement par NOM de chaîne, indépendant du provider). -->
+    <LinearLayout
+        android:id="@+id/ll_epg_panel"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:elevation="8dp"
+        android:clickable="false"
+        android:focusable="false"
+        android:gravity="bottom"
+        android:paddingStart="4dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="10dp"
+        android:layout_marginStart="70dp"
+        android:layout_marginTop="10dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/mini_player_container"
+        app:layout_constraintTop_toBottomOf="@+id/mini_player_overlay"
+        app:layout_constraintBottom_toBottomOf="@+id/mini_player_container">
+
+        <TextView
+            android:id="@+id/tv_epg_channel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            tools:text="TF1" />
+
+        <TextView
+            android:id="@+id/tv_epg_now_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/epg_en_ce_moment"
+            android:textColor="#8AB4F8"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.12" />
+
+        <TextView
+            android:id="@+id/tv_epg_now_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            tools:text="Journal de 20h" />
+
+        <TextView
+            android:id="@+id/tv_epg_now_time"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:maxLines="1"
+            android:textColor="#B3FFFFFF"
+            android:textSize="13sp"
+            tools:text="20:00 – 20:45 · reste 12 min" />
+
+        <ProgressBar
+            android:id="@+id/pb_epg_now"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="3dp"
+            android:layout_marginTop="6dp"
+            android:max="1000"
+            android:progressTint="#8AB4F8"
+            android:progressBackgroundTint="#40FFFFFF" />
+
+        <TextView
+            android:id="@+id/tv_epg_next_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/epg_a_suivre"
+            android:textColor="#80FFFFFF"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.12" />
+
+        <TextView
+            android:id="@+id/tv_epg_next_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textColor="#CCFFFFFF"
+            android:textSize="14sp"
+            tools:text="21:10  Koh-Lanta" />
+    </LinearLayout>
+
     <!-- Nom de chaîne caché — garde le binding fonctionnel -->
     <TextView
         android:id="@+id/mini_player_channel_name"
