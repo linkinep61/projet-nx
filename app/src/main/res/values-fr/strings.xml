@@ -448,6 +448,26 @@
     <string name="settings_parental_unlock_title">Déverrouiller le contrôle parental</string>
     <string name="settings_parental_unlock_summary">Utilisez le code PIN administrateur pour supprimer le verrouillage du contrôle parental</string>
     <string name="settings_parental_max_age_title">Âge maximum autorisé</string>
+    <!-- 2026-08-10 (user « le mieux ce serait de fusionner ») : le contrôle parental
+         utilise maintenant le code du cadenas, celui qui verrouille déjà les providers.
+         Un seul code pour tout ; le PIN administrateur de secours n\'existe plus. -->
+    <string name="settings_parental_code_title">Code parental</string>
+    <string name="settings_parental_code_not_set">Aucun code défini — appuyez pour en créer un</string>
+    <string name="settings_parental_code_set">Code défini — appuyez pour le changer</string>
+    <string name="settings_parental_code_created">Code parental créé</string>
+    <string name="settings_parental_code_changed">Code parental mis à jour</string>
+    <string name="settings_parental_code_wrong_old">Code actuel incorrect</string>
+    <string name="settings_parental_code_current_hint">Code actuel</string>
+    <string name="settings_parental_code_new_hint">Nouveau code (4 à 8 chiffres)</string>
+    <string name="settings_parental_code_remove">Supprimer le code</string>
+    <string name="settings_parental_code_remove_message">Saisissez le code actuel. Le supprimer déverrouille aussi tous les providers verrouillés.</string>
+    <string name="settings_parental_code_removed">Code parental supprimé</string>
+    <string name="settings_parental_locked_providers_title">Providers verrouillés</string>
+    <string name="settings_parental_locked_providers_summary">Choisir les providers qui demandent le code</string>
+    <string name="settings_parental_locked_providers_count">%1$d provider(s) verrouillé(s)</string>
+    <string name="settings_parental_locked_providers_none">Aucun provider verrouillé</string>
+    <string name="settings_parental_locked_providers_dialog">Verrouiller des providers</string>
+    <string name="settings_parental_set_code_first">Créez d\'abord un code parental.</string>
     <string name="settings_parental_max_age_summary">Afficher uniquement les titres jusqu\'à cette classification d\'âge TMDb</string>
     <string name="settings_parental_max_age_disabled">Désactivé</string>
     <string name="settings_parental_requires_tmdb">Le contrôle parental fonctionne uniquement lorsque TMDb est activé.</string>

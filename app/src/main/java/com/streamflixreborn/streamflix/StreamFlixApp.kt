@@ -360,6 +360,9 @@ class StreamFlixApp : Application() {
         //   affichait CrashActivity (écran de rapport) et envoyait sur GitHub.
         //   Désormais Android gère les crashs normalement (dialog système standard).
         //   Pour réactiver en version test : décommenter le bloc ci-dessous.
+        // 2026-08-14 : réactivé quelques heures pour une campagne de diagnostic
+        //   (user : « au passage tu mets un rapport de crash »), puis RE-DÉSACTIVÉ
+        //   à sa demande — aucun rapport ne remontait des appareils concernés.
         /*
         try {
             val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -407,6 +410,7 @@ class StreamFlixApp : Application() {
                 kotlin.system.exitProcess(1)
             }
         } catch (_: Throwable) {}
+        
         */
 
         // 2026-05-17 (user "ça peut faire cracher l'application au démarrage

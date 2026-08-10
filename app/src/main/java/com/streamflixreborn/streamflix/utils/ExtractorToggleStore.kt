@@ -31,6 +31,9 @@ object ExtractorToggleStore {
     //   rankServers. Retirer "netu" de ce set pour la réactiver.
     private val FORCE_DISABLED = setOf("netu")
 
+    /** Noms forcés en dur — à ne jamais réécrire dans les préférences de l'utilisateur. */
+    val forces: Set<String> get() = FORCE_DISABLED
+
     /** Bonus score pour un extracteur favori sur le provider actuel.
      *  Valeur très élevée pour supplanter TOUT le tri automatique :
      *  un cœur = toujours en premier, quoi qu'il arrive. */
@@ -50,6 +53,63 @@ object ExtractorToggleStore {
     /** Met à jour l'ensemble complet des extracteurs désactivés. */
     fun setDisabled(names: Set<String>) {
         prefs().edit().putStringSet(PREF_KEY_DISABLED, names).apply()
+    }
+
+    /**
+     * Ensemble RÉELLEMENT enregistré, sans les forcés en dur.
+     *
+     * [getDisabled] ajoute FORCE_DISABLED à ce qu'il renvoie. Réécrire ce résultat inscrirait
+     * « netu » dans les préférences de l'utilisateur alors qu'il n'a rien demandé — et il y
+     * resterait même après un « Tout réinitialiser ». On lit donc le brut pour écrire.
+     */
+    fun getDisabledEnregistres(): Set<String> =
+        prefs().getStringSet(PREF_KEY_DISABLED, emptySet()) ?: emptySet()
+
+    /**
+     * Noms désactivés qui ne correspondent à AUCUN extracteur enregistré.
+     *
+     * 2026-08-11 (user : « tous les serveurs devraient apparaître dans Gérer les sources, sans
+     *   exception » + « quand tu fais désactiver ici, ça désactive le vrai extracteur ») :
+     *
+     *   Le nom d'un serveur peut être reconnu par son LIBELLÉ et pas seulement par son URL
+     *   (ExtractorRanker.extractKeywordFromServerName). Un hébergeur dont l'extracteur a été
+     *   retiré du registre — « Streamhg » l'a été le 13/07 — continue donc d'apparaître dans
+     *   la liste des serveurs, et un appui long peut le désactiver.
+     *
+     *   Or le sélecteur « Gérer les sources » ne listait que [allExtractorNames] : ce nom-là
+     *   n'y figurait pas, donc l'utilisateur ne pouvait NI le voir NI le réactiver — sauf à
+     *   tout réinitialiser. C'est exactement le piège qu'on vient de corriger pour les liens,
+     *   qui serait revenu par une autre porte. On expose donc ces noms pour que le sélecteur
+     *   les affiche aussi.
+     */
+    fun desactivesHorsRegistre(): List<String> {
+        val connus = allExtractorNames().map { it.lowercase() }.toSet()
+        return getDisabledEnregistres()
+            .filter { it.isNotBlank() && it !in connus && it !in FORCE_DISABLED }
+            .sorted()
+    }
+
+    /**
+     * Désactive un extracteur (appui long sur un serveur dans le lecteur).
+     *
+     * 2026-08-11 (user : « si la personne désactive LuluVdo ça devrait désactiver
+     *   l'extracteur à la base, du coup on était sûr que ça revienne pas », et « c'est pour
+     *   ça que quand j'allais dans Gérer les sources je trouvais pas les serveurs, je
+     *   trouvais pas ça normal ») :
+     *
+     *   Avant, l'appui long désactivait UN LIEN, repéré par son `id`. Or beaucoup de
+     *   providers numérotent leurs serveurs par POSITION (`tmdbmovix-${list.size}`) : au
+     *   scrape suivant le lien revenait sous un autre numéro, et un lien innocent héritait
+     *   de l'ancien. Et comme un lien n'est pas un extracteur, il n'apparaissait nulle part
+     *   dans « Gérer les sources » — d'où l'impression, justifiée, que rien n'était géré.
+     *
+     *   Désactiver l'EXTRACTEUR règle les deux : plus aucune source ne peut le ramener,
+     *   quel que soit son id, et il est visible et recochable dans « Gérer les sources ».
+     */
+    fun desactiverExtracteur(extractorNameLower: String) {
+        if (extractorNameLower.isBlank()) return
+        val set = getDisabledEnregistres().toMutableSet()
+        if (set.add(extractorNameLower)) setDisabled(set)
     }
 
     /** Vérifie si un extracteur est activé (= PAS dans la liste disabled). */

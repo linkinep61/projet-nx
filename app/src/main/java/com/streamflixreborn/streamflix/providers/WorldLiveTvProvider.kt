@@ -63,6 +63,10 @@ object WorldLiveTvProvider : Provider, IptvProvider {
     //   qui fait lire CNN Portugal (1ᵉʳ lien 404, 2ᵉ lien OK) et SIC Notícias.
     //   Wiseplay affiche 19 parce qu'il ne teste rien. Ne pas remettre de source ici sans
     //   avoir relu cette histoire.
+    // 2026-08-11 (user : « tu me refusionnes les chaînes en double, c'était pas ça le
+    //   problème ») : la fusion reste ACTIVE. Deux entrées de même `tvg-id` = une chaîne
+    //   avec un serveur de secours. Avec l'empilement d'URLs désormais coupé, ça donne
+    //   bien DEUX serveurs pour RTP Notícias, comme dans la source — et non six.
     private val SANS_FUSION_DOUBLONS = emptyList<String>()
 
     /**
@@ -805,12 +809,12 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                             //   On ignore donc les valeurs qui ne sont pas un User-Agent
                             //   plausible (pas de « / », moins de 8 caractères) et l'UA par
                             //   défaut reprend la main.
-                            "http-user-agent" -> pendingUa = kv[1]
-                                .takeIf { it.length >= 8 && it.contains('/') }
-                                ?: run {
-                                    Log.d(TAG, "UA « ${kv[1]} » ignoré (alias, pas un User-Agent)")
-                                    null
-                                }
+                            // ⚠ 2026-08-11 — USER-AGENT TRANSMIS TEL QUEL, PAS DE FILTRE.
+                            //   Mesure directe sur le CDN de la RTP, un seul paramètre change :
+                            //     aucun User-Agent → 204, corps vide → chaîne muette
+                            //     « IE »           → 200 + playlist
+                            //   Mon filtre jetait « IE » en le prenant pour un alias Kodi.
+                            "http-user-agent" -> pendingUa = kv[1].takeIf { it.isNotBlank() }
                             "http-referrer", "http-referer" -> pendingReferer = kv[1]
                             "http-origin" -> pendingOrigin = kv[1]
                         }
@@ -828,12 +832,11 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 //   auraient été prises pour des URLs.
                 line.removePrefix("+").startsWith("http", ignoreCase = true) &&
                     pendingExtinf == null && out.isNotEmpty() -> {
-                    val urlSup = line.removePrefix("+")
-                    val dernier = out[out.size - 1]
-                    out[out.size - 1] = dernier.copy(
-                        extraServers = dernier.extraServers +
-                            Triple(urlSup, dernier.userAgent, dernier.referer)
-                    )
+                    // ⚠ 2026-08-11 — IGNORÉES. Ne pas les remettre en serveurs de secours.
+                    //   Elles fabriquaient six serveurs là où la source en montre deux, et
+                    //   la chaîne, qui lisait quand la playlist venait d'être ajoutée, ne
+                    //   lisait plus. On les reconnaît quand même ici pour que la branche
+                    //   suivante ne les prenne pas pour des chaînes sans nom.
                 }
                 line.isNotBlank() && !line.startsWith("#") -> {
                     // C'est une URL stream
@@ -1781,7 +1784,32 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         //   réessayer, idéalement en second essai plutôt qu'en premier.
         @Suppress("UNUSED_VARIABLE")
         val originDispo = ch?.origin
-        val avecOrigin = corrige
+
+        // ⚠ 2026-08-11 — EN-TÊTES REMIS À CEUX DE LA PLAYLIST. C'ÉTAIT ÇA, LE BUG.
+        //
+        //   World Live fait passer ses URLs par le résolveur générique, qui appartient à
+        //   Box Xtemus. Ce résolveur rend la vidéo avec SES propres en-têtes, dont
+        //   `Referer: https://box.xtemus.com/`. On envoyait donc au CDN de la RTP un
+        //   referer d'un site qui n'a rien à voir avec lui, et il répondait par un corps
+        //   vide — d'où « Input does not start with the #EXTM3U header » en 100 ms, sur
+        //   tous les serveurs, pendant que la même URL lisait parfaitement depuis Mon
+        //   IPTV, qui n'envoie aucun Referer.
+        //
+        //   Journal de comparaison, même URL, même appareil :
+        //     World Live : entetes=[Referer, User-Agent] referer=https://box.xtemus.com/ → échec
+        //     Mon IPTV   : aucun Referer                                                 → lit
+        //
+        //   Règle : une chaîne de playlist n'envoie que ce que SA ligne déclare. Le
+        //   User-Agent et le Referer viennent de `#EXTVLCOPT`, rien d'autre ne s'invite.
+        val enTetesPlaylist = buildMap {
+            ch?.userAgent?.takeIf { it.isNotBlank() }?.let { put("User-Agent", it) }
+            ch?.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+        }
+        val refParasite = corrige.headers?.get("Referer") ?: corrige.headers?.get("Referrer")
+        if (refParasite != null && ch?.referer.isNullOrBlank()) {
+            Log.i(TAG, "Referer étranger retiré pour « ${ch?.name} » : $refParasite")
+        }
+        val avecOrigin = corrige.copy(headers = enTetesPlaylist)
 
         val type = ch?.drmType
         val licence = ch?.drmLicense

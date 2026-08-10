@@ -287,7 +287,72 @@ object ExtractorRanker {
     fun rankServers(servers: List<Video.Server>): List<Video.Server> {
         val _rs = System.currentTimeMillis()
         Log.d("RANK", "ENTER n=${servers.size} thread=${Thread.currentThread().name}")
-        if (servers.size <= 1) return servers
+
+        // ══════════════════════════════════════════════════════════════════════════════════
+        // LIENS DÉSACTIVÉS À LA MAIN (appui long sur un serveur) — VRAI COUPE-CIRCUIT.
+        //
+        // 2026-08-11 (user : « c'est honteux, ça devrait pas être caché, ça devrait être
+        //   désactivé ; on a mis ces options pour les désactiver complètement, pour éviter
+        //   que ce soit recherché » puis « de base ça devait être directement branché
+        //   là-dessus »). Il a raison, et voici ce qui n'allait pas :
+        //
+        //   Depuis le 06/08, `LiensDesactives` n'était consulté QU'À UN SEUL endroit : la
+        //   construction de la liste du menu, dans PlayerTvFragment et PlayerMobileFragment.
+        //   Autrement dit un simple filtre d'AFFICHAGE. Conséquences mesurées dans le code :
+        //     • PlayerViewModel n'y faisait aucune référence → le lien restait dans
+        //       `state.servers` et partait quand même en PRÉ-EXTRACTION (`servers.take(N)`) ;
+        //     • `computeInitialServer()` = `favServer ?: firstNonBanned ?: servers.first()`,
+        //       où `firstNonBanned` ne consulte que les bans IPTV → un lien désactivé pouvait
+        //       être CHOISI ET JOUÉ tout en étant invisible dans le menu.
+        //
+        //   On le branche donc ici, au même point de contrôle que les extracteurs décochés
+        //   dans « Gérer les sources » — le seul endroit traversé par tout le monde, puisque
+        //   PlayerViewModel passe chaque lot par rankServers avant de l'exposer. Un lien
+        //   désactivé sort du pool : pas affiché, pas pré-extrait, pas jouable.
+        //
+        // ⚠ Placé AVANT le raccourci `size <= 1` : sinon un titre à un seul serveur aurait
+        //   échappé au filtre, ce qui est précisément le cas le plus pénible.
+        // ⚠ Et ce filtre n'a PAS de repêchage « si tout est filtré, on garde tout » comme
+        //   celui des extracteurs : c'est une décision explicite de l'utilisateur, la
+        //   contredire serait reproduire le bug qu'on corrige. Tout est réactivable dans
+        //   Paramètres › Liens désactivés.
+        // ══════════════════════════════════════════════════════════════════════════════════
+        val actifs = try {
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
+            // 2026-08-11 (user : « je veux juste être sûr que chaque lien vraiment désactivé
+            //   ne revienne pas ») : on compare sur l'URL, pas sur l'id — beaucoup de
+            //   providers numérotent leurs serveurs par POSITION (`tmdbmovix-${list.size}`),
+            //   donc l'id désigne un rang, pas un lien. Voir LiensDesactives.
+            val desactives = LiensDesactives.liens(ctx)
+            val parUrl = desactives.mapNotNull { it.url.takeIf(String::isNotBlank) }.toSet()
+            val parId = desactives.map { it.id }.filter { it.isNotBlank() }.toSet()
+            if (desactives.isEmpty()) servers
+            else servers.filterNot { it.src in parUrl || it.id in parId }.also { restants ->
+                if (restants.size != servers.size) {
+                    Log.i(
+                        "RANK",
+                        "liens désactivés par l'utilisateur : ${servers.size - restants.size} " +
+                            "écarté(s) du pool (ni affichés, ni pré-extraits, ni jouables)",
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            // Prefs indisponibles (contexte non initialisé) : on ne casse pas la lecture.
+            Log.w("RANK", "filtre liens désactivés ignoré : ${e.message}")
+            servers
+        }
+
+        // ⚠ 2026-08-11 (user : « tu as parlé trop vite ») — LE RACCOURCI ÉTAIT UNE FUITE.
+        //   Il y avait ici `if (size <= 1) return` : « un seul serveur, rien à trier ». Vrai
+        //   pour le TRI, faux pour le FILTRE. Or les serveurs arrivent par vagues, et une vague
+        //   d'UN SEUL serveur est courante — le log le montre :
+        //       ENTER n=1   (sortie immédiate, aucun filtre)
+        //       ENTER n=2 → userDisabled=122 → filtered=1
+        //   Résultat : avec 122 extracteurs coupés, un serveur pouvait quand même passer, juste
+        //   parce qu'il était arrivé seul. On ne sort donc plus avant d'avoir filtré ; on ne
+        //   saute que le tri, qui lui n'a effectivement aucun sens sur un seul élément.
+        @Suppress("NAME_SHADOWING") val servers = actifs
+        if (servers.isEmpty()) return servers
 
         // 2026-05-27 : filtre les extracteurs désactivés manuellement par l'user.
         // 2026-07-05 : OPTIM — resolveExtractorName() itère 80+ extracteurs par serveur
@@ -318,7 +383,22 @@ object ExtractorRanker {
             } else servers
         }
         Log.d("RANK", "E après filtre filtered=${filtered.size} ${System.currentTimeMillis()-_rs}ms")
-        if (filtered.isEmpty()) return servers  // sécurité : si tout filtré, on garde tout
+        // 2026-08-11 (user : « si l'extracteur est désactivé faut plus que les serveurs
+        //   apparaissent — tout ce qui passe par cet extracteur-là ») :
+        //   AVANT, un `return servers` remettait TOUT en place quand le filtre ne laissait
+        //   rien. Sur un titre dont tous les liens viennent d'un seul hébergeur désactivé,
+        //   ils revenaient donc tous — exactement ce qu'il ne faut pas.
+        //   Le repêchage ne vaut plus que pour le forcé en dur (netu) : là, aucune décision
+        //   de l'utilisateur n'est en jeu, et se retrouver sans aucun serveur à cause d'un
+        //   choix qu'il n'a pas fait n'aurait pas de sens. Dès qu'il a désactivé quelque
+        //   chose lui-même, sa décision est respectée jusqu'au bout : zéro serveur affiché
+        //   plutôt qu'un serveur qu'il a refusé.
+        if (filtered.isEmpty()) {
+            val choixUtilisateur = (disabled - NETU_HOSTS_SET - setOf("netu")).isNotEmpty()
+            if (!choixUtilisateur) return servers
+            Log.i("RANK", "tous les serveurs relèvent d'un extracteur désactivé → aucun proposé")
+            return emptyList()
+        }
 
         // 2026-07-04 (user "qualité, cœur, langue ça suffit" + "un serveur qui arrive en 0,5s
         //   doit s'afficher en 0,5s, il y a un blocage qui retient l'arrivée"). Tri ULTRA-LÉGER.

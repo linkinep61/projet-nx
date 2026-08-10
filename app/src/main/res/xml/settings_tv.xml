@@ -126,28 +126,21 @@
             <Preference
                 android:key="p_settings_extractor_toggle"
                 android:title="Gérer les sources"
-                android:summary="Activer/désactiver les extracteurs vidéo, mettre en favori" />
+                android:summary="Sources et extracteurs — décochez pour désactiver. Les désactivés apparaissent en haut de la liste." />
 
 
-            <!-- 2026-08-06 : liens désactivés par appui long dans la liste des serveurs du
-                 lecteur. Voir utils/LiensDesactives.kt. -->
-            <Preference
-                android:key="p_settings_liens_desactives"
-                android:title="Liens désactivés"
-                android:summary="Réactiver les liens que vous avez désactivés par appui long" />
+            <!-- 2026-08-11 (user : « c'est pour ça que je disais que l'onglet Liens désactivés
+                 n'est pas utile, et ça tu pourras le virer ») : écran RETIRÉ. L'appui long
+                 désactive désormais l'EXTRACTEUR, qui se recoche dans « Gérer les sources ». -->
             <Preference
                 android:key="refresh_provider_caches"
                 android:title="Rafraîchir les caches des providers"
                 android:summary="Remet les providers à neuf (caches serveurs, extraction, home). Garde vos favoris et « continuer à regarder ». N'affecte pas les chaînes IPTV." />
 
-            <!-- 2026-07-10 (user "désactiver les backups un par un") : chaque source cochée = active. -->
-            <MultiSelectListPreference
-                android:key="ENABLED_BACKUPS"
-                android:title="Backups actifs"
-                android:summary="Décochez une source pour la désactiver (en cas de problème)"
-                android:entries="@array/backup_source_labels"
-                android:entryValues="@array/backup_source_keys"
-                android:defaultValue="@array/backup_source_keys" />
+            <!-- 2026-07-10 (user "désactiver les backups un par un") : chaque source cochée = active.
+                 2026-08-11 (user : « si je veux désactiver Cloudstream, ils doivent être affichés
+                 au même endroit ») : écran FUSIONNÉ dans « Gérer les sources » ci-dessus. La clé
+                 ENABLED_BACKUPS est inchangée — les réglages déjà faits sont conservés. -->
 
             <!-- 2026-08-06 : « Signaler les sources cassées » RETIRÉ de l'interface. Le signalement par appui long a été remplacé par la DÉSACTIVATION du lien (cf. LiensDesactives). La préférence reportBrokenSources reste lue par CrashActivity, on ne la supprime donc pas du code. -->
 
@@ -191,27 +184,16 @@
             android:key="pc_parental_control_settings"
             android:title="@string/settings_category_parental_control">
 
-            <EditTextPreference
-                android:key="PARENTAL_CONTROL_PIN"
-                android:title="@string/settings_parental_pin_title"
-                android:summary="@string/settings_parental_pin_summary"
-                android:inputType="numberPassword" />
-
-            <EditTextPreference
-                android:key="PARENTAL_CONTROL_ADMIN_PIN"
-                android:title="@string/settings_parental_admin_pin_title"
-                android:summary="@string/settings_parental_admin_pin_summary"
-                android:inputType="numberPassword" />
+            <!-- 2026-08-10 : voir settings_mobile.xml — un seul code, celui du cadenas. -->
+            <Preference
+                android:key="PARENTAL_CODE"
+                android:title="@string/settings_parental_code_title"
+                android:summary="@string/settings_parental_code_not_set" />
 
             <Preference
-                android:key="PARENTAL_CONTROL_REMOVE_PIN"
-                android:title="@string/settings_parental_remove_pin_title"
-                android:summary="@string/settings_parental_remove_pin_summary" />
-
-            <Preference
-                android:key="PARENTAL_CONTROL_REMOVE_ADMIN_PIN"
-                android:title="@string/settings_parental_remove_admin_pin_title"
-                android:summary="@string/settings_parental_remove_admin_pin_summary" />
+                android:key="PARENTAL_LOCKED_PROVIDERS"
+                android:title="@string/settings_parental_locked_providers_title"
+                android:summary="@string/settings_parental_locked_providers_summary" />
 
             <ListPreference
                 android:key="PARENTAL_CONTROL_MAX_AGE"
@@ -220,11 +202,6 @@
                 android:entries="@array/parental_control_age_entries"
                 android:entryValues="@array/parental_control_age_values"
                 android:defaultValue="" />
-
-            <Preference
-                android:key="PARENTAL_CONTROL_UNLOCK"
-                android:title="@string/settings_parental_unlock_title"
-                android:summary="@string/settings_parental_unlock_summary" />
         </PreferenceCategory>
     </PreferenceScreen>
 

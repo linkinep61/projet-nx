@@ -947,6 +947,32 @@ class PlayerViewModel(
             }
             Log.d("ServDiag", "path provider=${provider.name} progressive=${provider is com.streamflixreborn.streamflix.providers.ProgressiveServersProvider}")
 
+            // ⚠ 2026-08-11 (user : « il doit être désactivable comme les autres ») :
+            //   le provider COURANT émettait ses serveurs natifs quoi qu'il arrive. Après un
+            //   « tout désactiver », les 21 backups étaient bien coupés mais Cloudstream —
+            //   le provider en cours de navigation — continuait de servir les siens
+            //   (`cs_playinfo_…`, API aoneroom). Décoché doit vouloir dire coupé, sans
+            //   exception : on n'interroge donc PAS un provider que l'utilisateur a refusé.
+            //   Le contrôle est ici, AVANT tout appel réseau, et non au filtrage : l'objectif
+            //   est qu'aucune requête ne parte, pas qu'on jette la réponse.
+            //   IPTV exclu : ses chaînes ne sont pas des « sources » au sens du sélecteur, et
+            //   les couper reviendrait à vider l'écran des chaînes sans rapport avec la demande.
+            //   ⚠ 2026-08-11, correction immédiate (user : « ça fait zéro serveur dans la
+            //   foulée ? il devrait quand même tenter de chercher une source ») : ma 1ʳᵉ
+            //   version coupait TOUT le chemin, backups compris. C'était faux. Décocher un
+            //   provider ne doit supprimer QUE ses serveurs à lui ; les autres sources
+            //   doivent continuer à chercher normalement. On ne pose donc qu'un drapeau, et
+            //   c'est le flux NATIF seul qui est remplacé par un flux vide plus bas.
+            val natifsRefuses = provider !is IptvProvider &&
+                !UserPreferences.isBackupSourceEnabled(provider.name)
+            if (natifsRefuses) {
+                Log.i(
+                    "ServDiag",
+                    "${provider.name} → provider DÉSACTIVÉ : ses serveurs natifs sont ignorés, " +
+                        "les backups continuent de chercher",
+                )
+            }
+
             // 2026-07-07 (FIX BLOCAGE GÉNÉRIQUE TOUS PROVIDERS) : le pool de connexions
             //   OkHttp est PARTAGÉ par tous les providers VOD (NetworkClient.sharedConnectionPool
             //   + Extractor.sharedClient). Un provider lourd en WebView/CF (DessinAnime) laisse
@@ -977,7 +1003,7 @@ class PlayerViewModel(
                 //   désarme. Il reste armé sur le chemin non-progressif, celui pour lequel
                 //   il avait été écrit.
                 hangWatcher.cancel()
-                collectProgressiveServers(provider, id, videoType)
+                collectProgressiveServers(provider, id, videoType, natifsRefuses)
                 return@launch
             }
             // 2026-05-22 : démarrer le collecteur additionalServers AVANT le getServers
@@ -1001,7 +1027,9 @@ class PlayerViewModel(
             //   recovery existante (nuclearCachePurge + retry ci-dessous) prend le relais et
             //   l'écran ne reste plus figé indéfiniment. IPTV EXCLU (serveurs via
             //   additionalServersFlow, getServers peut légitimement rendre vide, pas de cap).
-            val rawServers = if (provider is IptvProvider) {
+            val rawServers = if (natifsRefuses) {
+                emptyList()   // provider décoché : on ne l'interroge pas, mais on n'arrête rien
+            } else if (provider is IptvProvider) {
                 fetchServersWithRetry(provider, id, videoType)
             } else {
                 kotlinx.coroutines.withTimeoutOrNull(35_000L) {
@@ -1016,6 +1044,13 @@ class PlayerViewModel(
                 // (onglet Chaîne), pas via getServers. Ne pas lancer d'exception.
                 if (provider is IptvProvider) {
                     Log.d("PlayerViewModel", "IPTV: 0 serveurs sync, émission via additionalServers (Chaîne tab)")
+                    _state.emit(State.SuccessLoadingServers(emptyList()))
+                    return@launch
+                }
+                // Provider décoché : 0 natif est le comportement VOULU, pas une panne. Ni
+                // purge de cache, ni exception — on laisse la main aux autres sources.
+                if (natifsRefuses) {
+                    Log.i("ServDiag", "${provider.name} décoché → 0 natif (normal)")
                     _state.emit(State.SuccessLoadingServers(emptyList()))
                     return@launch
                 }
@@ -1124,6 +1159,11 @@ class PlayerViewModel(
         provider: com.streamflixreborn.streamflix.providers.ProgressiveServersProvider,
         id: String,
         videoType: Video.Type,
+        // 2026-08-11 (user : « il devrait quand même tenter de chercher une source ») :
+        //   true = le provider a été décoché par l'utilisateur. On remplace son flux natif par
+        //   un flux VIDE, et RIEN d'autre ne change : le registre de backups tourne exactement
+        //   comme d'habitude et peut remplir la liste tout seul.
+        ignorerNatifs: Boolean = false,
     ) {
         val accumulated = mutableListOf<Video.Server>()
         val seenIds = HashSet<String>()
@@ -1452,7 +1492,12 @@ class PlayerViewModel(
 
             // merge() → handleBatch sérialisé (aucune mutation concurrente des collections).
             val _tNat = System.currentTimeMillis()
-            val nativeFlow = provider.getServersProgressive(id, videoType)
+            // Provider décoché → flux natif VIDE. On n'appelle même pas getServersProgressive,
+            // donc aucune requête ne part vers lui. Le backupFlow ci-dessus, lui, est intact.
+            val nativeFlow = if (ignorerNatifs) {
+                Log.i("ServDiagT", "NATIVE flow IGNORÉ (provider décoché) — seuls les backups alimentent la liste")
+                kotlinx.coroutines.flow.emptyFlow()
+            } else provider.getServersProgressive(id, videoType)
                 .onEach { Log.i("ServDiagT", "NATIVE flow a ÉMIS size=${it.size} à ${System.currentTimeMillis()-_tNat}ms") }
                 // 2026-07-04 : forcer l'exécution du flow natif sur IO — sinon
                 //   withContext(IO) dans channelFlow reprend sur Main (viewModelScope),
@@ -1706,11 +1751,30 @@ class PlayerViewModel(
                     else             -> 2   // langue opposée explicite (VF sur épisode VOSTFR ou inverse)
                 }
             } else {
-                // Pas de langue détectable → comportement classique VF > VOSTFR > VO
+                // Pas de langue détectable → VF prouvé > VOSTFR prouvé > inconnu > VO
+                // ⚠ 2026-08-11 (user : « EMBED, gros problème, ils me proposent des serveurs
+                //   qui ne sont pas dans la bonne langue… soit c'est en VOSTFR soit en FR,
+                //   mais rien d'autre »).
+                //
+                //   AVANT : `else -> 0`, c'est-à-dire « vf OU INCONNU = tête ». Un serveur
+                //   dont le nom ne porte aucun marqueur de langue était donc promu AU MÊME
+                //   RANG qu'un VF prouvé — et passait devant lui au tri suivant. C'est ce qui
+                //   plaçait « VixSrc », « VidLink » et compagnie en tête de liste alors qu'ils
+                //   servent de la VO : ils ne se glissaient pas dans la liste, ils la prenaient.
+                //
+                //   MAINTENANT : l'inconnu a son propre rang, derrière tout ce qui est prouvé
+                //   français. Rien ne disparaît — c'est un changement d'ORDRE, pas de filtre,
+                //   donc aucun serveur ne peut être perdu. Mais plus rien d'incertain ne passe
+                //   devant un VF avéré.
+                //
+                //   La branche `curLang != null` juste au-dessus faisait déjà exactement ça
+                //   (« pas de tag = neutre, en bas mais visible ») ; les deux branches sont
+                //   enfin cohérentes.
                 when (lang) {
-                    "vostfr" -> 1
-                    "vo"     -> 999
-                    else     -> 0  // vf ou unknown = tête
+                    "vf"      -> 0
+                    "vostfr"  -> 1
+                    "vo"      -> 999
+                    else      -> 2   // inconnu : visible, mais jamais devant un français prouvé
                 }
             }
         }

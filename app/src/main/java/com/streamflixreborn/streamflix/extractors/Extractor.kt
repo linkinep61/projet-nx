@@ -211,6 +211,10 @@ abstract class Extractor {
             USTRExtractor(),
             VidGuardExtractor(),
             OkruExtractor(),
+            // 2026-08-13 : Rutube (rutube.ru) — hébergeur russe comme ok.ru/VK/Mail.ru.
+            //   Sert les embeds rutube.ru des dessins animés + la source backup par titre.
+            //   API /api/play/options → master HLS (délégué à RutubeProvider.resolveById).
+            RutubeExtractor(),
             VixSrcExtractor(),
             // 2026-07-23 : importés depuis streamflix-reborn (upstream) — hosts qu'on
             //   n'avait pas. Additifs, domaines vérifiés sans chevauchement avec l'existant.

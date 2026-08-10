@@ -128,8 +128,29 @@ class GlobalFavoritesMobileFragment : Fragment() {
                 ).apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
             }
 
+            // 2026-08-13 (user : « ça me dérange pas qu'ils apparaissent dans le cœur favori,
+            //   celui du home, MAIS dans une nouvelle catégorie » — pour retrouver ses clips
+            //   sans passer par le TV Hub) : les ★ Rutube sortent de la section « Replays »
+            //   et forment leur PROPRE catégorie plus bas.
+            val rutubeFavs = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all()
+                .filter { com.streamflixreborn.streamflix.providers.RutubeFolder.estClipDossier(it.id) }
+                .map { e ->
+                    TvShow(
+                        id = e.syntheticId(),
+                        title = e.title,
+                        poster = e.poster,
+                        banner = e.banner,
+                    ).apply {
+                        itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM
+                        isMovie = true          // clip = lecture directe, pas de fiche saisons
+                        providerName = "TV Hub"
+                    }
+                }
+
             // 2026-06-20 : favoris replay (séries/films du TV Hub replay)
-            val replayFavs = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all().map { e ->
+            val replayFavs = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all()
+                .filterNot { com.streamflixreborn.streamflix.providers.RutubeFolder.estClipDossier(it.id) }
+                .map { e ->
                 TvShow(
                     id = e.syntheticId(),
                     title = e.title,
@@ -192,6 +213,18 @@ class GlobalFavoritesMobileFragment : Fragment() {
                 categories += Category(name = "Replays", list = replayFavs).apply {
                     itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
                     onClearSection = { clearSection("Replays") }
+                }
+            }
+            // 2026-08-13 : catégorie DÉDIÉE aux ★ du dossier Rutube (demande user) → on retrouve
+            //   ses clips depuis le ❤ de l'accueil, sans passer par le TV Hub.
+            if (rutubeFavs.isNotEmpty()) {
+                // 2026-08-14 : lancer un clip DEPUIS le ❤ doit enchaîner sur les FAVORIS,
+                //   pas sur la dernière recherche du dossier. On publie donc cette liste
+                //   comme file de lecture courante.
+                com.streamflixreborn.streamflix.providers.RutubeFolder
+                    .publierListeAffichee(rutubeFavs.filterIsInstance<com.streamflixreborn.streamflix.models.TvShow>())
+                categories += Category(name = "Rutube", list = rutubeFavs).apply {
+                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
                 }
             }
             val resumeItems: List<AppAdapter.Item> = cwMovies + cwSeriesCards

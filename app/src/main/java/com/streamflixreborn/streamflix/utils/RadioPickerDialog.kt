@@ -702,6 +702,11 @@ object RadioPickerDialog {
                             streamUrl = null,
                         )
                     }
+                    // 2026-08-14 (user : « fais en sorte qu'ils ramènent les albums plus
+                    //   rapidement ») : on affiche les artistes DÈS qu'ils arrivent, sans
+                    //   attendre les albums. Avant, un seul affichage après les deux : l'écran
+                    //   restait vide le temps de la plus lente des deux requêtes.
+                    recomposer()
                     lignesAlbums = albumsD.await().map { alb -> albumEnLigne(alb) }
                     recomposer()
 
@@ -712,10 +717,15 @@ object RadioPickerDialog {
                     titresBruts.addAll(0, zf)
                     recomposer()
 
-                    // ── ÉTAPE 3 — FileSearch ────────────────────────────────────────────
-                    val fs = try { FileSearchProvider.searchAudio(q) } catch (_: Throwable) { emptyList() }
-                    titresBruts.addAll(fs)
-                    recomposer()
+                    // ── ÉTAPE 3 — (supprimée) ───────────────────────────────────────────
+                    // 2026-08-14 (user : « je voudrais enlever FileSearch de l'équation, il
+                    //   rapporte des musiques mais la plupart sont brouillons ; je vais
+                    //   uniquement garder le site web qu'il y a en place ») : FileSearch ne
+                    //   participe donc plus à la recherche MUSIQUE. Il rendait des fichiers
+                    //   d'annuaires ouverts, mal nommés et sans album ni durée, et c'était la
+                    //   requête la plus lente après NewPipe → la recherche est aussi plus vive.
+                    //   ⚠ FileSearchProvider RESTE utilisé ailleurs (sauvegardes, lecture
+                    //   d'un résultat déjà en favori) : ne pas le retirer du projet.
 
                     // ── ÉTAPE 4 — NewPipe, EN DERNIER RECOURS SEULEMENT ─────────────────
                     // 2026-08-04 (user : « la recherche NewPipe, je pense que le dernier site

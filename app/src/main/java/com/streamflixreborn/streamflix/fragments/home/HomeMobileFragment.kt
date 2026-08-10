@@ -179,6 +179,7 @@ class HomeMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        arreterEpg()
         appAdapter.onSaveInstanceState(binding.rvHome)
         // v91 : sauve la position verticale du Home pour la restaurer au retour.
         homeLayoutState = binding.rvHome.layoutManager?.onSaveInstanceState()
@@ -294,6 +295,9 @@ class HomeMobileFragment : Fragment() {
             observeMiniPlayerState()
             return
         }
+
+        // Guide des programmes : chargé une seule fois (cache disque 12 h), en tâche de fond.
+        demarrerEpg()
 
         // Initialize ExoPlayer for mini player
         MiniPlayerController.initPlayer(requireContext())
@@ -448,6 +452,44 @@ class HomeMobileFragment : Fragment() {
      * Quand le state passe à Loading/Playing, on attache dynamiquement la
      * PlayerView et les boutons si ce n'est pas déjà fait.
      */
+    // ── EPG sur les jaquettes ────────────────────────────────────────────────────────
+    // 2026-08-11 (user : « ça s'affiche que quand on a cliqué sur la chaîne, ça sert à rien
+    //   de l'afficher avant ») : le calque ne concerne QUE la chaîne en cours. On le
+    //   rafraîchit au changement de chaîne et toutes les 30 s pour le temps restant.
+    private val epgHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val epgTicker = object : Runnable {
+        override fun run() {
+            rafraichirJaquettesEpg()
+            epgHandler.postDelayed(this, 30_000L)
+        }
+    }
+
+    private fun demarrerEpg() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                com.streamflixreborn.streamflix.utils.EpgStore
+                    .prechargerSiNecessaire(requireContext().applicationContext)
+            } catch (e: Exception) {
+                Log.w("HomeMobile", "EPG : préchargement KO — ${e.message}")
+            }
+            rafraichirJaquettesEpg()
+        }
+        epgHandler.removeCallbacks(epgTicker)
+        epgHandler.postDelayed(epgTicker, 30_000L)
+    }
+
+    private fun arreterEpg() = epgHandler.removeCallbacks(epgTicker)
+
+    /**
+     * Met à jour les calques DÉJÀ à l'écran, sans repasser par les adaptateurs : un
+     * `notifyItemChanged` relierait toute la vue (donc rechargement Glide de l'affiche) et
+     * ferait sauter la position de défilement des listes imbriquées.
+     */
+    private fun rafraichirJaquettesEpg() {
+        val racine = _binding?.root ?: return
+        com.streamflixreborn.streamflix.utils.EpgJaquette.rafraichirTout(racine)
+    }
+
     private var miniPlayerObserverJob: kotlinx.coroutines.Job? = null
     private fun observeMiniPlayerState() {
         if (miniPlayerObserverJob?.isActive == true) return
@@ -457,6 +499,8 @@ class HomeMobileFragment : Fragment() {
                 // 2026-06-22 : animation fluide — la liste se comprime
                 // quand le mini player apparaît (glissement smooth)
                 val wasVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
+                // La chaîne en cours vient peut-être de changer : le calque EPG suit.
+                binding.root.post { rafraichirJaquettesEpg() }
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
                         if (wasVisible) {

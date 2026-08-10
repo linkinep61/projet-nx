@@ -1276,18 +1276,45 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     // 2026-08-06 : l'appui long DÉSACTIVE le lien (le signalement est supprimé).
                     //   Même comportement que sur mobile ; réactivable dans « Gérer les sources ».
                     binding.root.setOnLongClickListener {
+                        // 2026-08-11 (user : « si la personne désactive LuluVdo ça devrait
+                        //   désactiver l'extracteur à la base, du coup on était sûr que ça
+                        //   revienne pas » ; et « quand j'allais dans Gérer les sources je
+                        //   trouvais pas les serveurs, je trouvais pas ça normal ») : on vise
+                        //   l'EXTRACTEUR, plus le lien seul. Un lien porte un id souvent
+                        //   POSITIONNEL (numéroté par rang dans la liste du provider) : il
+                        //   revenait au scrape suivant sous un autre numéro. Un extracteur ne
+                        //   peut être ramené par aucune source, et il est recochable dans
+                        //   « Gérer les sources ». Repli sur le lien seul si aucun extracteur
+                        //   ne se reconnaît (fichier direct, flux natif d'un provider).
+                        val extracteurCible = com.streamflixreborn.streamflix.utils.ExtractorRanker
+                            .resolveExtractorName(
+                                com.streamflixreborn.streamflix.models.Video.Server(
+                                    id = item.id, name = item.name, src = item.src,
+                                )
+                            )
                         // 2026-08-06, correction immédiate : le user a désactivé une source par un appui long
                     //   involontaire. Une action destructive DOIT demander confirmation.
                     androidx.appcompat.app.AlertDialog.Builder(
                         binding.root.context,
                         com.streamflixreborn.streamflix.R.style.OnyxDialog,
                     )
-                        .setTitle("Désactiver ce lien ?")
-                        .setMessage("« ${item.name} » ne sera plus proposé.\n\nVous pourrez le réactiver dans Paramètres › Liens désactivés.")
+                        .setTitle(if (extracteurCible != null) "Désactiver $extracteurCible ?" else "Désactiver ce lien ?")
+                        .setMessage(
+                            if (extracteurCible != null)
+                                "Plus aucun lien $extracteurCible ne sera proposé, quelle que soit la source.\n\nRéactivable dans Paramètres › Gérer les sources."
+                            else
+                                "« ${item.name} » ne sera plus proposé.\n\nRéactivable dans Paramètres › Liens désactivés."
+                        )
                         .setNegativeButton("Annuler", null)
                         .setPositiveButton("Désactiver") { _, _ ->
+                            // Extracteur reconnu → on coupe l'extracteur (plus aucune source ne
+                            // peut le ramener). Sinon → repli sur la désactivation du lien seul.
+                            if (extracteurCible != null)
+                                com.streamflixreborn.streamflix.utils.ExtractorToggleStore
+                                    .desactiverExtracteur(extracteurCible.lowercase())
+                            else
                             com.streamflixreborn.streamflix.utils.LiensDesactives
-                                .desactiver(binding.root.context, item.id, item.name)
+                                .desactiver(binding.root.context, item.id, item.name, item.src)
                             settingsView.onServerDisabled?.invoke(item)
                         }
                         .show()

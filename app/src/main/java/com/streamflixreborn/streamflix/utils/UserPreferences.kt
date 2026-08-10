@@ -74,6 +74,28 @@ object UserPreferences {
                 editor.apply()
                 Log.d(TAG, "One-shot wipe: cleared ${toRemove.size} CURRENT_PROVIDER keys")
             }
+
+            // 2026-08-11 (user : « quand on envoie une mise à jour, les sources désactivées ne se
+            //   réactivent pas ; il faut que TOUTES les sources soient activées à chaque mise à jour »
+            //   — Paramètres › Gérer les sources) : à chaque (RÉ)INSTALLATION de l'app (vraie nouvelle
+            //   version OU écrasement au même versionCode), on remet toutes les sources à ACTIVÉES —
+            //   on vide les extracteurs désactivés ET les liens désactivés. La (ré)install est
+            //   détectée via packageInfo.lastUpdateTime (change à CHAQUE install, contrairement au
+            //   versionCode qui reste identique sur un écrasement). Le forcé-en-dur « netu » reste off.
+            try {
+                val updateTime = context.packageManager
+                    .getPackageInfo(context.packageName, 0).lastUpdateTime
+                val storedUpdateTime = prefs.getLong("last_app_update_time", 0L)
+                if (updateTime != storedUpdateTime) {
+                    try {
+                        context.getSharedPreferences("extractor_toggles", Context.MODE_PRIVATE)
+                            .edit().remove("disabled_extractors").apply()
+                    } catch (_: Throwable) {}
+                    try { LiensDesactives.toutReactiver(context) } catch (_: Throwable) {}
+                    prefs.edit().putLong("last_app_update_time", updateTime).apply()
+                    Log.d(TAG, "App (ré)installée → toutes les sources réactivées (Gérer les sources)")
+                }
+            } catch (_: Throwable) {}
         }
     }
 
@@ -140,8 +162,10 @@ object UserPreferences {
     // 2026-07-12 : compteur de migration. Quand on ajoute une nouvelle source de backup
     //   (ex: Coflix Boston), on bump ce compteur → la 1ère vérification ajoute les sources
     //   manquantes au set sauvé. L'user peut ensuite les désactiver dans les Paramètres.
+    /** Sources décochées VOLONTAIREMENT — jamais réactivées par la migration. */
+    private const val KEY_BACKUP_REFUSEES = "BACKUP_SOURCES_REFUSEES"
     private const val KEY_BACKUP_MIGRATION_V = "BACKUP_MIGRATION_V"
-    private const val CUR_BACKUP_MIGRATION = 12 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime)
+    private const val CUR_BACKUP_MIGRATION = 14 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime ; v13 : ok.ru + archive.org ; v14 : Rutube)
 
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :
@@ -161,15 +185,38 @@ object UserPreferences {
         if (!::prefs.isInitialized) return true
         // Master switch OFF → tous les backups désactivés (test des serveurs natifs seuls).
         if (!prefs.getBoolean(KEY_BACKUPS_ENABLED, true)) return false
+        // ⚠ 2026-08-11 (user : « NetMirror est passé à la trappe, il s'est affiché quand même »
+        //   pendant un test où TOUT était décoché) : LA FUITE ÉTAIT ICI.
+        //   La ligne suivante disait « source inconnue de BACKUP_SOURCES → toujours active ».
+        //   L'intention d'origine était bonne (ne désactiver que ce que l'utilisateur a
+        //   explicitement décoché), mais elle rendait INDÉSACTIVABLE tout ce qui n'est pas dans
+        //   la liste des 29 — à commencer par les PROVIDERS interrogés en backup par la boucle
+        //   générique. NetMirror en fait partie : les logs le montrent en train d'interroger
+        //   Netflix, Prime Video et Hotstar alors que l'utilisateur avait tout coupé.
+        //   On teste donc le refus explicite AVANT ce raccourci : ce que l'utilisateur a
+        //   décoché est refusé, qu'il soit ou non dans la liste des sources connues.
+        val refusees = prefs.getStringSet(KEY_BACKUP_REFUSEES, emptySet()) ?: emptySet()
+        if (source in refusees) return false
         val enabled = prefs.getStringSet(KEY_ENABLED_BACKUPS, null) ?: return true
         if (source !in com.streamflixreborn.streamflix.utils.BackupRegistry.BACKUP_SOURCE_KEYS) return true
         // Migration : si de nouvelles sources ont été ajoutées depuis la dernière config,
         //   les ajouter automatiquement au set enabled (1 fois par version).
         val migV = prefs.getInt(KEY_BACKUP_MIGRATION_V, 1)
         if (migV < CUR_BACKUP_MIGRATION) {
+            // 2026-08-11 (user : « je veux être sûr que si je désactive Cloudstream… il soit
+            //   bien désactivé si je le désactive ») :
+            //   ⚠ CETTE MIGRATION RÉACTIVAIT CE QUE L'UTILISATEUR AVAIT COUPÉ.
+            //   Elle ajoute au set « actives » toute source absente, pour que les sources
+            //   nouvellement livrées soient actives par défaut. Mais une source absente, ça
+            //   peut aussi vouloir dire « décochée exprès » — et rien ne les distinguait.
+            //   Résultat : au prochain bump de CUR_BACKUP_MIGRATION (donc à une future mise à
+            //   jour), Cloudstream serait revenu tout seul, sans que personne ne le demande.
+            //   On tient donc à part la liste de ce qui a été décoché VOLONTAIREMENT, et la
+            //   migration ne la retouche jamais.
+            val refusees = prefs.getStringSet(KEY_BACKUP_REFUSEES, emptySet()) ?: emptySet()
             val expanded = enabled.toMutableSet()
             com.streamflixreborn.streamflix.utils.BackupRegistry.BACKUP_SOURCE_KEYS.forEach {
-                if (it !in expanded) expanded.add(it)
+                if (it !in expanded && it !in refusees) expanded.add(it)
             }
             prefs.edit()
                 .putStringSet(KEY_ENABLED_BACKUPS, expanded)
@@ -178,6 +225,57 @@ object UserPreferences {
             return source in expanded
         }
         return source in enabled
+    }
+
+    /**
+     * Sources de backup actuellement actives — pour peupler le sélecteur.
+     *
+     * 2026-08-11 (user : « si je veux désactiver Cloudstream, ils doivent être affichés au
+     *   même endroit ») : les sources et les extracteurs vivaient dans deux écrans séparés.
+     *   Cloudstream, Movix, Wiflix… ne sont PAS des extracteurs : ils n'apparaissaient donc
+     *   nulle part dans « Gérer les sources », alors que c'est le nom de l'écran. On expose
+     *   ici de quoi les afficher et les enregistrer au même endroit.
+     */
+    fun sourcesBackupActives(): Set<String> {
+        if (!::prefs.isInitialized) return BackupRegistry.BACKUP_SOURCE_KEYS
+        val enregistre = prefs.getStringSet(KEY_ENABLED_BACKUPS, null)
+            ?: return BackupRegistry.BACKUP_SOURCE_KEYS
+        return enregistre.toSet()
+    }
+
+    /** Noms refusés explicitement par l'utilisateur (sources ET providers). */
+    fun sourcesRefusees(): Set<String> {
+        if (!::prefs.isInitialized) return emptySet()
+        return prefs.getStringSet(KEY_BACKUP_REFUSEES, emptySet()) ?: emptySet()
+    }
+
+    /**
+     * @param univers l'ensemble des noms PROPOSÉS à l'utilisateur dans le sélecteur — sources
+     *   de backup ET providers interrogés en backup. Tout ce qui est dans l'univers mais pas
+     *   dans [sources] est considéré comme refusé volontairement.
+     *   ⚠ Il faut bien l'univers, pas seulement BACKUP_SOURCE_KEYS : sinon un provider décoché
+     *   (NetMirror…) ne serait jamais inscrit comme refusé, et resterait actif pour toujours.
+     */
+    fun setSourcesBackupActives(sources: Set<String>, univers: Set<String> = BackupRegistry.BACKUP_SOURCE_KEYS) {
+        if (!::prefs.isInitialized) return
+        // Ce qui n'est PAS coché dans l'univers = refusé volontairement. On le mémorise à part
+        // pour que la migration ne le réactive jamais (voir isBackupSourceEnabled). Sans ça, un
+        // simple bump de version ramenait Cloudstream.
+        val refusees = univers.filterNot { it in sources }.toSet()
+        // 2026-08-11 : on COPIE les ensembles. putStringSet conserve la référence jusqu'à
+        //   l'écriture disque ; passer une collection encore mutable (celle que manipule le
+        //   sélecteur) expose à une réécriture partielle. Trace ajoutée pour vérifier ce qui
+        //   part réellement — un « désactivé » qui ne s'enregistre pas est pire que rien.
+        prefs.edit()
+            .putStringSet(KEY_ENABLED_BACKUPS, HashSet(sources))
+            .putStringSet(KEY_BACKUP_REFUSEES, HashSet(refusees))
+            .putInt(KEY_BACKUP_MIGRATION_V, CUR_BACKUP_MIGRATION)
+            .commit()
+        android.util.Log.i(
+            "SourcesPrefs",
+            "enregistré : ${sources.size} active(s), ${refusees.size} refusée(s) " +
+                "sur un univers de ${univers.size} — refusées=${refusees.take(8)}",
+        )
     }
 
     /** Package du lecteur externe mémorisé (ex. org.videolan.vlc). null = aucun. */
@@ -772,11 +870,37 @@ object UserPreferences {
             Key.PARENTAL_CONTROL_ADMIN_PIN.setString(value.trim())
         }
 
+    /**
+     * 2026-08-10 (user « quand on définit un âge ça crashe l'application ») :
+     * ÉCRITURE EN STRING, TOUJOURS — ne pas repasser en `setInt`.
+     *
+     * Cette clé a DEUX auteurs : ce setter, et la `ListPreference`
+     * `PARENTAL_CONTROL_MAX_AGE` de l'écran de réglages, qui écrit forcément
+     * une String. Quand la valeur était stockée en Int, le premier
+     * `ListPreference.setValue` derrière relisait la clé en String pour la
+     * comparer et plantait sec :
+     *   ClassCastException: java.lang.Integer cannot be cast to java.lang.String
+     *   at androidx.preference.Preference.persistString
+     * Le piège existait depuis toujours ; il n'était simplement jamais atteint,
+     * l'ancien contrôle parental exigeant un PIN que personne n'avait défini.
+     * En stockant une String des deux côtés, les deux auteurs s'accordent —
+     * et `getInt()` sait déjà relire une String.
+     */
     var parentalControlMaxAge: Int?
         get() = Key.PARENTAL_CONTROL_MAX_AGE.getInt()
         set(value) {
-            Key.PARENTAL_CONTROL_MAX_AGE.setInt(value)
+            Key.PARENTAL_CONTROL_MAX_AGE.setString(value?.toString())
         }
+
+    /**
+     * Réécrit l'âge maximum en String s'il traîne encore en Int depuis une
+     * ancienne version. À appeler avant d'afficher l'écran de réglages : sans
+     * ça, la simple ouverture de l'écran plante sur ces installations.
+     */
+    fun normalizeParentalMaxAgeStorage() {
+        val actuel = Key.PARENTAL_CONTROL_MAX_AGE.getInt()
+        Key.PARENTAL_CONTROL_MAX_AGE.setString(actuel?.toString())
+    }
 
     var parentalControlFailedAttempts: Int
         get() = Key.PARENTAL_CONTROL_FAILED_ATTEMPTS.getInt() ?: 0
@@ -796,8 +920,14 @@ object UserPreferences {
             Key.PARENTAL_CONTROL_HARD_LOCKED.setBoolean(value)
         }
 
+    /** 2026-08-10 (user « le mieux ce serait de fusionner ») : la condition « un PIN
+     *  parental est défini » a sauté. Le code qui protège le contrôle parental est
+     *  désormais celui du cadenas ([ProviderLockStore]), et l'âge maximum ne peut de
+     *  toute façon être choisi qu'une fois ce code créé — la garder ici revenait à
+     *  exiger un second PIN que plus personne ne définit, ce qui laissait le filtre
+     *  d'âge inerte même quand l'user l'avait réglé. */
     val isParentalControlActive: Boolean
-        get() = enableTmdb && parentalControlPin.isNotBlank() && parentalControlMaxAge != null
+        get() = enableTmdb && parentalControlMaxAge != null
 
     val isParentalControlTemporarilyLocked: Boolean
         get() = parentalControlLockedUntilMillis > System.currentTimeMillis()
