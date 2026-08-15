@@ -3816,6 +3816,22 @@ object LiveTvHubProvider : Provider, IptvProvider {
     //   « Music ». Passer par `musicOnly = true` aurait été plus court mais faux : le filtre
     //   par mots-clés y attrape aussi « HBO Hits », « Rock Entertainment », « Fit Dance » et
     //   huit radios RFM — 15 intrus mesurés. On découpe donc le groupe à la source.
+    // 2026-08-15 (user : « DRIC4TV, ces chaînes de clips, on les possède déjà via World
+    //   Live — fais juste en sorte qu'elles apparaissent dans notre dossier Musique ») :
+    //   son groupe « Muzik » (38 chaînes de clips, dont 27 en m3u8 direct) était absent du
+    //   dossier alors que la playlist est la MÊME que celle de World Live (source intégrée
+    //   « Dric4rTV »). On lit donc son sommaire, on y prend le groupe Muzik, et on l'ingère
+    //   comme les autres sources. Dédup par URL : aucun doublon si la chaîne est déjà là.
+    private const val DRIC_PLAYLIST_URL = "http://dric4rt.free.fr/1.json"
+    private const val DRIC_GROUPE_MUSIQUE = "Muzik"
+
+    // 2026-08-15 (user : « dans le dossier Mix FR, ajoute leur dossier Nature & Découvertes
+    //   où il y a 129 chaînes ») : ce groupe de la playlist Dric4rTV contient deux
+    //   sous-ensembles — 10 chaînes TV (Chasse & Pêche, Seasons, Ushuaïa, Science & Vie…)
+    //   et 119 documentaires. On les ajoute à Mix FR en gardant CETTE séparation, telle
+    //   qu'elle existe à la source : les chaînes d'un côté, les documentaires de l'autre.
+    private const val DRIC_GROUPE_NATURE = "Nature & Découverte"
+
     private const val FREETV_M3U_URL =
         "https://raw.githubusercontent.com/iprtl/m/master/Freetv.m3u"
 
@@ -4072,6 +4088,84 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return groups.map { (name, items) -> Category(name = name, list = items) }
     }
 
+    /**
+     * Ajoute à Mix FR le groupe « Nature & Découvertes » de la playlist Dric4rTV.
+     * Sa structure est imbriquée : le groupe contient lui-même des sous-groupes, chacun
+     * avec ses `stations`. On rend donc une catégorie par sous-groupe, préfixée pour
+     * qu'on voie d'où elles viennent.
+     */
+    private fun categoriesDric4rNature(
+        sommaireJson: String,
+        dl: (String) -> String,
+    ): List<Category> {
+        if (sommaireJson.isBlank()) return emptyList()
+        return try {
+            val groupes = org.json.JSONObject(sommaireJson.trim()).optJSONArray("groups")
+                ?: return emptyList()
+            var urlGroupe = ""
+            for (i in 0 until groupes.length()) {
+                val g = groupes.optJSONObject(i) ?: continue
+                val nom = g.optString("name").trim()
+                if (nom.startsWith(DRIC_GROUPE_NATURE, ignoreCase = true)) {
+                    urlGroupe = g.optString("url").trim()
+                    break
+                }
+            }
+            if (urlGroupe.isBlank()) {
+                Log.w(TAG, "Mix FR : groupe Nature absent de la playlist Dric4rTV")
+                return emptyList()
+            }
+            val corps = dl(urlGroupe)
+            if (corps.isBlank()) return emptyList()
+            val racine = org.json.JSONObject(corps.trim())
+            val sortie = ArrayList<Category>()
+            val vus = HashSet<String>()
+
+            fun ingerer(nomCategorie: String, stations: org.json.JSONArray?) {
+                if (stations == null) return
+                val items = ArrayList<TvShow>()
+                for (i in 0 until stations.length()) {
+                    val st = stations.optJSONObject(i) ?: continue
+                    val url = st.optString("url").trim()
+                    if (url.isBlank() || !url.startsWith("http")) continue
+                    if (!vus.add(url)) continue
+                    val nom = st.optString("name").trim()
+                    if (nom.isBlank()) continue
+                    val logo = st.optString("image").trim()
+                    val hash = ("natdec" + url).hashCode().toUInt().toString(16)
+                    val fastId = "livehub::fast::$hash"
+                    items.add(
+                        TvShow(id = fastId, title = nom).apply {
+                            providerName = "TV Hub"; poster = logo; banner = logo
+                        },
+                    )
+                    fastChannelUrls[fastId] = url
+                    fastChannelNames[fastId] = nom
+                    if (logo.isNotBlank()) fastChannelLogos[fastId] = logo
+                }
+                if (items.isNotEmpty()) sortie.add(Category(name = nomCategorie, list = items))
+            }
+
+            // Cas 1 : le groupe expose directement ses stations.
+            ingerer("Nature & Découvertes", racine.optJSONArray("stations"))
+            // Cas 2 (le vrai aujourd'hui) : il contient des sous-groupes.
+            val sousGroupes = racine.optJSONArray("groups")
+            if (sousGroupes != null) {
+                for (i in 0 until sousGroupes.length()) {
+                    val sg = sousGroupes.optJSONObject(i) ?: continue
+                    val nomSg = sg.optString("name").trim().ifBlank { "Nature & Découvertes" }
+                    ingerer("Nature & Découvertes — $nomSg", sg.optJSONArray("stations"))
+                }
+            }
+            Log.d(TAG, "Mix FR : +${sortie.sumOf { (it.list as? List<*>)?.size ?: 0 }} entrée(s) " +
+                "Nature & Découvertes (${sortie.size} catégorie(s))")
+            sortie
+        } catch (t: Throwable) {
+            Log.w(TAG, "Mix FR : Nature & Découvertes KO (${t.javaClass.simpleName} ${t.message})")
+            emptyList()
+        }
+    }
+
     /** 2026-06-27 (user "Mix FR dans le dossier Autres Replays") : fetch + parse
      *  data.m3u (mix m3u xdata-mix/nx-data, auto-refresh via refresh.yml) →
      *  catégories par group-title. Cache RAM 30 min. */
@@ -4091,7 +4185,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     Log.w(TAG, "Mix FR M3U empty/invalid")
                     return@withContext mixFrCacheSections
                 }
-                val parsed = parseMixFrM3u(body)
+                fun dl(url: String): String = try {
+                    val r = okhttp3.Request.Builder().url(url)
+                        .header("User-Agent", "Mozilla/5.0").build()
+                    replayClient.newCall(r).execute().use { it.body?.string().orEmpty() }
+                } catch (_: Throwable) { "" }
+                // 2026-08-15 : Nature & Découvertes (Dric4rTV) ajouté à Mix FR.
+                val parsed = parseMixFrM3u(body) + categoriesDric4rNature(dl(DRIC_PLAYLIST_URL), ::dl)
                 if (parsed.isNotEmpty()) {
                     mixFrCacheSections = parsed
                     mixFrCacheTs = now
@@ -4228,6 +4328,86 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
     }
 
+    /**
+     * Ingère un groupe de la playlist Dric4rTV dans le dossier Musique.
+     * Format du JSON : `{ "stations": [ { "name": …, "image": …, "url": … } ] }` — le même
+     * que celui que World Live consomme déjà. Passe par le pipeline FAST comme le reste.
+     *
+     * ── 2026-08-15, DEUX ERREURS DE SUITE, à ne pas refaire ────────────────────────────
+     * 1ᵉ version : j'ai rangé ces chaînes dans un sous-dossier « Clips ». User : « je veux
+     *   pas de 2ᵉ dossier à l'ouverture, je suis censé avoir tous mes clips ».
+     * 2ᵉ version : j'ai deviné une langue depuis le nom (« Français », « Grec »…). Même
+     *   problème — user : « il y a un dossier qui s'appelle Français avec 10 chaînes de
+     *   clip, ça me fait encore 2 dossiers ».
+     *
+     * La cause : le dossier Musique n'est PAS réparti par langue en pratique. Les M3U
+     * sources ne portent quasiment pas de `tvg-language`, donc [musiqueLangLabel] renvoie
+     * « International » pour presque tout et la masse des chaînes finit dans UN SEUL
+     * groupe. Le moindre libellé inventé crée donc un dossier visible à côté.
+     *
+     * Règle : ne JAMAIS inventer de libellé ici. On rejoint le groupe qui contient déjà le
+     * plus de chaînes — celui que l'utilisateur voit comme « sa » liste — quel que soit son
+     * nom. Si la répartition par langue devenait un jour réelle en amont, ce code continue
+     * de fonctionner sans créer de dossier parasite.
+     */
+    private fun ingestDric4rMuzik(
+        sommaireJson: String,
+        dl: (String) -> String,
+        seenUrls: HashSet<String>,
+        groups: LinkedHashMap<String, MutableList<TvShow>>,
+    ) {
+        if (sommaireJson.isBlank()) return
+        try {
+            val groupes = org.json.JSONObject(sommaireJson.trim()).optJSONArray("groups") ?: return
+            var urlGroupe = ""
+            for (i in 0 until groupes.length()) {
+                val g = groupes.optJSONObject(i) ?: continue
+                if (g.optString("name").trim().equals(DRIC_GROUPE_MUSIQUE, ignoreCase = true)) {
+                    urlGroupe = g.optString("url").trim()
+                    break
+                }
+            }
+            if (urlGroupe.isBlank()) {
+                Log.w(TAG, "Musique : groupe $DRIC_GROUPE_MUSIQUE absent de la playlist Dric4rTV")
+                return
+            }
+            val corps = dl(urlGroupe)
+            if (corps.isBlank()) return
+            val stations = org.json.JSONObject(corps.trim()).optJSONArray("stations")
+                ?: org.json.JSONObject(corps.trim()).optJSONArray("channels")
+                ?: return
+            // Le groupe d'accueil = celui qui pèse le plus lourd à cet instant, donc jamais
+            //   un nouveau. Si le dossier était vide (sources amont KO), on retombe sur le
+            //   libellé par défaut du pipeline plutôt que d'inventer autre chose.
+            val cible = groups.maxByOrNull { it.value.size }?.key ?: musiqueLangLabel("", "")
+            var ajoutees = 0
+            for (i in 0 until stations.length()) {
+                val st = stations.optJSONObject(i) ?: continue
+                val url = st.optString("url").trim()
+                if (url.isBlank() || !url.startsWith("http")) continue
+                if (!seenUrls.add(url)) continue                     // déjà présente ailleurs
+                val nom = st.optString("name").trim().ifBlank { continue }
+                val logo = st.optString("image").trim()
+                val hash = ("musiq" + url).hashCode().toUInt().toString(16)
+                val fastId = "livehub::fast::$hash"
+                groups.getOrPut(cible) { mutableListOf() }.add(
+                    TvShow(id = fastId, title = nom).apply {
+                        providerName = "TV Hub"; poster = logo; banner = logo
+                    },
+                )
+                fastChannelUrls[fastId] = url
+                fastChannelNames[fastId] = nom
+                if (logo.isNotBlank()) fastChannelLogos[fastId] = logo
+                ajoutees++
+            }
+            Log.d(TAG, "Musique : +$ajoutees chaîne(s) depuis Dric4rTV ($DRIC_GROUPE_MUSIQUE) " +
+                "ajoutées au groupe existant « $cible » — aucun nouveau sous-dossier " +
+                "(groupes : ${groups.entries.joinToString { "${it.key}=${it.value.size}" }})")
+        } catch (t: Throwable) {
+            Log.w(TAG, "Musique : Dric4rTV KO (${t.javaClass.simpleName} ${t.message})")
+        }
+    }
+
     /** 2026-06-27 (user "dossier Musique : tout ce qu'on a en musique, sous-dossiers,
      *  sans doublons, mirror git auto-refresh") : agrège la musique de plusieurs
      *  sources avec dédup par URL, groupé par langue (sous-dossiers) :
@@ -4278,6 +4458,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     val apres = groups.values.sumOf { it.size }
                     Log.d(TAG, "Musique : +${apres - avant} chaîne(s) depuis FREETV")
                 }
+                // 5) 2026-08-15 : les chaînes de clips Dric4rTV (groupe « Muzik »).
+                ingestDric4rMuzik(dl(DRIC_PLAYLIST_URL), ::dl, seen, groups)
                 // 2026-06-29 (REPAIR — user "807 vs 790 : il manque les chaînes
                 //   hardcodées, ex '90 Is Good'") : ré-injecte les 17 radios Dric4rTv
                 //   hardcodées (RadioCatalog) + la chaîne musique custom "90 Is Good"
@@ -4353,33 +4535,80 @@ object LiveTvHubProvider : Provider, IptvProvider {
     //   encore passé). Lecture routée vers Stream4FreeResolverCfTest (préfixe `stream4cf://`).
     @Volatile private var stream4CfCache: List<Category> = emptyList()
     @Volatile private var stream4CfCacheTs: Long = 0L
+    /**
+     * ── 2026-08-15 (user : « le dossier Stream4Free met vraiment beaucoup de temps à
+     *   s'ouvrir ») — MESURÉ SUR L'OPPO : 49,6 s entre le clic et l'affichage de la grille.
+     *
+     * Le journal montre où passait ce temps :
+     *   • le SCRAPE LIVE partait en premier et l'affichage l'ATTENDAIT. Il ouvre une WebView
+     *     sur stream4free.tv pour franchir Cloudflare — 148 lignes de sondage relevées, avec
+     *     « Clearance: false » du début à la fin : il n'obtient pas le laissez-passer, et on
+     *     patiente jusqu'à son délai de 15 s pour rien.
+     *   • pendant ce temps la pré-résolution des 52 chaînes tournait EN SÉRIE, chacune en
+     *     ~0,5 s, et certaines basculaient sur la WebView (12 s pièce). Total mesuré :
+     *     1 min 42 s. Elle se dispute la même WebView que le scrape, ce qui allonge tout.
+     *
+     * Correction, sans rien perdre :
+     *   1. on affiche IMMÉDIATEMENT la liste en dur (les mêmes 53 chaînes, avec leurs logos) ;
+     *   2. le scrape live passe EN FOND et ne sert qu'à rafraîchir la liste pour la prochaine
+     *      ouverture — il n'a plus le droit de faire attendre qui que ce soit ;
+     *   3. la pré-résolution ne démarre qu'APRÈS le scrape, pour ne plus se battre avec lui.
+     * Résultat attendu : ouverture quasi instantanée, et le confort du clic (chaînes
+     * pré-résolues) arrive tranquillement derrière.
+     */
     suspend fun fetchStream4CfCategoriesLive(): List<Category> {
         val now = System.currentTimeMillis()
-        if (stream4CfCache.isNotEmpty() && now - stream4CfCacheTs < MIX_FR_TTL_MS) return stream4CfCache
-        // 2026-07-10 (user : « faut faire ça DANS l'app, le git ne passe pas le CF, l'app oui ») :
-        // 1) PRIMAIRE = SCRAPE LIVE dans l'app. L'app passe le CF (WebView-bypass) → liste FRAÎCHE des
-        //    chaînes directement depuis stream4free.tv (avec logos). ZÉRO git.
-        val liveM3u = runCatching {
-            com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.scrapeChannelsM3u()
-        }.getOrDefault("")
-        if (liveM3u.isNotBlank()) {
-            val liveCats = parseFastM3u(liveM3u)
-            if (liveCats.isNotEmpty()) {
-                stream4CfCache = liveCats; stream4CfCacheTs = now
-                Log.d(TAG, "Stream4Free: ${liveCats.size} cat (SCRAPE LIVE app-CF)")
-                launchCfPreResolve()  // pré-résout en fond → prêtes à cliquer
-                return liveCats
-            }
+        if (stream4CfCache.isNotEmpty() && now - stream4CfCacheTs < MIX_FR_TTL_MS) {
+            Log.d(TAG, "Stream4Free: cache chaud (${stream4CfCache.size} cat, " +
+                "${(now - stream4CfCacheTs) / 1000}s) → affichage immédiat")
+            return stream4CfCache
         }
-        // 2) REPLI (CF qui hoquette au boot) : LISTE EN DUR des 53 chaînes (slugs + logos) → le dossier
-        //    n'est JAMAIS vide ; chaque chaîne se résout via le CF au clic (l'app le passe).
+
+        // 1) AFFICHAGE IMMÉDIAT — liste en dur (53 chaînes + logos), zéro réseau.
         val cats = parseFastM3u(com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.BAKED_CHANNELS_M3U_PROXIED)
         if (cats.isNotEmpty()) {
-            stream4CfCache = cats; stream4CfCacheTs = now
-            Log.d(TAG, "Stream4Free: ${cats.size} cat (liste EN DUR repli ; CF au clic)")
-            launchCfPreResolve()
+            stream4CfCache = cats
+            stream4CfCacheTs = now
+            Log.d(TAG, "Stream4Free: ${cats.size} cat affichées tout de suite (liste locale)")
         }
+
+        // 2) EN FOND : scrape live pour rafraîchir la liste, puis pré-résolution.
+        rafraichirStream4CfEnFond()
         return cats
+    }
+
+    @Volatile private var s4fRafraichissementEnCours = false
+
+    /** Rafraîchit la liste Stream4Free et pré-résout les chaînes, SANS bloquer l'affichage. */
+    private fun rafraichirStream4CfEnFond() {
+        if (s4fRafraichissementEnCours) return
+        s4fRafraichissementEnCours = true
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                // Chauffage du Cloudflare : DÉPLACÉ ICI depuis LiveHubFolderDialog, où il
+                //   faisait attendre l'affichage 12 s à chaque ouverture (voir le commentaire
+                //   là-bas). Il ne sert qu'au scrape qui suit, donc sa place est en fond.
+                runCatching { com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.warmUp() }
+                val liveM3u = runCatching {
+                    com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.scrapeChannelsM3u()
+                }.getOrDefault("")
+                if (liveM3u.isNotBlank()) {
+                    val liveCats = parseFastM3u(liveM3u)
+                    if (liveCats.isNotEmpty()) {
+                        stream4CfCache = liveCats
+                        stream4CfCacheTs = System.currentTimeMillis()
+                        Log.d(TAG, "Stream4Free: liste rafraîchie en fond (${liveCats.size} cat)")
+                    }
+                } else {
+                    Log.d(TAG, "Stream4Free: scrape live sans résultat → on garde la liste locale")
+                }
+            } catch (_: Throwable) {
+            } finally {
+                s4fRafraichissementEnCours = false
+                // La pré-résolution ne part qu'ICI : plus de bagarre avec le scrape.
+                launchCfPreResolve()
+            }
+        }
     }
 
     // 2026-07-10 (user "scraper les 53 chaînes pour qu'elles soient déjà prêtes à cliquer, refresh
@@ -4395,13 +4624,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
             try {
                 val srcs = fastChannelUrls.values.filter { it.startsWith("stream4cf://") }.distinct()
                 Log.d(TAG, "Stream4Free CF: pré-résolution de ${srcs.size} chaînes en fond…")
+                // 2026-08-15 : par PAQUETS DE 4 au lieu d'une par une. Mesuré : 52 chaînes en
+                //   série = 1 min 42 s, parce qu'il suffit que deux d'entre elles basculent sur
+                //   la WebView (12 s pièce) pour bloquer toute la file derrière elles.
+                //   Quatre de front, c'est assez pour tenir la cadence sans saturer un appareil
+                //   modeste ni multiplier les WebViews.
+                val debut = System.currentTimeMillis()
                 var ok = 0
-                for (src in srcs) {
-                    try {
-                        if (com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.resolve(src) != null) ok++
-                    } catch (_: Throwable) {}
+                srcs.chunked(4).forEach { paquet ->
+                    kotlinx.coroutines.coroutineScope {
+                        paquet.map { src ->
+                            async {
+                                try {
+                                    com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest
+                                        .resolve(src) != null
+                                } catch (_: Throwable) { false }
+                            }
+                        }.forEach { if (it.await()) ok++ }
+                    }
                 }
-                Log.d(TAG, "Stream4Free CF: pré-résolution finie — $ok/${srcs.size} chaînes prêtes")
+                Log.d(TAG, "Stream4Free CF: pré-résolution finie — $ok/${srcs.size} chaînes prêtes " +
+                    "en ${(System.currentTimeMillis() - debut) / 1000}s")
             } catch (_: Throwable) {} finally { cfPreResolveRunning = false }
         }
     }
