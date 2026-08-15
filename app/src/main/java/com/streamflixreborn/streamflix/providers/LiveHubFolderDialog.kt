@@ -591,8 +591,15 @@ object LiveHubFolderDialog {
             val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             scope.launch {
                 try {
-                    // Chauffer le CF avant le scrape (sinon scrape échoue → BAKED seulement)
-                    runCatching { com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.warmUp() }
+                    // 2026-08-15 (user : « tu quittes tu reviens c'est aussi long ») — MESURÉ SUR
+                    //   L'OPPO : 12,5 s à la 2e ouverture alors que la liste était déjà en cache.
+                    //   Le coupable était ICI : warmUp() ouvrait une WebView sur stream4free.tv
+                    //   pour chauffer le Cloudflare, AVANT même de regarder le cache, et
+                    //   l'affichage l'attendait. Le journal montre « Clearance: false » du début
+                    //   à la fin : le laissez-passer n'arrive jamais, donc on patientait les 15 s
+                    //   de son délai pour rien, à CHAQUE ouverture.
+                    //   Le chauffage est maintenant fait EN FOND, juste avant le scrape, dans
+                    //   LiveTvHubProvider.rafraichirStream4CfEnFond(). Plus personne n'attend.
                     val cats = LiveTvHubProvider.fetchStream4CfCategoriesLive()
                     withContext(Dispatchers.Main) {
                         if (cats.isEmpty()) {

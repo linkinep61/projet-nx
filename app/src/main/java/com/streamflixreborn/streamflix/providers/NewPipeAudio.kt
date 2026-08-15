@@ -515,23 +515,26 @@ object NewPipeAudio {
         }
     }
 
-    fun lectureSecours(videoId: String): Triple<String, String, String>? {
+    /** Ce qu'un client de secours a rendu : les flux, la réponse complète, et l'identité
+     *  employée (YouTube ne sert le fichier qu'au client qui a demandé l'adresse). */
+    private class ReponseSecours(
+        val flux: org.json.JSONObject,
+        val racine: org.json.JSONObject,
+        val ua: String,
+    )
+
+    /**
+     * Interroge l'API interne de YouTube en se présentant tour à tour comme chaque client,
+     * et rend la première réponse exploitable. Utilisé par la VIDÉO comme par la MUSIQUE.
+     * Le client VR est tenté DEUX fois : si son jeton de visiteur était périmé, le premier
+     * essai l'invalide et le second repart avec un jeton neuf — sans quoi on retomberait
+     * silencieusement sur l'identité iPhone, qui ne donne que le début des fichiers.
+     */
+    private fun fluxSecours(videoId: String): ReponseSecours? {
         val journal = StringBuilder()
         journal.append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL)
             .append(" — Android ").append(android.os.Build.VERSION.RELEASE)
             .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(")\n")
-        derniereErreurNewPipe?.let {
-            journal.append("extracteur : ").append(it.javaClass.simpleName)
-                .append(" — ").append(it.message).append('\n')
-        }
-        // 2026-08-15 : si le jeton de visiteur est périmé ou refusé, le client VR répond
-        //   « connectez-vous… » et on retombait SILENCIEUSEMENT sur l'identité iPhone —
-        //   c'est-à-dire sur la coupure à une minute, sans que personne comprenne pourquoi.
-        //   On lui laisse donc une seconde chance avec un jeton tout neuf avant de passer
-        //   au client suivant.
-        // Le client VR est tenté DEUX fois : si son jeton de visiteur était périmé, le
-        //   premier essai l'invalide et le second repart avec un jeton neuf. Sans ça on
-        //   retombait silencieusement sur l'identité iPhone, donc sur la coupure à une minute.
         val essais = listOf(CLIENTS_SECOURS.first()) + CLIENTS_SECOURS
         for ((nom, version, ua) in essais) {
             try {
@@ -569,47 +572,49 @@ object NewPipeAudio {
                     }
                     continue
                 }
-                flux.optString("hlsManifestUrl").takeIf { it.isNotBlank() }?.let {
-                    journal.append(nom).append(" : OK (HLS adaptatif)\n")
-                    Log.i(TAG, "lecture de secours $videoId → HLS via $nom")
-                    return Triple(it, androidx.media3.common.MimeTypes.APPLICATION_M3U8, ua)
-                }
-                // 2026-08-15 — LE CAS RÉEL, mesuré sur la tablette du user (MediaPad M5,
-                //   Android 9) : le client iPhone répond « OK » mais ne donne NI manifeste
-                //   HLS NI fichier tout-en-un — uniquement des PISTES SÉPARÉES (image seule
-                //   + son seul), 27 d'entre elles avec une adresse directe. Je ne regardais
-                //   que les deux premières formes, d'où « flux présent mais aucune URL ».
-                //   On assemble donc ces pistes dans un petit manifeste DASH local, comme le
-                //   fait déjà la voie normale pour la HD.
-                manifesteDepuisPistesSeparees(videoId, flux, racine)?.let {
-                    journal.append(nom).append(" : OK (pistes séparées → DASH)\n")
-                    Log.i(TAG, "lecture de secours $videoId → DASH via $nom")
-                    return Triple(it, androidx.media3.common.MimeTypes.APPLICATION_MPD, ua)
-                }
-                val formats = flux.optJSONArray("formats")
-                var meilleur: String? = null
-                var hauteur = -1
-                if (formats != null) {
-                    for (i in 0 until formats.length()) {
-                        val f = formats.optJSONObject(i) ?: continue
-                        val u = f.optString("url")
-                        if (u.isBlank()) continue
-                        val h = f.optInt("height")
-                        if (h > hauteur) { hauteur = h; meilleur = u }
-                    }
-                }
-                if (meilleur != null) {
-                    journal.append(nom).append(" : OK (mp4 ").append(hauteur).append("p)\n")
-                    Log.i(TAG, "lecture de secours $videoId → mp4 ${hauteur}p via $nom")
-                    return Triple(meilleur, androidx.media3.common.MimeTypes.VIDEO_MP4, ua)
-                }
-                journal.append(nom).append(" : flux présent mais aucune URL directe\n")
+                Log.i(TAG, "flux de secours $videoId obtenu via $nom")
+                return ReponseSecours(flux, racine, ua)
             } catch (t: Throwable) {
                 journal.append(nom).append(" : ").append(t.javaClass.simpleName)
                     .append(" — ").append(t.message).append('\n')
             }
         }
-        Log.w(TAG, "lecture de secours $videoId : tous les clients ont refusé\n$journal")
+        Log.w(TAG, "secours $videoId : tous les clients ont refusé\n$journal")
+        return null
+    }
+
+    /** Adresse jouable (vidéo) sans passer par l'extracteur. */
+    fun lectureSecours(videoId: String): Triple<String, String, String>? {
+        val rep = fluxSecours(videoId) ?: return null
+        val flux = rep.flux
+        flux.optString("hlsManifestUrl").takeIf { it.isNotBlank() }?.let {
+            Log.i(TAG, "lecture de secours $videoId → HLS")
+            return Triple(it, androidx.media3.common.MimeTypes.APPLICATION_M3U8, rep.ua)
+        }
+        // Cas le plus fréquent (mesuré sur la tablette Android 9 du user) : ni HLS ni
+        //   fichier tout-en-un, uniquement des PISTES SÉPARÉES image/son. On les assemble
+        //   dans un manifeste DASH local, comme le fait déjà la voie normale pour la HD.
+        manifesteDepuisPistesSeparees(videoId, flux, rep.racine)?.let {
+            Log.i(TAG, "lecture de secours $videoId → DASH")
+            return Triple(it, androidx.media3.common.MimeTypes.APPLICATION_MPD, rep.ua)
+        }
+        val formats = flux.optJSONArray("formats")
+        var meilleur: String? = null
+        var hauteur = -1
+        if (formats != null) {
+            for (i in 0 until formats.length()) {
+                val f = formats.optJSONObject(i) ?: continue
+                val u = f.optString("url")
+                if (u.isBlank()) continue
+                val h = f.optInt("height")
+                if (h > hauteur) { hauteur = h; meilleur = u }
+            }
+        }
+        if (meilleur != null) {
+            Log.i(TAG, "lecture de secours $videoId → mp4 ${hauteur}p")
+            return Triple(meilleur, androidx.media3.common.MimeTypes.VIDEO_MP4, rep.ua)
+        }
+        Log.w(TAG, "lecture de secours $videoId : flux présent mais aucune URL directe")
         return null
     }
 
@@ -771,8 +776,50 @@ object NewPipeAudio {
             val best = pool.maxByOrNull { it.averageBitrate }
             val url = best?.content
             if (!url.isNullOrBlank()) { resolveCache[watchUrl] = url; url } else null
-        } catch (e: Exception) {
-            Log.w(TAG, "resolve KO: ${e.message}")
+        } catch (t: Throwable) {
+            // ── 2026-08-15 (user : « sur la Bbox 4K, on trouve l'album, on voit les
+            //   musiques, mais au moment du play l'appli crashe ») ────────────────────────
+            //   Même cause que la vidéo : l'extracteur appelle une méthode absente avant
+            //   Android 13 et lève une `Error`. Elle remontait ici SANS ÊTRE ATTRAPÉE
+            //   (`Exception` ne couvre pas les `Error`) — et comme ce code tourne dans le
+            //   fil du lecteur, l'application mourait pile au moment du play.
+            //   On l'absorbe, et surtout on bascule sur la voie de secours pour que la
+            //   musique JOUE quand même sur ces appareils.
+            Log.w(TAG, "resolve KO: ${t.javaClass.simpleName} ${t.message} → secours audio")
+            derniereErreurNewPipe = t
+            audioSecours(watchUrl)
+        }
+    }
+
+    /**
+     * Piste audio de secours, sans extracteur : on redemande le flux à l'API interne de
+     * YouTube (même chemin que la vidéo) et on garde la meilleure piste son seule.
+     * Sert aux appareils sur lesquels l'extracteur ne peut pas fonctionner.
+     */
+    private fun audioSecours(watchUrl: String): String? {
+        return try {
+            val videoId = videoIdOf(watchUrl) ?: return null
+            val pistes = fluxSecours(videoId)?.flux?.optJSONArray("adaptiveFormats") ?: return null
+            var meilleure: String? = null
+            var debit = -1
+            for (i in 0 until pistes.length()) {
+                val f = pistes.optJSONObject(i) ?: continue
+                val u = f.optString("url")
+                if (u.isBlank()) continue
+                val mime = f.optString("mimeType")
+                if (!mime.startsWith("audio/")) continue
+                val b = f.optInt("bitrate", 0)
+                if (b > debit) { debit = b; meilleure = u }
+            }
+            if (meilleure != null) {
+                resolveCache[watchUrl] = meilleure
+                Log.i(TAG, "secours audio $videoId → ${debit / 1000} kb/s")
+            } else {
+                Log.w(TAG, "secours audio $videoId : aucune piste son exploitable")
+            }
+            meilleure
+        } catch (t: Throwable) {
+            Log.w(TAG, "secours audio KO: ${t.javaClass.simpleName} ${t.message}")
             null
         }
     }

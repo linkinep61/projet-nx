@@ -148,7 +148,17 @@ abstract class Extractor {
             VtubeExtractor(),
             VoeExtractor(),
             StreamtapeExtractor(),
-            VidozaExtractor(),
+            // 2026-08-16 — VIDOZA DÉSACTIVÉ PROVISOIREMENT (demande user).
+            //   L'hébergeur a fermé l'accès public : vidoza.net ne sert plus qu'une page
+            //   de 2 Ko « Access restricted. The site is not currently open to visitors. »
+            //   Ce n'est pas un blocage visant la France : le cache Yandex, crawlé depuis
+            //   une autre région, affiche exactement la même page.
+            //   Télémétrie à l'appui : 51 tentatives, 0 succès, depuis le 9 août sans
+            //   interruption (connect-fail, dns-fail, ssl-fail sur vidoza.net).
+            //   Le garder actif ne servait qu'à faire patienter l'utilisateur sur un
+            //   serveur mort. À RÉACTIVER si le site rouvre un jour — l'extracteur lui-même
+            //   n'a aucun défaut, il n'y a rien à réparer dedans.
+            // VidozaExtractor(),
             VidsrcToExtractor(),
             VidplayExtractor(),
             FilemoonExtractor(),
@@ -298,7 +308,19 @@ abstract class Extractor {
             //   citron-edge signé. Joué dans l'overlay WebView (même pattern que SeekStreaming).
             SwiftFlowExtractor(),
             XshotcokExtractor(),
-            DarkiboxExtractor(),
+            // 2026-08-16 — DARKIBOX DÉSACTIVÉ PROVISOIREMENT (demande user).
+            //   Deux choses se sont produites en même temps :
+            //   1. le domaine ne sert plus de pages d'embed — darkibox.com redirige vers
+            //      hydracker.com, qui renvoie la MÊME page de portail (440 Ko) quelle que
+            //      soit l'URL demandée, sans aucun marqueur de lecteur (ni `sources:`, ni
+            //      m3u8, ni jwplayer). L'extracteur cherche l'URL source par regex dans le
+            //      HTML du serveur : il ne peut plus rien y trouver.
+            //   2. l'accès est coupé chez les utilisateurs (blocage FAI) — d'où les
+            //      connect-fail et dns-fail massifs, concentrés sur la France et l'Afrique
+            //      francophone, là où se trouve la base d'utilisateurs.
+            //   Télémétrie : 45 tentatives, 0 succès, sans interruption depuis le 9 août.
+            //   À RÉACTIVER si un vrai domaine d'hébergement de fichiers réapparaît.
+            // DarkiboxExtractor(),
             Up4StreamExtractor(),
             // 2026-05-04 : nouveaux extracteurs pour les vieilles séries FR
             // (NY911, Friends, etc.) — backend allostreaming.one / waaatch.art
