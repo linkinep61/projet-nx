@@ -176,6 +176,9 @@ object RatingService {
                 if (response.isSuccessful && respBody != null) {
                     // Sauvegarder le vote localement
                     saveLocalVote(contentKey, deviceId, rating)
+                    // 2026-08-18 : l'utilisateur vient de voter → sa fiche doit montrer la
+                    //   nouvelle moyenne tout de suite, pas celle mise en cache.
+                    invaliderCache(contentKey)
                     val json = JSONObject(respBody)
                     val avg = json.optDouble("averageRating", 0.0)
                     val total = json.optInt("totalVotes", 0)
@@ -201,7 +204,38 @@ object RatingService {
      * Lit la note agrégée + la note de l'utilisateur courant.
      * Retourne null si aucune note n'existe pour ce contenu.
      */
+    /**
+     * ── 2026-08-18 — CACHE : 96 % DU TRAFIC DU WORKER VENAIT D'ICI ─────────────────────
+     *
+     * Mesuré sur le tableau de bord Cloudflare (24 h) : `SELECT … FROM ratings` = 31 155
+     * exécutions et `SELECT … FROM language_counts` = 30 589, sur 64 k requêtes au total.
+     * Le plan gratuit s'arrête à 100 000 requêtes/jour — et quand ce plafond tombe, ce
+     * n'est pas que les notes qui s'arrêtent : la synchro entre appareils et le
+     * contournement Cloudflare de Stream4Free tombent avec.
+     *
+     * Cause : l'appel partait à CHAQUE affichage de fiche, y compris en rouvrant dix fois
+     * la même, et à chaque ré-attachement de la vue (défilement, changement de focus TV).
+     *
+     * Une note communautaire bouge de quelques centièmes par jour : la rafraîchir toutes
+     * les 6 h suffit largement. Le vote de l'utilisateur, lui, met le cache à jour
+     * immédiatement (cf. [submitRating]) — il voit donc son étoile tout de suite.
+     */
+    private const val CACHE_TTL_MS = 6 * 60 * 60 * 1000L
+    private val cacheNotes = ConcurrentHashMap<String, Pair<Long, RatingInfo?>>()
+
+    /** Vide l'entrée d'un contenu (après un vote) pour forcer une relecture fraîche. */
+    private fun invaliderCache(contentKey: String) {
+        cacheNotes.keys.filter { it.startsWith("$contentKey|") }.forEach { cacheNotes.remove(it) }
+    }
+
     suspend fun getRating(contentKey: String, deviceId: String): RatingInfo? {
+        val cleCache = "$contentKey|$deviceId"
+        cacheNotes[cleCache]?.let { (pose, valeur) ->
+            if (System.currentTimeMillis() - pose < CACHE_TTL_MS) {
+                // Rien sur le réseau : c'est tout l'intérêt.
+                return valeur
+            }
+        }
         return withContext(Dispatchers.IO) {
             try {
                 val body = JSONObject().apply {
@@ -222,7 +256,12 @@ object RatingService {
                 val avg = json.optDouble("averageRating", 0.0)
                 val total = json.optInt("totalVotes", 0)
 
-                if (total == 0 && avg == 0.0) return@withContext null
+                // Aucun vote : on mémorise CE résultAT AUSSI (c'est le cas le plus
+                //   fréquent, et le re-demander en boucle ne sert à rien).
+                if (total == 0 && avg == 0.0) {
+                    cacheNotes[cleCache] = System.currentTimeMillis() to null
+                    return@withContext null
+                }
 
                 // Le vote individuel est lu depuis le cache local
                 val userRating = getLocalVote(contentKey, deviceId)
@@ -231,7 +270,7 @@ object RatingService {
                     averageRating = avg,
                     totalVotes = total,
                     userRating = userRating,
-                )
+                ).also { cacheNotes[cleCache] = System.currentTimeMillis() to it }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to get rating for $contentKey", e)
                 null

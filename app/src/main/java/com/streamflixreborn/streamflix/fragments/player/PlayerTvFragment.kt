@@ -338,6 +338,10 @@ class PlayerTvFragment : Fragment() {
 
     /** 2026-08-14 : garde-fou anti-double-enchaînement en fin de clip (cf. mobile). */
     @Volatile private var clipFinDejaTraiteeTv: Boolean = false
+
+    /** 2026-08-18 : même garde pour un fichier de la bibliothèque (la boucle passe
+     *  toutes les secondes, on ne doit enchaîner qu'UNE fois). */
+    @Volatile private var finBibliothequeTraitee: Boolean = false
     private var usingCronet = false
     /** Shared bounded executor for Cronet — avoids unbounded newCachedThreadPool */
     private val cronetExecutor = java.util.concurrent.Executors.newFixedThreadPool(4)
@@ -2207,6 +2211,51 @@ class PlayerTvFragment : Fragment() {
                 startPositionMs = resumePosition,
                 shouldPlay = shouldPlay,
             )
+        }
+
+        /**
+         * Fichier de MA BIBLIOTHÈQUE (TV Hub → Films / Série) : c'est de la VOD.
+         * Voir le commentaire jumeau dans PlayerMobileFragment — son id commence
+         * par `livehub::`, que le lecteur classe comme du DIRECT, ce qui relançait
+         * le film en boucle à la fin et bloquait l'enchaînement automatique.
+         */
+        private val estFichierBibliotheque: Boolean
+            get() = args.id.startsWith("livehub::voe::")
+
+        /**
+         * FIN DE LECTURE d'un fichier de la bibliothèque = APPUI SUR « SUIVANT ».
+         * Voir le commentaire jumeau dans PlayerMobileFragment : on réutilise
+         * exactement ce que fait le bouton ⏭, plutôt qu'une fausse saison.
+         *
+         * false = dernier fichier du dossier → on s'arrête.
+         */
+        private fun lireFichierSuivantDuDossier(): Boolean {
+            val suivant = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                .getNextChannelId(args.id) ?: return false
+            val nom = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                .getChannelDisplayName(suivant) ?: suivant
+            val jaquette = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                .getChannelPoster(suivant)
+            val videoType = Video.Type.Episode(
+                id = suivant, number = 1, title = nom, poster = jaquette, overview = null,
+                tvShow = Video.Type.Episode.TvShow(
+                    id = suivant, title = nom, poster = jaquette,
+                    banner = null, releaseDate = null, imdbId = null,
+                ),
+                season = Video.Type.Episode.Season(number = 1, title = "Ma bibliothèque"),
+            )
+            val navArgs = android.os.Bundle().apply {
+                putString("id", suivant)
+                putString("title", nom)
+                putString("subtitle", nom)
+                putSerializable("videoType", videoType)
+            }
+            findNavController().navigate(
+                R.id.player, navArgs,
+                androidx.navigation.NavOptions.Builder().setPopUpTo(R.id.player, true).build(),
+            )
+            Log.w("AutoplayDiag", "fin de lecture → suivant du dossier : $nom")
+            return true
         }
 
         private fun initializeVideo() {
@@ -5807,6 +5856,14 @@ class PlayerTvFragment : Fragment() {
                         return
                     }
 
+                    // Fichier de la bibliothèque terminé = appui sur « suivant ».
+                    //   `return` obligatoire : sinon la branche « direct » plus bas
+                    //   recharge le même flux et il repart en boucle.
+                    if (estFichierBibliotheque && playbackState == Player.STATE_ENDED) {
+                        if (UserPreferences.autoplay) lireFichierSuivantDuDossier()
+                        return
+                    }
+
                     if (!isLiveIptvStream && playbackState == Player.STATE_ENDED
                         && args.videoType is Video.Type.Episode
                         && UserPreferences.autoplay
@@ -5815,7 +5872,8 @@ class PlayerTvFragment : Fragment() {
                         playNextEpisodeAcrossSeasons(autoplay = true)
                     }
 
-                    if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
+                    if (isLiveIptvStream && !estFichierBibliotheque
+                        && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                         if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                         if (preemptiveReloadInFlight) return
                         val uri = player.currentMediaItem?.localConfiguration?.uri
@@ -6230,6 +6288,11 @@ class PlayerTvFragment : Fragment() {
                             val ok = MiniPlayerController.enchainerClipEnPleinEcran(args.id)
                             Log.i("PlayerTvFragment",
                                 "fin de clip (pos=${player.currentPosition}/${player.duration}) → clip suivant : $ok")
+                            return
+                        }
+                        // Filet fichiers courts : ExoPlayer saute parfois STATE_ENDED.
+                        if (estFichierBibliotheque && player.hasReallyFinished()) {
+                            if (UserPreferences.autoplay) lireFichierSuivantDuDossier()
                             return
                         }
                         if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
@@ -6787,7 +6850,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                 args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
-            if (isLiveIptvStream) {
+            if (isLiveIptvStream && !estFichierBibliotheque) {
                 player.seekToDefaultPosition()
             } else if (startPositionMs != null) {
                 player.seekTo(startPositionMs)
@@ -7282,6 +7345,27 @@ class PlayerTvFragment : Fragment() {
             // drain sur un stream qui n'avait jamais d'avance).
             var bufferEverHealthy = false
             progressRunnable = Runnable {
+                // ── 2026-08-18 — MESURÉ SUR ÉMULATEUR ANDROID TV ────────────────────
+                //   Un fichier de la bibliothèque ne signale JAMAIS sa fin : la position
+                //   dépasse la durée et `isPlaying` reste vrai. Le filet posé dans
+                //   `onIsPlayingChanged` (« !isPlaying && hasUri ») n'était donc jamais
+                //   atteint → écran noir en fin de lecture et aucun enchaînement.
+                //   On teste ici, dans la boucle 1 s et AVANT `isPlaying` — exactement
+                //   comme le mini-lecteur, qui lui enchaîne correctement.
+                if (estFichierBibliotheque && !finBibliothequeTraitee) {
+                    val duree = try { player.duration } catch (_: Throwable) { 0L }
+                    val position = try { player.currentPosition } catch (_: Throwable) { 0L }
+                    val marge = UserPreferences.autoplayBuffer * 1000L
+                    if (duree > 0 && duree != androidx.media3.common.C.TIME_UNSET &&
+                        position >= duree - marge
+                    ) {
+                        finBibliothequeTraitee = true
+                        Log.i("PlayerTvFragment",
+                            "fin de fichier bibliothèque ($position/$duree) → suivant du dossier")
+                        if (UserPreferences.autoplay) lireFichierSuivantDuDossier()
+                        return@Runnable
+                    }
+                }
                 if (player.isPlaying) {
                     val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
@@ -9037,6 +9121,19 @@ class PlayerTvFragment : Fragment() {
                 //   attaché dans ce chemin, l'enchaînement ne partait jamais non plus.
                 //   Un clip est de la VOD : on enchaîne sur le suivant de la file, et surtout
                 //   on ne re-prépare JAMAIS le même flux.
+                    // ── 2026-08-18 : MÊME PIÈGE pour un fichier de la bibliothèque
+                    //   lancé depuis le mini-lecteur puis passé en plein écran (log
+                    //   « MiniPlayer: Player transferred to fullscreen »). Ce listener
+                    //   minimal le relançait au début au lieu d'enchaîner. C'est ce qui
+                    //   faisait dire « l'autoplay ne part pas tant que je n'ai pas
+                    //   cliqué sur suivant » : ⏭ repasse par le chemin normal.
+                    if (estFichierBibliotheque) {
+                        if (playbackState == androidx.media3.common.Player.STATE_ENDED
+                            && UserPreferences.autoplay) {
+                            lireFichierSuivantDuDossier()
+                        }
+                        return
+                    }
                     if (args.id.startsWith("livehub::rutube::") ||
                         args.id.startsWith("livehub::ytclip::")
                     ) {

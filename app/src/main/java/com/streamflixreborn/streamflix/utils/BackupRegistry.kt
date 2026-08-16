@@ -72,6 +72,7 @@ object BackupRegistry {
     //   ⚠ RÈGLE : tout nouvel `emit("X")` DOIT ajouter "X" ici, sinon la source échappe au
     //   réglage utilisateur sans que personne ne s'en aperçoive.
     val BACKUP_SOURCES: List<Pair<String, String>> = listOf(
+        "ONYX" to "ONYX (mes fichiers hébergés)",
         "Cloudstream" to "Cloudstream",
         "ok.ru" to "ok.ru (VF/VOSTFR)",
         "archive.org" to "archive.org (vieux films/séries)",
@@ -83,6 +84,7 @@ object BackupRegistry {
         "Nakios" to "Nakios",
         "LoiFlix" to "LoiFlix",
         "Nabistream" to "Nabistream (dramas)",
+        "Purstream" to "Purstream (films/séries FR)",
         "Rutube" to "Rutube (films/séries FR)",
         "TV Hub" to "TV Hub (France.tv/Arte gratuit)",
         "FileSearch" to "FileSearch (fichiers directs)",
@@ -157,6 +159,8 @@ object BackupRegistry {
     //             retard ne changent rien pour elles et libèrent la machine pour la vague 1.
     //   VAGUE 2 : tout le reste (5 à 10 s), léger décalage.
     private val SOURCES_VAGUE_1 = setOf(
+        // 2026-08-17 : mes propres fichiers passent devant tout le reste.
+        "ONYX",
         "NetMirror", "Vidzy", "Frembed", "Movix", "Embed", "Yablom",
         "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios", "Rutube",
     )
@@ -192,6 +196,56 @@ object BackupRegistry {
         "Coflix Boston", "CoflixWiki", "Moviebox", "Papadustream V2", "Webflix", "LoiFlix",
     )
 
+    // ── Mémoire des échecs par source (2026-08-16) ───────────────────────────
+    /**
+     * Dernier instant où une source n'a RIEN rendu. Sert au repli conditionnel de Movix :
+     * celui-ci agrège les liens d'autres sites (FrenchStream, Wiflix…) que le registre
+     * interroge DÉJÀ en direct — donc en marche normale ses copies sont des doublons, fusionnés
+     * par la déduplication après avoir coûté du réseau pour rien.
+     *
+     * On ne coupe pas ces endpoints pour autant : quand la source directe tombe (site
+     * injoignable, rapprochement de titre en échec), Movix garde ses liens en cache côté
+     * serveur et reste le seul à les fournir. On consulte donc le résultat de la collecte
+     * PRÉCÉDENTE — pas de dépendance à l'ordre d'exécution, et ça se répare tout seul dès que
+     * la source directe refonctionne.
+     */
+    private val derniersEchecs = ConcurrentHashMap<String, Long>()
+    private const val FENETRE_ECHEC_MS = 30 * 60 * 1000L
+
+    private fun noterEchec(source: String) { derniersEchecs[source] = System.currentTimeMillis() }
+    private fun noterSucces(source: String) { derniersEchecs.remove(source) }
+
+    /** Vrai si [source] n'a rien rendu lors d'une collecte récente (< 30 min). */
+    fun aEchoueRecemment(source: String): Boolean {
+        val t = derniersEchecs[source] ?: return false
+        if (System.currentTimeMillis() - t > FENETRE_ECHEC_MS) { derniersEchecs.remove(source); return false }
+        return true
+    }
+
+    /**
+     * Vrai si Movix doit rappeler ses endpoints SECONDAIRES (les copies de FrenchStream,
+     * Wiflix, purstream, j1f, cpasmal…).
+     *
+     * ⚠ 2026-08-16, SOIR — REND DÉSORMAIS TOUJOURS `true` (décision user : « redonner à Movix
+     * la totalité de ses moyens pour être sûr de ne pas oublier de serveur »).
+     *
+     * L'ancienne règle (« inutile tant que la source directe répond ») se décidait AU DÉPART de
+     * la collecte, avant de savoir ce que la source directe allait rendre. Mesuré sur « Nando
+     * entre deux mondes » : les quatre copies ont été coupées à 20:43:48, et quatre secondes
+     * plus tard Wiflix rendait 0, Purstream 0, et 1Jour1Film un HTTP 403. Trois endpoints
+     * muets alors que leur équivalent direct n'avait rien ramené. La mémoire d'échec ci-dessus
+     * ne servait qu'à la lecture SUIVANTE, jamais à celle en cours.
+     *
+     * Les vrais doublons sont déjà éliminés en aval par la dédup (langBucket|normSrc) — elle
+     * MESURE au lieu de supposer. Le coût est quelques requêtes de plus en parallèle, pas des
+     * serveurs en plus à l'écran.
+     *
+     * [aEchoueRecemment] et [noterEchec] restent en place : ils servent au journal et
+     * redeviendront le pilote si on veut rebrider un jour.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun movixSecondaireUtile(sourceDirecte: String): Boolean = true
+
     /** 2026-07-21 : domaine représentatif d'une source de backup, pour que l'issue « provider
      *  cassé » indique un hôte exploitable (le reporter extrait l'hôte de l'URL fournie). */
     private fun backupProbeUrl(source: String): String? = when (source) {
@@ -199,6 +253,7 @@ object BackupRegistry {
         "LoiFlix" -> "https://zoolingz.com"
         "AfterDark" -> "https://afterdark06.mom"
         "Nabistream" -> "https://nabistream.mom"
+        "Purstream" -> "https://purstream.store"
         "Rutube" -> "https://rutube.ru"
         "TV Hub" -> "https://api.arte.tv"
         "FileSearch" -> "https://filesearch.tools"
@@ -1082,7 +1137,12 @@ object BackupRegistry {
         // Dédup (par LANGUE + URL normalisée, ne fusionne JAMAIS VF/VOSTFR/VO) + envoi.
         //   Extrait de emit() pour être réutilisable par la boucle CF séquentielle.
         fun pushServers(source: String, servers: List<Video.Server>) {
-            if (servers.isEmpty()) { Log.i(TAG, "$source → 0 (vide/timeout)"); return }
+            if (servers.isEmpty()) {
+                Log.i(TAG, "$source → 0 (vide/timeout)")
+                noterEchec(source)
+                return
+            }
+            noterSucces(source)
             val fresh = servers.filter { it.src.isNotBlank() && seen.add(langBucket(it.name) + "|" + normSrc(it.src)) }
             Log.i(TAG, "$source → ${fresh.size} neufs / ${servers.size} bruts")
             if (fresh.isNotEmpty()) trySend(fresh.map { wrap(source, it) })
@@ -1224,6 +1284,30 @@ object BackupRegistry {
         }
 
         // ── Sources FEUILLES (pas de sous-backup → aucune récursion) ──────────────
+        // 2026-08-17 (user « le rattachement TMDB, bah tu le fais autrement ») :
+        //   les fichiers du compte VOE perso. Émis en VAGUE 1 — c'est la source la
+        //   plus rapide de toutes (fichier unique, pas de scraping, VoeExtractor
+        //   noté +25 au SPEED_BIAS), et il n'y a aucune raison de faire attendre
+        //   l'utilisateur devant sa propre copie.
+        //   Rattachement : identifiant TMDB en tête du nom si présent, sinon
+        //   comparaison de titre via workMatches — le même comparateur que les
+        //   autres sources. Clé API vide ⇒ aucun appel réseau.
+        launch { emit("ONYX") {
+            VoeLibrary.serveursPour(
+                tmdbId = resolvedTmdbId,
+                titresConnus = knownTitles,
+                annee = key.year,
+                estUnFilm = key.isMovie,
+                // 2026-08-17 : deux discriminants que le comparateur commun ne
+                //   sait pas voir. Le numéro de suite (sigWords jette les mots
+                //   de moins de 3 caractères, donc « Cendrillon 2 » ≡
+                //   « Cendrillon 3 ») et la durée TMDB déjà chargée ci-dessus,
+                //   qui ne coûte aucune requête supplémentaire.
+                titrePrincipal = key.title,
+                dureeMinSec = runtimeSecondes,
+                dureeMaxSec = runtimeMaxSecondes,
+            )
+        } }
         // 2026-07-06 : backups films/séries — SKIP sur provider anime (P3).
         // 2026-07-12 : Coflix RÉACTIVÉ — coflix.boston est en ligne (WordPress, WP REST API).
         //   CoflixSourceProvider mis à jour pour le nouveau format (cfServers inline + WP search).
@@ -1486,6 +1570,20 @@ object BackupRegistry {
                 }
             }
 
+            // ── PURSTREAM (2026-08-16) — source FR qui héberge ses PROPRES flux ──
+            //   Recherche par titre → confirmation par tmdbId EXACT sur la fiche (le tmdbId
+            //   n'est PAS dans les résultats de recherche, seulement dans /sheet) → donc
+            //   zéro risque d'homonyme. Le stream_url est un master HLS direct, sans jeton :
+            //   ExoPlayer le lit nativement, aucun extracteur nécessaire.
+            //   FILMS **ET** SÉRIES — c'est ce que le chemin Movix (api/purstream/movie/…)
+            //   ne couvre pas : chez eux `purstream/tv` répond 404.
+            launch {
+                emit("Purstream") {
+                    com.streamflixreborn.streamflix.providers.PurstreamProvider
+                        .fetchPurstreamBackupServers(resolvedTmdbId, videoType, key.season, key.episode, knownTitles.toList())
+                }
+            }
+
             // ── TV HUB (par titre) — France.tv/Arte GRATUIT depuis le catalogue replay caché ──
             //   Matching STRICT (titre + saison/épisode). getVideo route auto vers le provider « TV Hub ».
             launch {
@@ -1577,6 +1675,28 @@ object BackupRegistry {
             //   anonyme, sans Cloudflare. Matching STRICT (titre complet + année/SxxExx + durée
             //   TMDB), langue par le titre (marqueur VF/VOSTFR ou titre FR demandé), is_paid
             //   écarté (anti-DRM). Voir RutubeProvider.
+            // ── 2026-08-16 : RUTUBE RETIRÉ DE LA RECHERCHE FILMS/SÉRIES ──────────
+            //   Décision user, après plusieurs faux positifs successifs : « là ça va plus du
+            //   tout, je le vire carrément de l'équation des recherches films et séries ».
+            //
+            //   Rutube n'est pas un site de VOD : c'est une plateforme vidéo généraliste. Ses
+            //   titres citent le nom de l'œuvre sans la contenir — clips musicaux avec une
+            //   image de fond, génériques, conférences, vidéos de fans. Trois durcissements
+            //   successifs (marqueurs hors-sujet, couverture inverse à 50 %, durée TMDB
+            //   obligatoire sur les épisodes) ont chacun éliminé une famille de faux positifs
+            //   sans jamais tarir la suivante — sur « GoT » il accroche jusqu'au verbe anglais
+            //   *got* : « KORN - Got the Life », « Masterboy - I Got To Give It Up »…
+            //   Application du principe du user : mieux vaut perdre la source qu'un mauvais
+            //   contenu.
+            //
+            //   ⚠ SON RÔLE MUSICAL EST INTACT — il vit ailleurs et ne passe PAS par ici :
+            //     • LiveTvHubProvider (fetchClipMeta / getVideo) — le TV hub
+            //     • RutubeFolder (searchClipsPaged) — la navigation
+            //     • RutubeExtractor → RutubeProvider.resolveById — la lecture
+            //   Seul `fetchRutubeBackupServers` est débranché. Le routage getVideo « Rutube »
+            //   plus bas RESTE nécessaire pour les serveurs déjà en favoris/historique.
+            //   Pour réactiver : décommenter ce bloc.
+            /*
             launch {
                 emit("Rutube") {
                     com.streamflixreborn.streamflix.providers.RutubeProvider
@@ -1595,6 +1715,7 @@ object BackupRegistry {
                         )
                 }
             }
+            */
 
             // ── MOVIEBOX (par tmdbId) — API mobile signée aoneroom ────────────────
             // 2026-07-10 (user "on transforme Moviebox en backup principal pour tous
@@ -2314,6 +2435,8 @@ object BackupRegistry {
             "Cloudstream" -> CloudstreamProvider.getVideo(orig)
             "Webflix" -> WebflixProvider.getVideo(orig)
             "Nabistream" -> com.streamflixreborn.streamflix.providers.NabistreamProvider.getVideo(orig)
+            // 2026-08-16 : l'URL Purstream est deja le master HLS final (aucun jeton) → route directe.
+            "Purstream" -> com.streamflixreborn.streamflix.providers.PurstreamProvider.getVideo(orig)
             "FileSearch" -> com.streamflixreborn.streamflix.providers.FileSearchProvider.getVideo(orig)
             "Papadustream V2" -> PapadustreamV2Provider.getVideo(orig)
             // 2026-08-08 : ok.ru — flux résolu À LA LECTURE (URLs liées à l'IP + `expires`).

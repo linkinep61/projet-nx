@@ -19,7 +19,17 @@
         <item>Quad9 — anti-malware (DoH)</item>
         <item>AdGuard — anti-pub (DoT)</item>
         <item>Mullvad — anti-pub (DoT)</item>
+        <item>➕ Mon propre DNS…</item>
     </string-array>
+
+    <!-- 2026-08-17 (demande d'utilisateurs : « serait-il possible de modifier
+         soi-même les DNS de l'application ») : valeur sentinelle. Choisie dans
+         la liste, elle n'est jamais enregistrée telle quelle — elle ouvre une
+         saisie, et c'est l'adresse tapée qui est stockée. -->
+    <string name="doh_custom_sentinel" translatable="false">custom://saisie</string>
+    <string name="doh_custom_title" tools:ignore="MissingTranslation">Mon propre DNS</string>
+    <string name="doh_custom_message" tools:ignore="MissingTranslation">Colle l\'adresse de ton résolveur.\n\nDoH : https://exemple.net/dns-query\nDoT : dot://exemple.net</string>
+    <string name="doh_custom_invalid" tools:ignore="MissingTranslation">Adresse invalide. Elle doit commencer par https:// ou dot://</string>
 
     <string-array name="doh_provider_urls" translatable="false">
         <item></item> <!-- Désactivé : DNS système -->
@@ -38,5 +48,6 @@
         <item>https://dns.quad9.net/dns-query</item>
         <item>dot://dns.adguard-dns.com</item>
         <item>dot://adblock.dns.mullvad.net</item>
+        <item>custom://saisie</item>
     </string-array>
 </resources>

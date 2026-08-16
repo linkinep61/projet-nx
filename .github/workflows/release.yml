@@ -30,9 +30,13 @@ jobs:
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           RABBITSTREAM_SOURCE_API: ${{ secrets.RABBITSTREAM_SOURCE_API }}
+          VOE_API_KEY: ${{ secrets.VOE_API_KEY }}
         run: |
           echo TMDB_API_KEY=$TMDB_API_KEY >> local.properties
           echo RABBITSTREAM_SOURCE_API=$RABBITSTREAM_SOURCE_API >> local.properties
+          # 2026-08-17 : clé API du serveur VOE perso du user (VoeLibrary). Vide si le secret
+          #   n'est pas défini → build.gradle retombe sur "" → provider VOE inactif (pas d'échec).
+          echo VOE_API_KEY=$VOE_API_KEY >> local.properties
 
       - name: Decode Keystore
         run: echo "${{ secrets.KEYSTORE }}" | base64 -d > streamflix-release.jks

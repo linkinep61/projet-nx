@@ -57,6 +57,10 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
     private var serviceInitialized = false
     private val initializationMutex = Mutex()
 
+    /** Nombre de pages de /nouveaux-ajouts/ chargées pour la rangée "Nouveau"
+     *  (14 titres par page, chargées en parallèle → pas de coût d'attente). */
+    private const val NOUVEAUTES_PAGES = 3
+
     // ==================== DRAMACOOL FALLBACK SOURCE ====================
     //
     // 2026-05-04 : Dramacool9.com.ro est utilisé en SOURCE COMPLEMENTAIRE
@@ -393,8 +397,15 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
         return try {
             coroutineScope {
                 val homeDeferred = async { service.getPage(baseUrl) }
+                // 2026-08-16 : "Nouveau" ne montrait qu'UNE page (14 titres). Le site en a 364,
+                // paginées en /nouveaux-ajouts/page/N/. On en charge 3 en parallèle → ~42 titres.
                 val recentDeferred = async {
                     try { service.getPage("${baseUrl}nouveaux-ajouts/") } catch (_: Exception) { null }
+                }
+                val recentPagesDeferred = (2..NOUVEAUTES_PAGES).map { p ->
+                    async {
+                        try { service.getPage("${baseUrl}nouveaux-ajouts/page/$p/") } catch (_: Exception) { null }
+                    }
                 }
                 val popularDeferred = async {
                     try { service.getPage("${baseUrl}drama/?m_orderby=views") } catch (_: Exception) { null }
@@ -480,12 +491,19 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                     }))
                 }
 
-                // 2. Nouveaux ajouts
-                val recentDoc = recentDeferred.await()
-                if (recentDoc != null) {
-                    val recentShows = recentDoc.select(".page-item-detail").mapNotNull { item ->
-                        parseHomeItem(item)
-                    }
+                // 2. Nouveaux ajouts (plusieurs pages, dans l'ordre, sans doublon)
+                val recentDocs = buildList {
+                    recentDeferred.await()?.let { add(it) }
+                    recentPagesDeferred.forEach { d -> d.await()?.let { add(it) } }
+                }
+                if (recentDocs.isNotEmpty()) {
+                    val vusRecents = HashSet<String>()
+                    val recentShows = recentDocs
+                        .flatMap { doc -> doc.select(".page-item-detail").mapNotNull { parseHomeItem(it) } }
+                        .filter { item ->
+                            val id = when (item) { is TvShow -> item.id; is Movie -> item.id; else -> "" }
+                            id.isNotBlank() && vusRecents.add(id)
+                        }
                     if (recentShows.isNotEmpty()) {
                         categories.add(Category(name = "Nouveau", list = recentShows))
                     }

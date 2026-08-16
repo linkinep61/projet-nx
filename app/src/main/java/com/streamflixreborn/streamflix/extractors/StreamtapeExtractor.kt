@@ -13,7 +13,23 @@ class StreamtapeExtractor : Extractor() {
 
     override val name = "Streamtape"
     override val mainUrl = "https://streamtape.com"
-    override val aliasUrls = listOf("https://streamta.site", "https://strtape.cloud", "https://stape.fun")
+    // 2026-08-16 : `shavetape.cash` et `advtpe.com` ajoutés — relevés sur cinestream.info
+    //   (le site que l'endpoint « wiflix » de Movix scrape en réalité). Un lien shavetape
+    //   redirige vers advtpe.com/e/<code> : même schéma `/e/<code>` que Streamtape, page
+    //   d'embed portant le conteneur signature `<div id="realcontent">`, et son popunder
+    //   ouvre streamtape.com. Sans ces alias, ces liens repartaient en « No extractors found ».
+    //   ⚠ NON ÉPROUVÉ SUR LE TERRAIN : ajouté en prévention le jour où ces liens nous
+    //   arriveront par une autre source (l'endpoint CineStream est bridé depuis ce soir).
+    //   La signature `getElementById(...).innerHTML = … .substring(N)` n'a pas pu être
+    //   confirmée dans le navigateur : la page détecte le bloqueur de pubs (`<div id="adb">`)
+    //   et ne sert pas le vrai script. L'app, elle, n'a pas de bloqueur.
+    override val aliasUrls = listOf(
+        "https://streamta.site",
+        "https://strtape.cloud",
+        "https://stape.fun",
+        "https://shavetape.cash",
+        "https://advtpe.com",
+    )
 
 
     override suspend fun extract(link: String): Video {

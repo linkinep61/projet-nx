@@ -1243,6 +1243,46 @@ object MiniPlayerController {
         }
     }
 
+    // ── 2026-08-18 (user : « vaut mieux avoir un mini-lecteur complet… un clic ça
+    //   affiche les boutons ») : de quoi piloter la lecture SANS passer en plein
+    //   écran. Même source d'ordre que le bouton ⏭ du grand lecteur.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /** Fichier/chaîne suivant. false = rien après (fin de dossier). */
+    fun suivant(): Boolean {
+        val id = currentChannelId ?: return false
+        if (id.startsWith("livehub::rutube::") || id.startsWith("livehub::ytclip::")) {
+            return lireClipRutubeSuivant()
+        }
+        return lireFichierBibliothequeSuivant(id)
+    }
+
+    /** Fichier/chaîne précédent. false = on est au début. */
+    fun precedent(): Boolean {
+        val id = currentChannelId ?: return false
+        if (id.startsWith("livehub::rutube::") || id.startsWith("livehub::ytclip::")) {
+            return clipRutubePrecedent()
+        }
+        val provider = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+        val prec = provider.getPreviousChannelId(id) ?: return false
+        val nom = provider.getChannelDisplayName(prec) ?: prec
+        playChannel(prec, nom, provider.getChannelPoster(prec))
+        return true
+    }
+
+    /** Position courante en ms (0 si rien ne joue). */
+    fun positionMs(): Long = try { player?.currentPosition ?: 0L } catch (_: Exception) { 0L }
+
+    /** Durée totale en ms, ou 0 si inconnue — un DIRECT n'a pas de durée. */
+    fun dureeMs(): Long = try {
+        player?.duration?.takeIf { it > 0 && it != androidx.media3.common.C.TIME_UNSET } ?: 0L
+    } catch (_: Exception) { 0L }
+
+    /** Déplacement dans la vidéo (barre de progression du mini-lecteur). */
+    fun allerA(ms: Long) {
+        try { player?.seekTo(ms.coerceAtLeast(0L)) } catch (_: Exception) {}
+    }
+
     /** Bascule lecture/pause du mini-lecteur. Retourne true si ça joue après l'appel. */
     fun basculerLecture(): Boolean {
         val p = player ?: return false
@@ -1316,8 +1356,35 @@ object MiniPlayerController {
         return true
     }
 
+    /**
+     * Fichier suivant du MÊME dossier, joué DANS le mini-lecteur — c'est-à-dire
+     * exactement ce que fait le bouton « suivant » du grand lecteur, même source
+     * d'ordre (`LiveTvHubProvider`). Pas de liste parallèle à maintenir.
+     *
+     * false = dernier fichier du dossier, on s'arrête là.
+     */
+    private fun lireFichierBibliothequeSuivant(idCourant: String): Boolean {
+        val provider = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+        val suivant = provider.getNextChannelId(idCourant) ?: run {
+            Log.d(TAG, "bibliothèque : fin du dossier")
+            return false
+        }
+        val nom = provider.getChannelDisplayName(suivant) ?: suivant
+        Log.i(TAG, "bibliothèque → fichier suivant : $nom")
+        playChannel(suivant, nom, provider.getChannelPoster(suivant))
+        return true
+    }
+
     private fun handleEndedOrIdle(playbackState: Int) {
         val curChIdForEnd = currentChannelId ?: return
+        // 2026-08-18 (user « le mini-lecteur doit aussi enchaîner ») : fichier de MA
+        //   BIBLIOTHÈQUE terminé DANS le mini-lecteur. Son id `livehub::…` tombait dans
+        //   la branche « direct » plus bas, qui RECHARGE le même flux : il repartait donc
+        //   en boucle au lieu de passer au fichier suivant du dossier.
+        if (curChIdForEnd.startsWith("livehub::voe::")) {
+            if (playbackState == Player.STATE_ENDED && lireFichierBibliothequeSuivant(curChIdForEnd)) return
+            return
+        }
         // Clip Rutube/YouTube terminé → on enchaîne, on ne recharge PAS (ce n'est pas du direct).
         if (curChIdForEnd.startsWith("livehub::rutube::") || curChIdForEnd.startsWith("livehub::ytclip::")) {
             if (playbackState == Player.STATE_ENDED && lireClipRutubeSuivant()) return
@@ -1641,9 +1708,17 @@ object MiniPlayerController {
                     //   des séries) : « la position a atteint la fin ». Placé AVANT le test
                     //   `isPlaying`, car en fin de vidéo la lecture s'arrête justement.
                     val idClip = currentChannelId
-                    if (!finClipTraitee && idClip != null &&
+                    // ── 2026-08-18 — MESURÉ SUR ÉMULATEUR ANDROID TV ────────────────────
+                    //   Un fichier de la bibliothèque (`livehub::voe::`) n'émet JAMAIS
+                    //   STATE_ENDED : arrivé au bout, la position continue de monter
+                    //   (pos=240s pour une durée de 183s, image figée). Le correctif de
+                    //   `handleEndedOrIdle` ne pouvait donc rien déclencher.
+                    //   Ces fichiers entrent maintenant dans CE filet-là — le même que les
+                    //   clips Rutube/YouTube, qui marche depuis le 2026-08-14.
+                    val estBibliotheque = idClip?.startsWith("livehub::voe::") == true
+                    val estClipWeb = idClip != null &&
                         (idClip.startsWith("livehub::rutube::") || idClip.startsWith("livehub::ytclip::"))
-                    ) {
+                    if (!finClipTraitee && idClip != null && (estClipWeb || estBibliotheque)) {
                         val duree = try { p.duration } catch (_: Throwable) { 0L }
                         val position = try { p.currentPosition } catch (_: Throwable) { 0L }
                         val marge = com.streamflixreborn.streamflix.utils.UserPreferences
@@ -1652,8 +1727,9 @@ object MiniPlayerController {
                             position >= duree - marge
                         ) {
                             finClipTraitee = true
-                            val ok = lireClipRutubeSuivant()
-                            Log.i(TAG, "fin de clip mini ($position/$duree) → clip suivant : $ok")
+                            val ok = if (estBibliotheque) lireFichierBibliothequeSuivant(idClip)
+                                     else lireClipRutubeSuivant()
+                            Log.i(TAG, "fin de clip mini ($position/$duree) → suivant : $ok")
                             continue
                         }
                     }
@@ -3204,11 +3280,21 @@ object MiniPlayerController {
             //   pour qu'ExoPlayer reste 60s derrière le live edge sur les
             //   chaînes IPTV. Le player ne pourra jamais "rattraper" le flux
             //   → cushion permanent absorbe les 403 rate-limit Xtream.
-            val isLiveChannel = channelId.startsWith("ch::") || channelId.startsWith("sport::") ||
+            // ⚠ 2026-08-18 — UN FICHIER DE MA BIBLIOTHÈQUE N'EST PAS DU DIRECT.
+            //   C'est LE point de départ de tout : ce booléen décide (1) qu'on colle
+            //   une LiveConfiguration au fichier — le lecteur reste alors 45 s
+            //   « derrière le direct » sur une vidéo qui a une fin —, (2) qu'on lance
+            //   le LAZY BACKUP, et (3) qu'on met en file une COPIE du même flux.
+            //   Résultat mesuré : à la fin, le lecteur enchaînait sur la copie et le
+            //   clip repartait au début, STATE_ENDED n'arrivant jamais → aucun
+            //   « suivant » possible. Corriger plus bas ne traitait qu'un symptôme.
+            val isLiveChannel = (channelId.startsWith("ch::") || channelId.startsWith("sport::") ||
                 channelId.startsWith("ola::") || channelId.startsWith("ola_ep::") ||
                 channelId.startsWith("vegeta::") || channelId.startsWith("vegeta_ep::") ||
                 channelId.startsWith("livehub::") || channelId.startsWith("sportlive::") ||
-                channelId.startsWith("match::") || channelId.startsWith("vavoo::") || channelId.startsWith("myiptv-live::")
+                channelId.startsWith("match::") || channelId.startsWith("vavoo::") ||
+                channelId.startsWith("myiptv-live::")) &&
+                !channelId.startsWith("livehub::voe::")
             val mediaItem = MediaItem.Builder()
                 .setUri(video.source.toUri())
                 .setMimeType(video.type)

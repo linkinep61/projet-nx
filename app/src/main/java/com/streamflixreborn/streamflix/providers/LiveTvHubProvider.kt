@@ -751,7 +751,17 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   la carte Rutube est ajoutée DANS la rangée des dossiers produite par le regroupement,
         //   à côté des autres (Cinéma, Musique, OTF…). Si cette rangée n'existe pas (cas rare),
         //   on retombe sur une section dédiée pour qu'elle reste accessible.
-        val grouped = groupSectionsIntoFolders(sections).toMutableList()
+        // 2026-08-17 (user « je veux juste que tu fasses un dossier dans le TV hub
+        //   où est connectée cette base de données ») : les fichiers du compte VOE
+        //   personnel arrivent comme sections « Ma bibliothèque - <dossier VOE> »,
+        //   captées juste après par la FolderDef "ma_bibliotheque".
+        //   Clé API vide ⇒ liste vide ⇒ aucun appel réseau, aucun dossier affiché.
+        val sectionsAvecVoe = sections + try {
+            com.streamflixreborn.streamflix.utils.VoeLibrary.sections()
+        } catch (e: Exception) {
+            Log.w(TAG, "Ma bibliothèque KO : ${e.message}"); emptyList()
+        }
+        val grouped = groupSectionsIntoFolders(sectionsAvecVoe).toMutableList()
         val idxDossiers = grouped.indexOfFirst { cat ->
             (cat.list as? List<*>)?.any { it is TvShow && it.id.startsWith("livehub::folder::") } == true
         }
@@ -1087,6 +1097,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
             // Catch-all : Arte sous-catégories, Replay non encore matchés.
             //   On limite au préfixe "Replay " (= n'attrape pas WiTV).
             // 2026-07-13 : "Généraliste" WiTV absorbé ici (plus de dossier dédié au home)
+            // 2026-08-17 : fichiers perso hébergés sur VOE (cf. VoeLibrary).
+            //   Placé AVANT le catch-all, sinon rien ne le distinguerait.
+            // Motif SANS ACCENT (cf. l'avertissement dans VoeLibrary.sections()) :
+            //   le libellé affiché peut en contenir, le motif d'appariement non.
+            FolderDef("ma_bibliotheque", "Film / série", Regex("^ONYX - .*$")),
             FolderDef("autres_replay", "Autres Replays", Regex("^Replay .*|^Généraliste$")),
         )
         // Sections gardées visibles directement (= pas dans un dossier) :
@@ -1177,7 +1192,22 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf")
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf") +
+            // ⚠ 2026-08-17 — CORRIGÉ (user « le dossier série/film n'est pas
+            //   stable, regarde pourquoi il disparaît »).
+            //   « Film / série » était VOLONTAIREMENT exclu d'ici, au motif
+            //   qu'une carte vide ferait sale chez quelqu'un sans compte VOE.
+            //   Le raisonnement était faux : la clé est compilée dans le build,
+            //   donc tout le monde l'a — il n'existe personne « sans compte ».
+            //   Conséquence réelle : dès qu'une lecture ratait (VOE refuse le
+            //   8e appel rapproché, cf. VoeLibrary.get), sections() renvoyait
+            //   une liste vide et la carte DISPARAISSAIT du TV Hub au lieu de
+            //   se remplir au chargement suivant. C'est exactement la panne
+            //   deja corrigee le 19/06 pour les dossiers Replay (« la moitie
+            //   des categories qui etaient dans un dossier ont disparu ») :
+            //   la carte reste, le contenu arrive apres. Meme traitement ici.
+            (if (com.streamflixreborn.streamflix.utils.VoeLibrary.actif)
+                setOf("ma_bibliotheque") else emptySet())
         // 2026-06-20 (user "mettre une petite jaquette sur les dossiers pour faire
         //   joli, correspondant au replay/catégorie") : map folderKey → URL logo.
         //   Pour les bouquets de chaînes (TF1+/M6+/France TV/Arte/OTF/Adrar), on
@@ -1200,6 +1230,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             // 2026-06-27 : logo dossier Musique (note de musique).
             "musique"        to "https://cdn-icons-png.flaticon.com/512/727/727218.png",
             "stream4cf"      to "https://www.stream4free.tv/images/logos4f.png",
+            // 2026-08-17 : dossier des fichiers perso (icone bibliotheque).
+            "ma_bibliotheque" to "https://cdn-icons-png.flaticon.com/512/2991/2991108.png",
         )
         // 2026-06-27 (user "mets Rakuten TV, Sony One et Sport dans Autres Replays") :
         //   ces 3 dossiers ne s'affichent plus en haut du TV Hub ; ils deviennent
@@ -1364,7 +1396,28 @@ object LiveTvHubProvider : Provider, IptvProvider {
         } catch (e: Exception) {
             Log.w(TAG, "search: Rutube libre KO: ${e.message}"); emptyList()
         }
-        return (liveHits + replayHits + rutubeHits).distinctBy { it.id }
+        // 2026-08-17 (user « le but c'est que quand on fait une recherche avec
+        //   l'application, on trouve les films et les séries ») : la bibliothèque
+        //   perso passe EN TÊTE des résultats — c'est notre propre copie, elle est
+        //   toujours plus pertinente qu'un replay homonyme. Lecture depuis le cache
+        //   de VoeLibrary (10 min), donc pas d'appel réseau à chaque frappe.
+        val voeHits = try {
+            com.streamflixreborn.streamflix.utils.VoeLibrary.tout()
+                // On cherche dans titreAffiche (sans l'identifiant TMDB) : taper
+                //   « mojave » doit trouver « 237584 - Mojave.avi ». Chercher dans
+                //   `titre` marcherait aussi, mais un utilisateur qui tape un
+                //   nombre tomberait sur des identifiants au lieu de titres.
+                .filter {
+                    val v = com.streamflixreborn.streamflix.utils.VoeLibrary
+                    it.titreAffiche.lowercase().contains(q) ||
+                        v.titrePour(it).lowercase().contains(q)
+                }
+                .take(100)
+                .map { com.streamflixreborn.streamflix.utils.VoeLibrary.tuileFilm(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "search: bibliothèque KO: ${e.message}"); emptyList()
+        }
+        return (voeHits + liveHits + replayHits + rutubeHits).distinctBy { it.id }
     }
 
     /**
@@ -1453,6 +1506,31 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-08-13 : clip Rutube (dossier navigable) → show direct-play (1 saison / 1 épisode).
         if (id.startsWith("livehub::rutube::")) {
             return rutubeClipShow(id)
+        }
+        // 2026-08-17 : film perso hébergé sur VOE → fiche direct-play (1 saison,
+        //   1 épisode), même pattern que les clips Rutube ci-dessus.
+        if (id.startsWith("livehub::voe::")) {
+            val code = id.removePrefix("livehub::voe::")
+            val f = try {
+                com.streamflixreborn.streamflix.utils.VoeLibrary.tout()
+                    .firstOrNull { it.code == code }
+            } catch (e: Exception) { null }
+            // Titre officiel TMDB + affiche si on les connaît, sinon nom de
+            //   fichier nettoyé (sans l'identifiant) et vignette VOE.
+            val v = com.streamflixreborn.streamflix.utils.VoeLibrary
+            val titre = f?.let { v.titrePour(it) } ?: "Ma bibliothèque"
+            val jaquette = f?.let { v.posterPour(it) }
+            return TvShow(id = id, title = titre).copy(
+                poster = jaquette,
+                seasons = listOf(
+                    Season(
+                        id = id, number = 1, title = "Fichier",
+                        episodes = listOf(
+                            Episode(id = id, number = 1, title = "Lire", poster = jaquette),
+                        ),
+                    ),
+                ),
+            ).apply { providerName = "TV Hub" }
         }
         // 2026-06-18 v24 : REPLAY TF1+ programme → fetch les épisodes via TF1+ HTML
         //   Pipeline :
@@ -2183,6 +2261,15 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  "canalplus", mais le Hub cherchait sous "canal" (witvKey) → fallback
      *  déclenché à tort, l'user voyait toute la liste agrégée. */
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-08-17 : fichier perso VOE → serveur unique en URL d'embed canonique.
+        //   VoeExtractor a « https://voe.sx » dans ses aliasUrls, donc l'extraction
+        //   part directement sur le bon extracteur, sans code supplémentaire.
+        if (id.startsWith("livehub::voe::")) {
+            return listOf(
+                com.streamflixreborn.streamflix.utils.VoeLibrary
+                    .serveurDe(id.removePrefix("livehub::voe::")),
+            )
+        }
         // 2026-08-13 : clip Rutube (dossier navigable) → serveur Rutube (m3u8 résolu à la lecture).
         if (id.startsWith("livehub::rutube::")) {
             val hex = id.removePrefix("livehub::rutube::")
@@ -2709,7 +2796,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
         if (server.id.startsWith("livehub::bonus::") ||
             server.id.startsWith("livehub::dailymotion::") ||
-            server.id.startsWith("livehub::freeshot::")) {
+            server.id.startsWith("livehub::freeshot::") ||
+            // ⚠ 2026-08-17 : SANS cette ligne, le mini-lecteur échouait avec
+            //   « No IPTV provider can handle server: livehub::voe::… » — getServers
+            //   renvoyait bien le serveur, mais getVideo tombait dans le delegate
+            //   IPTV, qui ne connaît pas ce préfixe. Un fichier perso VOE se résout
+            //   comme les bonus : on passe l'URL d'embed à l'extracteur.
+            server.id.startsWith("livehub::voe::")) {
             return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
         }
         return IptvCrossDelegate.delegateGetVideo(server)

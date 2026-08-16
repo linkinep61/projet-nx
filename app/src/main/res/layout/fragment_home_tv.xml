@@ -47,8 +47,7 @@
         android:visibility="gone"
         android:elevation="8dp"
         android:background="#CC000000"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
+        android:orientation="vertical"
         android:paddingTop="4dp"
         android:paddingBottom="4dp"
         android:paddingStart="6dp"
@@ -57,6 +56,72 @@
         app:layout_constraintTop_toTopOf="parent"
         android:layout_marginStart="70dp"
         android:layout_marginTop="8dp">
+
+        <!-- Avancement du mini-lecteur TV : intégré AU MÊME bandeau, donc décalé
+             à gauche comme lui. Masqué automatiquement sur un DIRECT (durée
+             inconnue).
+             2026-08-18 (user : « t'as qu'à mettre la barre au-dessus, peut-être que
+             ce sera plus praticable ») : elle est donc placée AU-DESSUS des boutons.
+             On y monte avec HAUT depuis n'importe quel bouton (rien au-dessus
+             avant, donc aucune touche n'est volée), on en redescend sur ⛶.
+             GAUCHE/DROITE y reculent/avancent la lecture de 10 s.
+             ⚠ BAS depuis les boutons va TOUJOURS directement à la grille : le
+             maniement des jaquettes est inchangé. -->
+        <LinearLayout
+            android:id="@+id/mini_player_progress_row"
+            android:layout_width="300dp"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:foreground="@drawable/bg_focus_white_border"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusDown="@id/mini_player_fullscreen">
+
+            <TextView
+                android:id="@+id/mini_player_time_current"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                tools:text="0:00" />
+
+            <ProgressBar
+                android:id="@+id/mini_player_progress"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="4dp"
+                android:max="1000"
+                android:progressTint="#E50914"
+                android:progressBackgroundTint="#66FFFFFF"
+                android:focusable="false" />
+
+            <TextView
+                android:id="@+id/mini_player_time_total"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                tools:text="3:42" />
+        </LinearLayout>
+
+    <!-- 2026-08-18 (user : « je voudrais aussi intégrer la barre de progression
+         à celle-ci — je parle bien du mini-lecteur télé ») : le bandeau devient
+         VERTICAL. En haut, exactement la même rangée de boutons qu'avant (rien
+         n'a bougé, même ordre, même focus D-pad) ; en dessous, l'avancement. -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
         <ImageView
             android:id="@+id/mini_player_channel_logo"
@@ -87,10 +152,34 @@
             android:background="?android:attr/selectableItemBackground"
             android:focusable="true"
             android:focusableInTouchMode="true"
-            android:nextFocusRight="@id/mini_player_pause"
+            android:nextFocusRight="@id/mini_player_prev"
+            android:nextFocusUp="@id/mini_player_progress_row"
             android:nextFocusDown="@id/vgv_home"
             android:nextFocusLeft="@id/home"
             android:contentDescription="Agrandir" />
+
+        <!-- 2026-08-18 (user : « il nous manque peut-être les deux flèches suivant
+             et précédent dans la même barre ») : ⏮ et ⏭ encadrent ⏸, comme sur
+             mobile. ⛶ reste en premier et ✕ en dernier — l'ordre auquel tu es
+             habitué ne bouge pas. -->
+        <ImageView
+            android:id="@+id/mini_player_prev"
+            android:foreground="@drawable/bg_focus_white_border"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginEnd="4dp"
+            android:padding="10dp"
+            android:src="@android:drawable/ic_media_previous"
+            android:scaleType="fitCenter"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusLeft="@id/mini_player_fullscreen"
+            android:nextFocusRight="@id/mini_player_pause"
+            android:nextFocusUp="@id/mini_player_progress_row"
+            android:nextFocusDown="@id/vgv_home"
+            android:contentDescription="Précédent"
+            app:tint="#FFFFFF" />
 
         <ImageView
             android:id="@+id/mini_player_pause"
@@ -104,10 +193,30 @@
             android:background="?android:attr/selectableItemBackground"
             android:focusable="true"
             android:focusableInTouchMode="true"
-            android:nextFocusLeft="@id/mini_player_fullscreen"
-            android:nextFocusRight="@id/mini_player_close"
+            android:nextFocusLeft="@id/mini_player_prev"
+            android:nextFocusRight="@id/mini_player_next"
+            android:nextFocusUp="@id/mini_player_progress_row"
             android:nextFocusDown="@id/vgv_home"
             android:contentDescription="Pause" />
+
+        <ImageView
+            android:id="@+id/mini_player_next"
+            android:foreground="@drawable/bg_focus_white_border"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginEnd="4dp"
+            android:padding="10dp"
+            android:src="@android:drawable/ic_media_next"
+            android:scaleType="fitCenter"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusLeft="@id/mini_player_pause"
+            android:nextFocusRight="@id/mini_player_close"
+            android:nextFocusUp="@id/mini_player_progress_row"
+            android:nextFocusDown="@id/vgv_home"
+            android:contentDescription="Suivant"
+            app:tint="#FFFFFF" />
 
         <ImageView
             android:id="@+id/mini_player_close"
@@ -120,10 +229,13 @@
             android:background="?android:attr/selectableItemBackground"
             android:focusable="true"
             android:focusableInTouchMode="true"
-            android:nextFocusLeft="@id/mini_player_pause"
+            android:nextFocusLeft="@id/mini_player_next"
+            android:nextFocusUp="@id/mini_player_progress_row"
             android:nextFocusDown="@id/vgv_home"
             android:contentDescription="Fermer"
             app:tint="#FFFFFF" />
+        </LinearLayout>
+
     </LinearLayout>
 
     <!-- Mini player = vidéo pure, flush top-right. Pas d'overlay dedans.
@@ -333,7 +445,7 @@
             android:nextFocusLeft="@id/home"
             android:nextFocusRight="@id/vgv_home"
             android:nextFocusDown="@id/iv_iptv_language"
-            android:nextFocusUp="@id/vgv_home"
+            android:nextFocusUp="@id/mini_player_progress_row"
             android:contentDescription="Catégories IPTV"
             app:tint="@android:color/white" />
 

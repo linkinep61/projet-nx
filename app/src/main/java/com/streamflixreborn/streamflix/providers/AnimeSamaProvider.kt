@@ -856,6 +856,10 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     @Volatile private var lastLanguageFilter: String? = null  // "vf" / "vostfr" / null
     @Volatile private var lastTypeFilter: String? = null      // "Anime" / "Film" / null
 
+    /** 2026-08-18 : dernière page réellement lue par getGenre, par (genre|langue|type).
+     *  Sert à reprendre APRÈS les pages de scans sautées au chargement précédent. */
+    @Volatile private var curseurGenre: Pair<String, Int>? = null
+
     /** 2026-06-20 (user "VOSTFR + arts martiaux + Série OK / + Film → séries au
      *  lieu de films") : quand un genre est actif, le ViewModel rappelle
      *  `getGenre()` SANS repasser par getFilteredXxx → mes flags langue/type
@@ -1986,16 +1990,55 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         //   le serveur AnimeSama est case-sensitive sur "VF" (majuscule),
         //   "vf" minuscule retourne 0 résultats. VOSTFR est insensible.
         val langParam = if (lang.equals("vf", ignoreCase = true)) "VF" else lang
-        val sb = StringBuilder("${baseUrl}catalogue/?genre[]=$id&page=$page")
-        if (!langParam.isNullOrEmpty()) sb.append("&langue[]=$langParam")
-        if (!type.isNullOrEmpty()) sb.append("&type[]=$type")
-        val url = sb.toString()
-        Log.d(TAG, "[getGenre] id=$id page=$page lang=$lang type=$type → $url")
-        val document = fetchDocument(url)
+        // ── 2026-08-18 — DEUX CORRECTIFS ICI ────────────────────────────────────────────
+        //  (1) Le genre partait BRUT dans l'URL. « Isekai » passait, mais « Arts martiaux »,
+        //      « Aliens / Extra-terrestres » ou « Harem inversé » partaient avec espaces et
+        //      « / » non échappés → requête cassée, liste vide. On encode.
+        //  (2) Retour utilisateur : « Isekai charge quelques résultats mais ne charge pas
+        //      complètement ». Cause : on jette ici les cartes de type « Scans », et le
+        //      ViewModel conclut `hasMore = résultats.isNotEmpty()`. Une page composée
+        //      uniquement de scans revenait donc VIDE → l'appli croyait être au bout du
+        //      catalogue et n'a plus jamais demandé la suite. On saute ces pages creuses
+        //      (jusqu'à 3), et on ne s'arrête que sur une page RÉELLEMENT vide.
+        val idEncode = java.net.URLEncoder.encode(id, "UTF-8")
+        fun urlPour(p: Int): String {
+            val sb = StringBuilder("${baseUrl}catalogue/?genre[]=$idEncode&page=$p")
+            if (!langParam.isNullOrEmpty()) sb.append("&langue[]=$langParam")
+            if (!type.isNullOrEmpty()) sb.append("&type[]=$type")
+            return sb.toString()
+        }
+        // Curseur : le ViewModel réclame page+1 à chaque chargement. Si on a déjà consommé
+        //   des pages en sautant les pages de scans, on reprend APRÈS elles au lieu de
+        //   relire ce qu'on a déjà rendu.
+        val cle = "$id|$lang|$type"
+        var pageCourante = page
+        val curseur = curseurGenre
+        if (page > 1 && curseur != null && curseur.first == cle && curseur.second >= page) {
+            pageCourante = curseur.second + 1
+        }
+        var document = fetchDocument(urlPour(pageCourante))
+        var cartes = document.select(".catalog-card")
+        var sauts = 0
+        while (sauts < 3 &&
+            cartes.isNotEmpty() &&
+            cartes.all { c ->
+                c.select(".type-row .info-value").joinToString { it.text().trim() }
+                    .contains("Scans", ignoreCase = true)
+            }
+        ) {
+            Log.d(TAG, "[getGenre] page $pageCourante = uniquement des scans → page suivante")
+            pageCourante++
+            sauts++
+            document = fetchDocument(urlPour(pageCourante))
+            cartes = document.select(".catalog-card")
+        }
+        curseurGenre = cle to pageCourante
+        Log.d(TAG, "[getGenre] id=$id page=$page→$pageCourante lang=$lang type=$type " +
+            "cartes=${cartes.size} → ${urlPour(pageCourante)}")
         return Genre(
             id = id,
             name = id.replaceFirstChar { it.uppercase() },
-            shows = document.select(".catalog-card").flatMap { card ->
+            shows = cartes.flatMap { card ->
                 // Skip scans — l'user veut uniquement Anime/Film/Autres
                 val typeText = card.select(".type-row .info-value").joinToString { it.text().trim() }
                 if (typeText.contains("Scans", ignoreCase = true)) return@flatMap emptyList<Show>()

@@ -370,6 +370,20 @@ class TvShowsTvFragment : Fragment() {
         var origMarginTop = 0
         var isDragging = false
 
+        // 2026-08-18 : avancement intégré au bandeau du mini-lecteur TV
+        //   (voir HomeTvFragment).
+        // 2026-08-18 : ⏮ / ⏭ du bandeau TV (voir HomeTvFragment).
+        binding.miniPlayerPrev.setOnClickListener { MiniPlayerController.precedent() }
+        binding.miniPlayerNext.setOnClickListener { MiniPlayerController.suivant() }
+
+        com.streamflixreborn.streamflix.utils.MiniPlayerProgressionTv.installer(
+            ligne = binding.miniPlayerProgressRow,
+            progression = binding.miniPlayerProgress,
+            tempsCourant = binding.miniPlayerTimeCurrent,
+            tempsTotal = binding.miniPlayerTimeTotal,
+            proprietaire = viewLifecycleOwner,
+        )
+
         // Drag via the overlay bar (bottom bar with channel name)
         binding.miniPlayerOverlay.setOnTouchListener { _, event ->
             val lp = container.layoutParams as ConstraintLayout.LayoutParams

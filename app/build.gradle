@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10941
-        versionName "1.7.241"
+        versionCode 10942
+        versionName "1.7.242"
 
         // ABI pilotée par la propriété ABI_TARGET (local.properties, posée par la CI).
         //   APK par défaut = ARM (armeabi-v7a + arm64-v8a).
@@ -69,6 +69,9 @@ android {
         buildConfigField "String", "OPENSUBTITLES_API_KEY", "\"${properties.getProperty("OPENSUBTITLES_API_KEY") ?: ""}\""
         buildConfigField "String", "GITHUB_CRASH_TOKEN", "\"${properties.getProperty("GITHUB_CRASH_TOKEN") ?: ""}\""
         buildConfigField "String", "GITHUB_CRASH_REPO", "\"${properties.getProperty("GITHUB_CRASH_REPO") ?: ""}\""
+        // 2026-08-17 : clé API VOE (bibliothèque perso). Onglet COMPTE du site, section
+        //   « Détails de l'API ». Vide = provider inactif, aucun appel réseau.
+        buildConfigField "String", "VOE_API_KEY", "\"${properties.getProperty("VOE_API_KEY") ?: ""}\""
     }
 
     sourceSets {

@@ -33,6 +33,15 @@ open class VidMoLyExtractor : Extractor() {
         // 2026-07-29 : ansembed.net = mirror Vidmoly (même player JWPlayer + CDN vmwesa.online),
         //   utilisé par anime-sama (Lecteur 1). Même extraction m3u8 que Vidmoly.
         "https://ansembed.net",
+        // 2026-08-16 : voembed.net = front Vidmoly servi par COFLIX sous le libellé
+        //   maison « LECTEUR MyTV » (⚠ le nom induit en erreur : ce n'est NI VOE malgré
+        //   le « vo », NI le « MyTV » de Vostfree). Vérifié en direct sur coflix.esq :
+        //   `voembed.net/embed-<id>.html`, page JWPlayer qui se réclame de VidMoly, avec
+        //   la signature XFileSharing `hls2/…/.urlset/master.m3u8` et le m3u8 inline
+        //   → le fast-path OkHttp suffit, aucune WebView.
+        //   Sans cet alias AUCUN extracteur n'était sélectionné : « voembed » ne fait que
+        //   7 caractères, il échappe donc au rotatingDomain de VOE (qui exige 12-60).
+        "https://voembed.net",
     )
 
     private val context = StreamFlixApp.instance.applicationContext

@@ -189,6 +189,41 @@ object CoflixSourceProvider {
             val stripped = serieSlug.replace(Regex("-p?\\d+$"), "")
             if (stripped.isNotBlank() && stripped != serieSlug) add(stripped)
         }
+        // ── 2026-08-16 : LIRE la liste d'épisodes AVANT de la deviner ────────
+        //   Coflix a DEUX conventions de nommage d'épisode qui coexistent :
+        //     • courte   : /episode/<slug>-1x3/                    ← devinable
+        //     • longue   : /episode/<slug>-1x01-54912-6a7a48a4a7/  ← INDEVINABLE
+        //       (numéro sur 2 chiffres + id interne + hash)
+        //   Sur la 2ᵉ, l'URL fabriquée renvoyait 404 → `cfServers` jamais lu →
+        //   0 serveur, alors que le match de titre était parfait (score=100).
+        //   Constaté sur « New York Unité Spéciale » S1E1 (log : GET …-1x1/ → 404),
+        //   et ce sont justement les fiches en nommage LONG qui servent le nouveau
+        //   format à hébergeurs directs — les deux moitiés de la même panne.
+        //   On lit donc les liens réels sur la page de la série et on retient celui
+        //   qui porte le bon SxE. La devinette reste en repli (boucle suivante),
+        //   donc les fiches à nommage court gardent exactement le comportement
+        //   d'avant — pas de régression sur ce qui marche déjà.
+        run {
+            val serieHtml = httpGet(match.url) ?: return@run
+            val liens = Regex("""/episode/[a-z0-9\-]+/?""")
+                .findAll(serieHtml)
+                .map { it.value }
+                .distinct()
+                .toList()
+            if (liens.isEmpty()) return@run
+            // `1x01` comme `1x1` : on tolère le zéro de tête, et on exige une
+            // frontière derrière (fin, tiret ou slash) pour ne pas confondre
+            // l'épisode 1 avec le 10, le 11, etc.
+            val motif = Regex("""-${seasonNumber}x0*${episodeNumber}(?:[-/]|$)""")
+            val cible = liens.firstOrNull { motif.containsMatchIn(it) } ?: return@run
+            val episodeUrl = "${urlBase(match.url)}${if (cible.startsWith("/")) cible else "/$cible"}"
+            val servers = extractFromCoflixPage(episodeUrl, label = "Coflix Boston")
+            if (servers.isNotEmpty()) {
+                Log.i(TAG, "getEpisodeSources '$showTitle' S${seasonNumber}E$episodeNumber → lien LU '$cible' → ${servers.size} serveurs")
+                return servers
+            }
+        }
+
         for (slug in slugCandidates) {
             val episodeUrl = "${urlBase(match.url)}/episode/$slug-${seasonNumber}x${episodeNumber}/"
             val servers = extractFromCoflixPage(episodeUrl, label = "Coflix Boston")
@@ -365,7 +400,17 @@ object CoflixSourceProvider {
                     var embedUrl = obj.optString("embed_url")
                     if (embedUrl.isBlank()) continue
                     // Ajouter le token comme paramètre &t=
-                    if (token.isNotBlank()) {
+                    // ⚠ 2026-08-16 : UNIQUEMENT sur la page intermédiaire de Coflix.
+                    //   `cfPlayerToken` est un JWT propre à Coflix, destiné à
+                    //   lecteurvideo.com. Depuis que `cfServers` pointe directement sur
+                    //   les hébergeurs tiers, on le collait à des URL qui n'en veulent
+                    //   pas (frembed.casa, vidzy.cc…) → paramètre parasite.
+                    //   Constaté en direct : `frembed.casa/api/serie.php?id=…&sa=1&epi=1`
+                    //   s'ouvre normalement dans le navigateur (lecteur « VF · Uqload »),
+                    //   alors qu'ONYX l'appelait avec `&t=<JWT Coflix>` et échouait.
+                    val estIntermediaireUrl = embedUrl.contains("lecteurvideo", ignoreCase = true) ||
+                        embedUrl.contains("coflix", ignoreCase = true)
+                    if (token.isNotBlank() && estIntermediaireUrl) {
                         embedUrl += (if (embedUrl.contains("?")) "&" else "?") + "t=$token"
                     }
                     embedUrls.add(embedUrl)
@@ -386,6 +431,49 @@ object CoflixSourceProvider {
         // ── Fetch chaque embed lecteurvideo et extraire les showVideo base64 ──
         val results = mutableListOf<Video.Server>()
         for (embedUrl in embedUrls) {
+            // ── 2026-08-16 : cfServers pointe DÉSORMAIS DIRECTEMENT sur l'hébergeur ──
+            //   Constaté en direct sur coflix.esq (Black Torch 1x07) : les `embed_url`
+            //   valent voembed.net/embed-<id>.html, gn1r5n.org/e/<id>, voe.sx/e/<id>,
+            //   streamtape.com/e/<id> — il n'y a PLUS de page intermédiaire
+            //   `lecteurvideo`, donc PLUS de `onclick="showVideo('<base64>')"` à
+            //   décoder. La boucle ci-dessous ne trouvait rien → Coflix rendait
+            //   ZÉRO serveur sur ce gabarit, en silence.
+            //   Correctif ADDITIF (on ne touche pas au chemin legacy, cf. règle
+            //   « ne pas restructurer un getServers qui marche ») : si l'URL est
+            //   déjà celle d'un hébergeur, on l'émet telle quelle et on s'épargne
+            //   au passage un aller-retour réseau par serveur.
+            val estIntermediaire = embedUrl.contains("lecteurvideo", ignoreCase = true) ||
+                embedUrl.contains("coflix", ignoreCase = true)
+            if (!estIntermediaire) {
+                if (embedUrl.contains("streamhg", ignoreCase = true)) continue
+                // 2026-08-16 (user : « il ne marche pas et on est déjà couvert ») :
+                //   Coflix annonce parfois le POINT D'ENTRÉE de l'API Frembed
+                //   (`frembed.<tld>/api/serie.php?id=…`), pas un lien d'hébergeur.
+                //   ⚠ Piège de nommage : la classe `FrembedExtractor` existe mais
+                //   n'est PAS enregistrée dans `Extractor.extractors` et son
+                //   `extract()` lève volontairement — ce n'est pas un extracteur,
+                //   c'est un DÉPLIEUR appelé à la main par FrembedProvider pour
+                //   obtenir les vrais hébergeurs. Cette URL ne peut donc jamais être
+                //   extraite : log « HOTE NON COUVERT: frembed.casa ».
+                //   Et le contenu est DÉJÀ fourni, déplié, par le provider Frembed
+                //   (même épisode → link1/2/3 + source VIP). La déduplication ne
+                //   peut pas les fusionner : elle compare les URL, or l'une est
+                //   l'adresse d'arrivée et l'autre celle du guichet.
+                //   → on n'émet pas ce serveur mort-né. Même principe que le skip
+                //   Streamhg juste au-dessus, et que « pas de serveur plutôt qu'un
+                //   mauvais ».
+                if (Regex("""frembed\.[a-z]+/api/""", RegexOption.IGNORE_CASE).containsMatchIn(embedUrl)) {
+                    Log.d(TAG, "Coflix : entrée API Frembed ignorée (déjà couverte par le provider Frembed)")
+                    continue
+                }
+                results.add(Video.Server(
+                    id = "coflix_${results.size}",
+                    name = "$label · ${guessHosterName(embedUrl)}",
+                    src = embedUrl,
+                ))
+                continue
+            }
+
             val embedHtml = httpGet(embedUrl, customReferer = coflixPageUrl) ?: continue
             val regex = Regex("""onclick="showVideo\('([^']+)',\s*'[^']*'\)"""")
             for (m in regex.findAll(embedHtml)) {
@@ -424,6 +512,11 @@ object CoflixSourceProvider {
             host.contains("doodstream") || host.contains("dood.") -> "Doodstream"
             host.contains("uqload") -> "Uqload"
             host.contains("streamtape") -> "Streamtape"
+            // 2026-08-16 : libellés maison de Coflix → vrai nom d'hébergeur, sinon
+            //   le picker affichait « Voembed » / « Gn1r5n ». voembed = front Vidmoly,
+            //   gn1r5n = frontend Byse (Filemoon). Cf. VidMoLyExtractor/FilemoonExtractor.
+            host.contains("voembed") -> "VidMoLy"
+            host.contains("gn1r5n") -> "Filemoon"
             host.contains("megaup") -> "MegaUp"
             host.contains("xtremestream") -> "MP4 Direct"
             host.contains("upn.one") -> "Coflix Upn"

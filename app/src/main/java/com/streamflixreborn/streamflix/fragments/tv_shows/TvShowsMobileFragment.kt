@@ -517,7 +517,18 @@ class TvShowsMobileFragment : Fragment() {
             updatePauseButton()
         }
         binding.miniPlayerFullscreen.setOnClickListener { navigateToFullPlayer() }
-        binding.miniPlayerView.setOnClickListener { navigateToFullPlayer() }
+        // 2026-08-18 : 1er appui sur la vidéo = le bandeau apparaît, 2e appui =
+        //   plein écran (cf. MiniPlayerBarre).
+        com.streamflixreborn.streamflix.utils.MiniPlayerBarre.installer(
+            zoneVideo = binding.miniPlayerView,
+            barre = binding.miniPlayerOverlay,
+            boutonPrecedent = binding.miniPlayerPrev,
+            boutonSuivant = binding.miniPlayerNext,
+            progression = binding.miniPlayerSeek,
+            surPleinEcran = { navigateToFullPlayer() },
+            proprietaire = viewLifecycleOwner,
+            retour = requireActivity().onBackPressedDispatcher,
+        )
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
@@ -653,6 +664,9 @@ class TvShowsMobileFragment : Fragment() {
     }
 
     private fun navigateToFullPlayer() {
+        // 2026-08-18 : voir HomeMobileFragment — le plein écran ferme TOUJOURS le
+        //   menu à jaquettes, sinon il resterait par-dessus le grand lecteur.
+        com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.dismissAllPublic()
         val channelId = MiniPlayerController.currentChannelId ?: return
         val channelName = MiniPlayerController.currentChannelName ?: channelId
         val channelPoster = MiniPlayerController.currentChannelPoster

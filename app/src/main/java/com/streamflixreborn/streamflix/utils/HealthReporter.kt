@@ -21,6 +21,29 @@ import java.util.UUID
 object HealthReporter {
 
     private const val TAG = "HealthReporter"
+
+    /**
+     * ⚠ 2026-08-17 — TÉLÉMÉTRIE D1 COUPÉE (base Cloudflare saturée, mails d'alerte reçus).
+     *
+     * Cause : [record] était appelé à CHAQUE issue d'extraction, succès COMPRIS
+     * (`noteExtractorOutcome` → `ok=true` sur chaque réussite, `noteProviderResult` sur chaque
+     * provider). Mesuré sur une seule lecture de Spider-Man ce soir : 22 sources interrogées,
+     * 48 serveurs affichés, plus les tentatives d'extraction — soit plusieurs dizaines
+     * d'événements, donc autant d'écritures D1, POUR UNE SEULE LECTURE, et par utilisateur.
+     * Le lot de 10 / 90 s regroupait les requêtes HTTP mais PAS les écritures en base.
+     *
+     * Décision user : « couper les requêtes envoyées par l'application pour la casse et
+     * remettre la même chose directement sur GitHub ».
+     *
+     * Le signalement repart donc par [BrokenSourceReporter.maybeReport] → issue GitHub, avec sa
+     * dédup stricte par (source, domaine) : UNE issue par couple, jamais de spam. On passe de
+     * « des dizaines d'écritures par lecture » à « une issue par panne réelle ».
+     *
+     * Pour réactiver un jour : repasser cette constante à `true` — mais il faudra d'abord
+     * n'envoyer QUE les échecs (jamais `ok=true`) et échantillonner, sinon la base ressaturera.
+     */
+    private const val TELEMETRIE_D1_ACTIVE = false
+
     private const val ENDPOINT = "https://streamflix-api.logami61250.workers.dev/health/event"
     private const val PREFS = "health_reporter"
     private const val KEY_DEVICE = "anon_device_id"
@@ -51,6 +74,8 @@ object HealthReporter {
      * @param ok     true = succès, false = échec
      */
     fun record(source: String, kind: String, ok: Boolean, errorType: String? = null, host: String? = null) {
+        // 2026-08-17 : coupé net — plus AUCUNE requête vers la base D1. cf. TELEMETRIE_D1_ACTIVE.
+        if (!TELEMETRIE_D1_ACTIVE) return
         if (!UserPreferences.reportBrokenSources) return
         if (source.isBlank()) return
         val ev = JSONObject().apply {

@@ -301,6 +301,17 @@ class MainMobileActivity : FragmentActivity() {
         //     des choses »).
         binding.bnvMain.setOnItemReselectedListener { menuItem ->
             when (menuItem.itemId) {
+                // 2026-08-18 (user : « enlève le bouton avec les 4 petits carrés et fais
+                //   en sorte que quand on appuie sur TV une 2e fois ça affiche ce
+                //   menu ») : même geste que Films/Séries, mais pour le gestionnaire de
+                //   groupes IPTV. Le fragment ignore l'appel hors « Mon IPTV ».
+                R.id.home -> {
+                    val hote = supportFragmentManager
+                        .findFragmentById(R.id.nav_main_fragment) as? NavHostFragment
+                    (hote?.childFragmentManager?.primaryNavigationFragment
+                        as? com.streamflixreborn.streamflix.fragments.home.HomeMobileFragment)
+                        ?.ouvrirGestionnaireGroupes()
+                }
                 R.id.movies, R.id.tv_shows -> {
                     val nom = UserPreferences.currentProvider?.name
                     val dispo =

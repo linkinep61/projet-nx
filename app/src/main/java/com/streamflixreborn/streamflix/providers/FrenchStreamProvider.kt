@@ -48,7 +48,11 @@ import kotlinx.coroutines.coroutineScope
 object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
     override val name = "FrenchStream"
 
-    override val defaultPortalUrl: String = "http://fstream.info/"
+    // 2026-08-16 : fstream.info est MORT (ne résout plus). Nouveau portail de
+    // redirection = fstream.website. ⚠ il a aussi changé de STRUCTURE : plus de
+    // `div.container > div.url-card`, le miroir du moment vit dans une variable
+    // JS `FS_MIRROR` (bouton `goMirror()`), cf [extractMirrorUrl].
+    override val defaultPortalUrl: String = "https://fstream.website/"
 
     override val portalUrl: String = defaultPortalUrl
         get() {
@@ -56,7 +60,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             return cachePortalURL.ifEmpty { field }
         }
 
-    override val defaultBaseUrl: String = "https://fs15.lol/"
+    // 2026-08-16 : miroir annoncé par le portail au moment du correctif (fs15 → fs16).
+    // Ce n'est qu'un DÉFAUT de repli : en marche normale [onChangeUrl] écrase cette
+    // valeur avec ce que le portail annonce.
+    override val defaultBaseUrl: String = "https://fs16.lol/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -86,7 +93,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     private object Endpoints {
         const val FILM_AJAX_JSON = "engine/ajax/film_api.php"
         const val SERIE_AJAX_JSON = "engine/ajax/sx.php"
-        const val DEFAULT_REFERER = "https://fs15.lol/"
+        const val DEFAULT_REFERER = "https://fs16.lol/"
         const val DLE_SKIN_COOKIE = "dle_skin=VFV1"
     }
 
@@ -1676,16 +1683,57 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
     // ── URL management ───────────────────────────────────────────────────
 
+    /**
+     * 2026-08-16 — Extraction du miroir courant depuis la page du portail.
+     *
+     * Le portail a déménagé (fstream.info MORT → fstream.website) ET changé de
+     * gabarit. Sur l'ancien, l'adresse était un `<a href>` dans
+     * `div.container > div.url-card` ; sur le nouveau, la carte est un
+     * `<a id="adr" href="#" onclick="return goMirror()">` et l'URL réelle vit
+     * dans une variable JS `FS_MIRROR` — donc INVISIBLE pour un sélecteur CSS.
+     * Jsoup ne lit pas le DOM après JS : on grep le HTML brut.
+     *
+     * Trois chemins essayés dans l'ordre, du plus fiable au plus dégradé. Les
+     * anciens sont GARDÉS : si le portail bascule encore de gabarit, on a
+     * plusieurs chances au lieu d'échouer en silence (un `null` ici retombe sur
+     * [defaultBaseUrl] périmé, et le provider a l'air « cassé sans erreur »).
+     */
+    internal fun extractMirrorUrl(document: Document): String? {
+        // 1) Portail actuel : `const FS_MIRROR = "https://fsNN.lol";`
+        Regex("""FS_MIRROR\s*=\s*["']([^"']+)["']""")
+            .find(document.html())
+            ?.groupValues?.getOrNull(1)
+            ?.trim()
+            ?.takeIf { it.startsWith("http") }
+            ?.let { return it }
+
+        // 2) Ancien portail fstream.info : carte d'URL cliquable.
+        document.select("div.container > div.url-card")
+            .selectFirst("a")
+            ?.attr("href")
+            ?.trim()
+            ?.takeIf { it.startsWith("http") }
+            ?.let { return it }
+
+        // 3) Dernier repli : le LIBELLÉ affiché sur la carte (ex. « FS16.LOL »),
+        //    qui reste du texte même si le lien est en JS.
+        document.selectFirst("a#adr, .adr")
+            ?.text()
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { it.contains('.') && !it.contains(' ') && !it.contains('/') }
+            ?.let { return "https://$it" }
+
+        return null
+    }
+
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
             if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
                 val addressService = Service.buildAddressFetcher()
                 try {
                     val document = addressService.getHome()
-                    val newUrl = document.select("div.container > div.url-card")
-                        .selectFirst("a")
-                        ?.attr("href")
-                        ?.trim()
+                    val newUrl = extractMirrorUrl(document)
                     if (!newUrl.isNullOrEmpty()) {
                         val finalUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
                         UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, finalUrl)
@@ -1852,7 +1900,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         suspend fun getFilmAjaxJson(
             @Query("id") newsId: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs15.lol/"
+            @Header("Referer") referer: String = "https://fs16.lol/"
         ): okhttp3.ResponseBody
 
         // 2026-05-04 : nouveau endpoint AJAX qui retourne les épisodes d'une
@@ -1866,7 +1914,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         suspend fun getSerieAjaxJson(
             @Query("p") newsId: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs15.lol/"
+            @Header("Referer") referer: String = "https://fs16.lol/"
         ): okhttp3.ResponseBody
 
         // Legacy detail pages (slug-based, kept for backwards compatibility)
@@ -1911,13 +1959,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         suspend fun getAjaxJsonByUrl(
             @Url url: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs15.lol/"
+            @Header("Referer") referer: String = "https://fs16.lol/"
         ): okhttp3.ResponseBody
 
         @GET
         suspend fun getRawText(
             @Url url: String,
-            @Header("Referer") referer: String = "https://fs15.lol/"
+            @Header("Referer") referer: String = "https://fs16.lol/"
         ): okhttp3.ResponseBody
     }
 }

@@ -45,8 +45,10 @@ object GenreYearPicker {
             return
         }
 
-        val genres = GenreFilter.genresForProvider()
-        val genreCourant = GenreFilter.get(providerName)
+        // 2026-08-18 : la liste ET le choix mémorisé dépendent de l'onglet — les genres
+        //   TMDB des séries ont leurs propres identifiants (cf. GenreFilter.genresSeries).
+        val genres = GenreFilter.genresForProvider(providerName, type)
+        val genreCourant = GenreFilter.get(providerName, type)
         val decalage = if (anneeDispo) 1 else 0
 
         val lignes = mutableListOf<OnyxChoixDialog.Option>()
@@ -80,7 +82,7 @@ object GenreYearPicker {
             val rang = index - decalage
             val nouveau = if (rang == 0) null else genres[rang - 1]
             if (nouveau?.id != genreCourant?.id) {
-                GenreFilter.set(providerName, nouveau)
+                GenreFilter.set(providerName, nouveau, type)
                 onGenre(nouveau?.id)
                 Toast.makeText(
                     context.applicationContext,
