@@ -282,6 +282,47 @@ object LiveHubFolderDialog {
         //   ligne `livehub::folder::wlsub_<folderPath>`. Lit folderContents
         //   du provider et affiche via displayCategories (= même style que
         //   le parent Cinéma).
+        // 2026-08-17 (user « ça va s'étaler sur des kilomètres si on met beaucoup
+        //   de choses ») : sous-dossier de la bibliothèque perso. Même principe
+        //   que wlsub_ juste en dessous — un dossier enfant garde le préfixe
+        //   voedir_ et rouvre CE dialogue un cran plus bas, les fichiers
+        //   terminaux prennent l'id livehub::voe::<code>.
+        // 2026-08-17 (user « il devrait y avoir un dossier Films et un dossier
+        //   Série pour départager les deux avant de les afficher ») :
+        //   « Film / série » s'ouvre désormais sur ses dossiers de PREMIER
+        //   NIVEAU (Films, Série…) au lieu de déverser d'un coup toutes les
+        //   rangées à plat. Aucune mécanique nouvelle : on réutilise la branche
+        //   voedir_ juste en dessous, avec le chemin racine (chaîne vide).
+        //   Repli volontaire : tant que le cache n'est pas chargé, on laisse
+        //   passer vers l'ancien affichage à plat — mieux qu'un dossier vide.
+        if (folderKey == "ma_bibliotheque" &&
+            com.streamflixreborn.streamflix.utils.VoeLibrary.cacheActuel().isNotEmpty()) {
+            show(ctx, "voedir_", folderName, onChannelSelected)
+            return
+        }
+        if (folderKey.startsWith("voedir_")) {
+            val chemin = folderKey.removePrefix("voedir_")
+            val (sousDossiers, films) =
+                com.streamflixreborn.streamflix.utils.VoeLibrary.enfantsDe(chemin)
+            if (sousDossiers.isEmpty() && films.isEmpty()) {
+                android.widget.Toast.makeText(
+                    ctx, "Dossier vide : $folderName", android.widget.Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            val items =
+                sousDossiers.map { (c, n) ->
+                    com.streamflixreborn.streamflix.utils.VoeLibrary.tuileDossier(c, n)
+                } + films.map {
+                    com.streamflixreborn.streamflix.utils.VoeLibrary.tuileFilm(it)
+                }
+            displayCategories(
+                ctx, folderName,
+                listOf(Category(name = folderName, list = items)),
+                onChannelSelected,
+            )
+            return
+        }
         if (folderKey.startsWith("wlsub_")) {
             val folderPath = folderKey.removePrefix("wlsub_")
             val wlChannels = WorldLiveTvProvider.folderContents[folderPath] ?: emptyList()
@@ -2120,6 +2161,22 @@ object LiveHubFolderDialog {
                         android.view.WindowManager.LayoutParams.MATCH_PARENT,
                         finalH,
                     )
+                    // ── 2026-08-18 (user : « le dialogue se ferme au lieu d'afficher
+                    //   la barre du mini-lecteur ») ────────────────────────────────
+                    //   Le dialogue occupe le BAS de l'écran ; au-dessus, il y a le
+                    //   mini-lecteur, bien visible. Mais pour Android, appuyer là-haut
+                    //   c'est « toucher en dehors » : ça REFERMAIT le dialogue, et
+                    //   l'appui n'atteignait jamais la vidéo.
+                    //   FLAG_NOT_TOUCH_MODAL laisse passer les appuis situés HORS du
+                    //   dialogue vers l'écran derrière — donc vers le mini-lecteur.
+                    //   Le dialogue se ferme alors par RETOUR ou par son bouton, pas
+                    //   par un appui sur la vidéo. MOBILE uniquement.
+                    if (!isTV) {
+                        w.addFlags(
+                            android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        )
+                        dlg.setCanceledOnTouchOutside(false)
+                    }
                     android.util.Log.d("LiveHubDialog", "adjustDialog v8: miniH=$miniH (measured=$measuredH, isTV=$isTV), displayH=$displayH, finalH=$finalH, density=$density")
                     // 2026-06-22 (user "le haut s'assombrit quand la liste arrive,
                     //   on voit moins bien le mini lecteur") : supprimer le dim

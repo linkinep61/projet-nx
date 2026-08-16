@@ -1705,8 +1705,30 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             //   deux autres tests le laissent passer. Même piège que côté Movix.
             if (videoType is Video.Type.Episode && titresConnus.isNotEmpty()) {
                 val nomSlug = titreDepuisSlug(a.attr("href"))
+                // 2026-08-16 (user : « les 3 serveurs de Wiflix n'apparaissaient pas ») —
+                //   SUFFIXE D'ÉQUIPE en fin de slug. Wiflix (servi par flemmix) tague ses
+                //   fiches : « …-game-of-thrones-saison-8-stm.html », et aussi wflx, wf, stmg,
+                //   sa1m. `titreDepuisSlug` retire l'année, le n° de saison et le vocabulaire
+                //   neutre, mais pas ces tags → le slug donnait « game of thrones stm », jamais
+                //   égal à « game of thrones » → LES 8 CANDIDATS ÉTAIENT REJETÉS, saison 8
+                //   comprise, et la source rendait « 0 résultat natif ».
+                //   On retente donc SANS le dernier jeton, mais UNIQUEMENT s'il est court et
+                //   n'appartient à aucun titre connu — un titre finissant légitimement par un
+                //   mot court (« GOT ») garde son jeton et n'est pas altéré.
+                val motsTitresConnus = titresConnus
+                    .flatMap { normPourEgalite(it).split(" ") }
+                    .filter { it.isNotBlank() }
+                    .toSet()
+                val nomSlugSansTag = nomSlug.split(" ")
+                    .let { mots ->
+                        val dernier = mots.lastOrNull()
+                        if (mots.size >= 2 && dernier != null &&
+                            dernier.length <= 5 && dernier !in motsTitresConnus
+                        ) mots.dropLast(1).joinToString(" ") else nomSlug
+                    }
                 if (nomSlug.isNotBlank() &&
-                    titresConnus.none { normPourEgalite(it) == nomSlug }
+                    titresConnus.none { normPourEgalite(it) == nomSlug } &&
+                    titresConnus.none { normPourEgalite(it) == nomSlugSansTag }
                 ) {
                     Log.w(
                         "Wiflix",

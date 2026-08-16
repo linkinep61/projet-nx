@@ -132,6 +132,30 @@ class VidaraExtractor : Extractor() {
             .takeIf { it.isNotBlank() && it.startsWith("http") }
             ?: throw Exception("Vidara: source unavailable — streaming_url absent (filecode=$filecode)")
 
+        // 2026-08-16 — Fichier JAMAIS ENCODÉ (page d'embed = « Waiting in queue »).
+        //   PIÈGE : /api/stream répond 200 en ~150 ms avec EXACTEMENT la même
+        //   structure qu'un fichier sain — pas de champ `error`, rien qui signale
+        //   quoi que ce soit. Le seul écart est la FORME de streaming_url :
+        //     • encodé   → https://<cdn>/hls/<id>/master.m3u8    (20 cas sur 21 relevés)
+        //     • en file  → https://streamix.so/uploads/<id>.mp4  (le téléversement brut)
+        //   Logique : sans encodage il n'existe aucune rendition HLS, donc l'API
+        //   retombe sur le fichier source, qui lui n'est pas diffusé. Comme on
+        //   déclarait la sortie en APPLICATION_M3U8 quoi qu'il arrive, ExoPlayer
+        //   partait bufferiser un HLS inexistant et n'abandonnait qu'au plafond.
+        //   ⚠ On teste le CHEMIN, PAS l'hôte : les CDN sains tournent (8 domaines
+        //   différents sur 20 fichiers) — une règle par domaine casserait seule.
+        //   « source unavailable » est volontaire : classifyError() le range en
+        //   « dead-content » → « santé extracteur NON pénalisée » (Extractor.kt).
+        //   ⚠ Précision (user, 2026-08-16) : il n'y a PLUS de blacklist d'URL ni de
+        //   retrait de serveur — un serveur rouge l'est seulement pour le titre en
+        //   cours et repasse blanc au suivant. Ce qui reste en jeu ici, c'est
+        //   uniquement le compteur de santé de l'EXTRACTEUR, pas la liste affichée.
+        if (Regex("""/uploads/[^/]+\.mp4($|\?)""").containsMatchIn(streamUrl)) {
+            throw Exception(
+                "Vidara: source unavailable — fichier non encodé (en file d'attente), filecode=$filecode"
+            )
+        }
+
         Log.d("VidaraExtractor", "resolved $filecode → m3u8 (${streamUrl.length} chars)")
 
         Video(

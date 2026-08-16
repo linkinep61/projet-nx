@@ -38,7 +38,11 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
                 // GenreFilter stocke par provider → changement de provider = null
                 // (nouveau provider n'a pas de genre sauvé). Changement de genre
                 // depuis la sidebar TV = le bon ID est lu.
-                genreId = GenreFilter.currentGenreId()
+                // 2026-08-18 : genre lu dans le tiroir SÉRIES (identifiants TMDB TV,
+                //   différents de ceux des films — cf. GenreFilter.genresSeries).
+                genreId = GenreFilter.currentGenreId(
+                    com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES
+                )
                 getTvShows()
             }
         }

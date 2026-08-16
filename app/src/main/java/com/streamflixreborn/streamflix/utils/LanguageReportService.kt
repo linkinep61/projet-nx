@@ -167,6 +167,7 @@ object LanguageReportService {
                 if (response.isSuccessful && respBody != null) {
                     // Sauvegarder le vote localement
                     saveLocalLangVote(contentKey, deviceId, lang.name)
+                    invaliderCache(contentKey)   // 2026-08-18 : le vote doit être visible tout de suite
                     val json = JSONObject(respBody)
                     val (vf, vostfr, vo) = parseVoteCounts(json)
                     Log.d(TAG, "lang vote ${lang.name} for $contentKey → VF=$vf VOSTFR=$vostfr VO=$vo")
@@ -201,6 +202,7 @@ object LanguageReportService {
                 if (response.isSuccessful && respBody != null) {
                     // Retirer le vote local
                     removeLocalLangVote(contentKey, deviceId)
+                    invaliderCache(contentKey)
                     val json = JSONObject(respBody)
                     val (vf, vostfr, vo) = parseVoteCounts(json)
                     Log.d(TAG, "lang vote removed for $contentKey → VF=$vf VOSTFR=$vostfr VO=$vo")
@@ -215,7 +217,24 @@ object LanguageReportService {
 
     // ── Lire l'agrégat + le vote de CE device ───────────────────────────
 
+    /**
+     * 2026-08-18 — même cache que [RatingService.getRating], et pour la même raison :
+     * mesuré sur Cloudflare, cette lecture partait 30 589 fois en 24 h, à chaque
+     * affichage de fiche, alors que le résultat ne bouge pratiquement jamais. Le vote
+     * de l'utilisateur invalide l'entrée, donc son choix reste visible immédiatement.
+     */
+    private const val CACHE_TTL_MS = 6 * 60 * 60 * 1000L
+    private val cacheLangues = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, LanguageInfo?>>()
+
+    private fun invaliderCache(contentKey: String) {
+        cacheLangues.keys.filter { it.startsWith("$contentKey|") }.forEach { cacheLangues.remove(it) }
+    }
+
     suspend fun getLanguage(contentKey: String, deviceId: String): LanguageInfo? {
+        val cleCache = "$contentKey|$deviceId"
+        cacheLangues[cleCache]?.let { (pose, valeur) ->
+            if (System.currentTimeMillis() - pose < CACHE_TTL_MS) return valeur
+        }
         return withContext(Dispatchers.IO) {
             try {
                 val body = JSONObject().apply {
@@ -246,7 +265,7 @@ object LanguageReportService {
                     userVote = userVote,
                     label = res.label,
                     locked = res.locked,
-                )
+                ).also { cacheLangues[cleCache] = System.currentTimeMillis() to it }
             } catch (e: Exception) {
                 Log.e(TAG, "getLanguage failed for $contentKey", e)
                 null

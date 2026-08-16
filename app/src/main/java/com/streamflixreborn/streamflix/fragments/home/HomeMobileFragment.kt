@@ -341,10 +341,19 @@ class HomeMobileFragment : Fragment() {
             navigateToFullPlayer()
         }
 
-        // Tap on video area — also go fullscreen
-        binding.miniPlayerView.setOnClickListener {
-            navigateToFullPlayer()
-        }
+        // 2026-08-18 (user : « un clic ça affiche les boutons… le second clic
+        //   affiche le plein écran à la place ») : 1er appui = le bandeau apparaît,
+        //   2e appui = plein écran. Plus d'agrandissement au premier contact.
+        com.streamflixreborn.streamflix.utils.MiniPlayerBarre.installer(
+            zoneVideo = binding.miniPlayerView,
+            barre = binding.miniPlayerOverlay,
+            boutonPrecedent = binding.miniPlayerPrev,
+            boutonSuivant = binding.miniPlayerNext,
+            progression = binding.miniPlayerSeek,
+            surPleinEcran = { navigateToFullPlayer() },
+            proprietaire = viewLifecycleOwner,
+            retour = requireActivity().onBackPressedDispatcher,
+        )
 
         // Set the IPTV click interceptor
         MiniPlayerController.onIptvChannelClick = { tvShow ->
@@ -579,7 +588,20 @@ class HomeMobileFragment : Fragment() {
             updatePauseButton()
         }
         binding.miniPlayerFullscreen.setOnClickListener { navigateToFullPlayer() }
-        binding.miniPlayerView.setOnClickListener { navigateToFullPlayer() }
+        // ⚠ 2026-08-18 — CE re-câblage ÉCRASAIT le bandeau (user : « ton menu n'est
+        //   jamais affiché »). Il est rejoué quand une chaîne démarre le mini-lecteur
+        //   depuis un écran non-IPTV, et il remettait l'ancien « clic = plein écran ».
+        //   Il doit installer le MÊME comportement que setupMiniPlayer.
+        com.streamflixreborn.streamflix.utils.MiniPlayerBarre.installer(
+            zoneVideo = binding.miniPlayerView,
+            barre = binding.miniPlayerOverlay,
+            boutonPrecedent = binding.miniPlayerPrev,
+            boutonSuivant = binding.miniPlayerNext,
+            progression = binding.miniPlayerSeek,
+            surPleinEcran = { navigateToFullPlayer() },
+            proprietaire = viewLifecycleOwner,
+            retour = requireActivity().onBackPressedDispatcher,
+        )
         // Set interceptor if not set
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
@@ -650,6 +672,12 @@ class HomeMobileFragment : Fragment() {
     }
 
     private fun navigateToFullPlayer() {
+        // 2026-08-18 (user : « le plein écran ferme obligatoirement le menu avec
+        //   les jaquettes ») : depuis FLAG_NOT_TOUCH_MODAL, le dialogue ne se
+        //   ferme plus quand on appuie sur la vidéo — il resterait donc affiché
+        //   par-dessus le grand lecteur. Règle d'origine rétablie ici : seul le
+        //   passage en plein écran ferme TOUTE la pile de dialogues.
+        com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.dismissAllPublic()
         val channelId = MiniPlayerController.currentChannelId ?: return
         val channelName = MiniPlayerController.currentChannelName ?: channelId
         val channelPoster = MiniPlayerController.currentChannelPoster
@@ -754,11 +782,15 @@ class HomeMobileFragment : Fragment() {
             binding.ivProviderLogo.isClickable = true
             binding.ivProviderLogo.isFocusable = true
 
-            // Bouton picker de catégorie visible uniquement sur Mon IPTV.
-            binding.ivIptvCategories.visibility = View.VISIBLE
-            binding.ivIptvCategories.setOnClickListener {
-                showIptvCategoryPicker()
-            }
+            // ── 2026-08-18 (user : « enlève le bouton avec les 4 petits carrés en haut
+            //   à gauche, et fais en sorte que quand on appuie sur TV une 2e fois ça
+            //   affiche ce menu ») ────────────────────────────────────────────────────
+            //   Le bouton disparaît de la barre : le gestionnaire de groupes s'ouvre
+            //   maintenant par un RE-CLIC sur l'onglet « TV » du bas (cf.
+            //   MainMobileActivity.setOnItemReselectedListener → R.id.home), comme le
+            //   re-clic sur « Films »/« Séries » ouvre déjà les filtres.
+            binding.ivIptvCategories.visibility = View.GONE
+            binding.ivIptvCategories.setOnClickListener(null)
         } else {
             binding.ivIptvCategories.visibility = View.GONE
         }
@@ -868,6 +900,20 @@ class HomeMobileFragment : Fragment() {
      *   groupe conserve l'ancien comportement (poser le filtre et recharger l'accueil), donc rien
      *   n'est perdu : on y a seulement ajouté le réglage.
      */
+    /**
+     * 2026-08-18 : point d'entrée public du gestionnaire de groupes, appelé par le
+     * RE-CLIC sur l'onglet « TV » (MainMobileActivity). Ne fait rien hors Mon IPTV —
+     * sur les autres providers, ce menu n'a pas de sens.
+     */
+    fun ouvrirGestionnaireGroupes(): Boolean {
+        if (!isAdded || _binding == null) return false
+        val estMonIptv = UserPreferences.currentProvider is
+            com.streamflixreborn.streamflix.providers.MyIptvProvider
+        if (!estMonIptv) return false
+        showIptvCategoryPicker()
+        return true
+    }
+
     private fun showIptvCategoryPicker() {
         val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
         fun rafraichir() {

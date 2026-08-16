@@ -541,6 +541,23 @@ class HomeTvFragment : Fragment() {
         var origMarginTop = 0
         var isDragging = false
 
+        // 2026-08-18 (user : « je voudrais aussi intégrer la barre de progression
+        //   à celle-ci — je parle bien du mini-lecteur télé ») : l'avancement vit
+        //   DANS le bandeau ⛶ ⏸ ✕, donc décalé à gauche comme lui. Masqué sur un
+        //   direct. Aucun changement de focus D-pad, aucun impact mobile.
+        // 2026-08-18 (user : « il nous manque peut-être les deux flèches suivant et
+        //   précédent dans la même barre ») : mêmes actions que le mini-lecteur mobile.
+        binding.miniPlayerPrev.setOnClickListener { MiniPlayerController.precedent() }
+        binding.miniPlayerNext.setOnClickListener { MiniPlayerController.suivant() }
+
+        com.streamflixreborn.streamflix.utils.MiniPlayerProgressionTv.installer(
+            ligne = binding.miniPlayerProgressRow,
+            progression = binding.miniPlayerProgress,
+            tempsCourant = binding.miniPlayerTimeCurrent,
+            tempsTotal = binding.miniPlayerTimeTotal,
+            proprietaire = viewLifecycleOwner,
+        )
+
         // Drag via the overlay bar (bottom bar with channel name)
         binding.miniPlayerOverlay.setOnTouchListener { _, event ->
             val lp = container.layoutParams as ConstraintLayout.LayoutParams

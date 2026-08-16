@@ -55,6 +55,23 @@ open class MoiflixExtractor : Extractor() {
     override val aliasUrls = listOf(
         "https://moiflix.dad", "https://moiflix.click", "https://moiflix.com", "https://moiflix.org",
         "https://lecteur1.xtremestream.xyz", "https://lecteur1.xtremestream.com",
+        // 2026-08-16 : MOVIX sert « Lecteur3 - Vidéo HD et 1080p (VF) » sur lecteur3.…
+        //   Même mur que le 17/07 avec lecteur1 : « HOTE NON COUVERT: lecteur3.xtremestream.xyz
+        //   (aucun extracteur) » → serveur ROUGE alors que le lien est vivant.
+        "https://lecteur2.xtremestream.xyz", "https://lecteur2.xtremestream.com",
+        "https://lecteur3.xtremestream.xyz", "https://lecteur3.xtremestream.com",
+    )
+
+    /**
+     * 2026-08-16 — Les alias ci-dessus énumèrent les sous-domaines UN PAR UN, or le matching est
+     * un `startsWith` : chaque nouveau « lecteurN » repassait donc en serveur rouge jusqu'à ce
+     * qu'on l'ajoute à la main (lecteur1 le 17/07, lecteur3 aujourd'hui). Ce motif couvre toute
+     * la famille d'un coup — lecteur4, lecteur5… seront pris automatiquement.
+     * Sûr : la 2ᵉ passe `rotatingDomain` n'intervient qu'APRÈS l'échec du matching mainUrl/alias
+     * de tous les autres extracteurs, et le motif est ancré sur le domaine xtremestream.
+     */
+    override val rotatingDomain: List<Regex> = listOf(
+        Regex("""^lecteur\d+\.xtremestream\.(xyz|com)/"""),
     )
 
     private val context = StreamFlixApp.instance.applicationContext

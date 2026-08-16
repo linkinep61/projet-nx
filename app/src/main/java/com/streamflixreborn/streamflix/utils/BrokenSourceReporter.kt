@@ -40,14 +40,39 @@ object BrokenSourceReporter {
             if (error == null) return
             val errorType = Extractor.classifyError(error)
             if (errorType !in URL_CHANGED_TYPES) return
-            val host = hostOf(url)
-            // 2026-07-29 : plus de création d'issue LOCALE (source de faux positifs régionaux). On
-            //   envoie l'échec à la base D1 ; le Worker agrège tous les utilisateurs et ne signale
-            //   que si le domaine est confirmé mort sur plusieurs pays ET appareils.
-            HealthReporter.record(sourceName, kind = "source", ok = false, errorType = errorType, host = host)
+            val host = hostOf(url) ?: return
+            // 2026-08-17 : RETOUR à l'issue GitHub. La télémétrie D1 (07/29) a saturé la base
+            //   Cloudflare — elle écrivait à chaque extraction, succès compris. Ici on ne signale
+            //   qu'une erreur ACTIONNABLE (URL_CHANGED_TYPES), et UNE SEULE FOIS par
+            //   (source, domaine) grâce à la double dédup : locale (SharedPreferences) puis
+            //   globale (recherche d'issue existante sur le repo). Volume : une issue par panne
+            //   réelle, contre des dizaines d'écritures par lecture auparavant.
+            if (dejaSignale(sourceName, host)) return
+            Thread {
+                try {
+                    if (postIssue(sourceName, host, errorType, url, providerName)) {
+                        marquerSignale(sourceName, host)
+                    }
+                } catch (e: Exception) { Log.w(TAG, "postIssue KO: ${e.message}") }
+            }.apply { isDaemon = true }.start()
         } catch (e: Exception) {
             Log.w(TAG, "maybeReport exception: ${e.message}")
         }
+    }
+
+    /** Dédup LOCALE : ce couple (source, domaine) a-t-il déjà donné lieu à une issue ? */
+    private fun dejaSignale(source: String, host: String): Boolean = try {
+        val prefs = StreamFlixApp.instance.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        prefs.getStringSet(KEY_REPORTED, emptySet()).orEmpty().contains("$source|$host")
+    } catch (_: Throwable) { false }
+
+    private fun marquerSignale(source: String, host: String) {
+        try {
+            val prefs = StreamFlixApp.instance.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            val set = HashSet(prefs.getStringSet(KEY_REPORTED, emptySet()).orEmpty())
+            set.add("$source|$host")
+            prefs.edit().putStringSet(KEY_REPORTED, set).apply()
+        } catch (_: Throwable) { }
     }
 
     /** Domaine du provider LUI-MÊME mort/déménagé (dns/connect/ssl sur sa base URL). Distinct des
@@ -60,9 +85,16 @@ object BrokenSourceReporter {
             if (error == null) return
             val errorType = Extractor.classifyError(error)
             if (errorType !in PROVIDER_DEAD_TYPES) return
-            val host = hostOf(url)
-            // 2026-07-29 : télémétrie D1 au lieu d'une issue locale (cf. maybeReport).
-            HealthReporter.record(providerName, kind = "provider", ok = false, errorType = errorType, host = host)
+            val host = hostOf(url) ?: return
+            // 2026-08-17 : retour à l'issue GitHub, même dédup que maybeReport (cf. son commentaire).
+            if (dejaSignale(providerName, host)) return
+            Thread {
+                try {
+                    if (postIssue(providerName, host, errorType, url, providerName)) {
+                        marquerSignale(providerName, host)
+                    }
+                } catch (e: Exception) { Log.w(TAG, "postIssue provider KO: ${e.message}") }
+            }.apply { isDaemon = true }.start()
         } catch (e: Exception) { Log.w(TAG, "maybeReportProvider: ${e.message}") }
     }
 

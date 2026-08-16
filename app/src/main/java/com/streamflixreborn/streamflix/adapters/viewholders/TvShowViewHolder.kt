@@ -571,6 +571,24 @@ class TvShowViewHolder(
      *  - Programmes Replay VOD (Arte, France TV, etc.) → fiche tv_show pour
      *    afficher saisons/épisodes. */
     private fun navigateFromFolderSelection(root: android.view.View, selected: TvShow) {
+        // ⚠ 2026-08-17 — SOUS-DOSSIER DE LA BIBLIOTHEQUE PERSO (VOE).
+        //   Exactement la meme mecanique que le bloc World Live (wlsub_) plus
+        //   bas : une tuile de dossier ROUVRE le dialogue un cran plus bas au
+        //   lieu de partir au lecteur.
+        //   C'EST CETTE BRANCHE QUI MANQUAIT la premiere fois qu'on a tente
+        //   l'arborescence : les tuiles « voedir_ » etaient bien emises par
+        //   VoeLibrary, mais en cliquant dessus elles arrivaient ici, ne
+        //   correspondaient a rien, et finissaient envoyees au lecteur — d'ou
+        //   le « dossier illisible » constate, et l'abandon de l'arborescence
+        //   au profit d'un affichage a plat. Ne pas la retirer.
+        if (selected.id.startsWith("livehub::folder::voedir_")) {
+            com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
+                root.context,
+                selected.id.removePrefix("livehub::folder::"),
+                selected.title.removePrefix("📁 ").substringBeforeLast(" ("),
+            ) { sub -> navigateFromFolderSelection(root, sub) }
+            return
+        }
         val isReplayVod = selected.id.startsWith("livehub::replay::") &&
             !selected.id.startsWith("livehub::replay::tf1live::") &&
             !selected.id.startsWith("livehub::replay::m6live::") &&

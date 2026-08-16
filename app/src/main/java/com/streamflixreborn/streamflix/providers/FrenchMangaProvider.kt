@@ -43,7 +43,9 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pro
     override val name = "FrenchManga"
 
     override val defaultBaseUrl: String = "https://w16.french-manga.net/"
-    override val defaultPortalUrl: String = "http://fstream.info/"
+    // 2026-08-16 : même portail que FrenchStream — fstream.info est MORT,
+    // remplacé par fstream.website (nouveau gabarit, cf FrenchStreamProvider).
+    override val defaultPortalUrl: String = "https://fstream.website/"
 
     override val portalUrl: String = defaultPortalUrl
         get() {
@@ -691,10 +693,9 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pro
                 try {
                     val document = addressService.getHome()
 
-                    val fsUrl = document.select("div.container > div.url-card")
-                        .selectFirst("a")
-                        ?.attr("href")
-                        ?.trim()
+                    // 2026-08-16 : extraction déléguée à FrenchStreamProvider
+                    // (même portail, gabarit changé → le lien est en JS).
+                    val fsUrl = FrenchStreamProvider.extractMirrorUrl(document)
                     if (!fsUrl.isNullOrEmpty()) {
                         val fsdoc = addressService.loadPage(fsUrl)
                         var newUrl = fsdoc

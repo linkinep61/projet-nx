@@ -149,9 +149,52 @@ object GenreFilter {
         GenreEntry("Yuri", "Yuri"),
     )
 
-    /** Retourne la liste de genres adaptée au provider actif. */
-    fun genresForProvider(providerName: String? = UserPreferences.currentProvider?.name): List<GenreEntry> =
-        if (providerName == "AnimeSama") animeSamaGenres else genres
+    /**
+     * ── 2026-08-18 — GENRES DES SÉRIES : TMDB N'UTILISE PAS LES MÊMES IDENTIFIANTS ──────
+     *
+     * Remonté par un utilisateur : « est-ce que tu envisages de corriger les genres dans la
+     * section séries dans les providers Films/Séries qui proposent les genres (par exemple
+     * Movix) ». Le commentaire d'origine de ce fichier affirmait que les IDs étaient
+     * « identiques films/séries » — c'est FAUX, et c'est la cause du bug.
+     *
+     * Mesuré le 2026-08-18 sur `discover/tv` avec la clé du projet :
+     *   genre 28 (Action)        → 0 série        genre 10759 (Action & Aventure) → 10 105
+     *   genre 878 (Sci-Fi)       → 0 série        genre 10765 (SF & Fantastique)  →  9 300
+     *   genre 53 (Thriller)      → 0 série        genre 10768 (Guerre & Politique)→  2 955
+     *   genre 12, 14, 27, 10752  → 0 série        genre 18 (Drame)                → 52 074
+     *
+     * Autrement dit, 9 des 17 genres proposés renvoyaient une liste vide dans l'onglet
+     * Séries. On expose donc une liste DÉDIÉE aux séries, avec les vrais identifiants TV.
+     */
+    val genresSeries = listOf(
+        GenreEntry("10759", "Action & Aventure"),
+        GenreEntry("16", "Animation"),
+        GenreEntry("35", "Comédie"),
+        GenreEntry("80", "Crime"),
+        GenreEntry("99", "Documentaire"),
+        GenreEntry("18", "Drame"),
+        GenreEntry("10751", "Famille"),
+        GenreEntry("10762", "Enfants"),
+        GenreEntry("9648", "Mystère"),
+        GenreEntry("10765", "Science-Fiction & Fantastique"),
+        GenreEntry("10768", "Guerre & Politique"),
+        GenreEntry("10764", "Téléréalité"),
+        GenreEntry("10767", "Talk-show"),
+        GenreEntry("10766", "Feuilleton"),
+        GenreEntry("10763", "Info"),
+        GenreEntry("37", "Western"),
+    )
+
+    /** Retourne la liste de genres adaptée au provider actif ET à l'onglet (films ou séries). */
+    fun genresForProvider(
+        providerName: String? = UserPreferences.currentProvider?.name,
+        type: YearFilter.Type = YearFilter.Type.FILMS,
+    ): List<GenreEntry> = when {
+        // AnimeSama filtre par NOM de genre : la même liste vaut pour les deux onglets.
+        providerName == "AnimeSama" -> animeSamaGenres
+        type == YearFilter.Type.SERIES -> genresSeries
+        else -> genres
+    }
 
     /** Le filtre genre est dispo pour les providers TMDB-based + AnimeSama. */
     fun isSupported(providerName: String?): Boolean =
@@ -163,41 +206,56 @@ object GenreFilter {
 
     fun isSupported(): Boolean = isSupported(UserPreferences.currentProvider?.name)
 
-    private fun key(providerName: String) = "pref_genre_filter_$providerName"
+    /**
+     * 2026-08-18 : le genre est mémorisé SÉPARÉMENT pour les films et pour les séries —
+     * les identifiants ne sont plus les mêmes (28 côté film, 10759 côté série), donc une
+     * clé unique appliquerait un identifiant de série à l'onglet Films et vice-versa.
+     * La clé des FILMS ne change pas : le choix déjà enregistré par l'utilisateur survit.
+     */
+    private fun key(providerName: String, type: YearFilter.Type) =
+        if (type == YearFilter.Type.SERIES) "pref_genre_filter_series_$providerName"
+        else "pref_genre_filter_$providerName"
 
-    /** Genre sélectionné pour ce provider, ou null = pas de filtre (tout). */
-    fun get(providerName: String): GenreEntry? = try {
+    /** Genre sélectionné pour ce provider et cet onglet, ou null = pas de filtre (tout). */
+    fun get(
+        providerName: String,
+        type: YearFilter.Type = YearFilter.Type.FILMS,
+    ): GenreEntry? = try {
         val prefs = PreferenceManager.getDefaultSharedPreferences(StreamFlixApp.instance)
-        val savedId = prefs.getString(key(providerName), null)
-        if (savedId == null) null else genresForProvider(providerName).find { it.id == savedId }
-            ?: genres.find { it.id == savedId }
+        val savedId = prefs.getString(key(providerName, type), null)
+        if (savedId == null) null
+        else genresForProvider(providerName, type).find { it.id == savedId }
     } catch (_: Exception) {
         null
     }
 
     /** Sauvegarde le genre sélectionné. null = tout (efface la pref). */
-    fun set(providerName: String, genre: GenreEntry?) {
+    fun set(
+        providerName: String,
+        genre: GenreEntry?,
+        type: YearFilter.Type = YearFilter.Type.FILMS,
+    ) {
         try {
             val prefs = PreferenceManager.getDefaultSharedPreferences(StreamFlixApp.instance)
             if (genre == null) {
-                prefs.edit().remove(key(providerName)).apply()
+                prefs.edit().remove(key(providerName, type)).apply()
             } else {
-                prefs.edit().putString(key(providerName), genre.id).apply()
+                prefs.edit().putString(key(providerName, type), genre.id).apply()
             }
         } catch (_: Exception) {
         }
     }
 
-    /** Genre ID courant pour le provider actif, ou null. */
-    fun currentGenreId(): String? {
+    /** Genre ID courant pour le provider actif et l'onglet demandé, ou null. */
+    fun currentGenreId(type: YearFilter.Type = YearFilter.Type.FILMS): String? {
         val name = UserPreferences.currentProvider?.name ?: return null
-        return get(name)?.id
+        return get(name, type)?.id
     }
 
     /** Label du genre courant pour le provider actif, ou null. */
-    fun currentLabel(): String? {
+    fun currentLabel(type: YearFilter.Type = YearFilter.Type.FILMS): String? {
         val name = UserPreferences.currentProvider?.name ?: return null
-        return get(name)?.name
+        return get(name, type)?.name
     }
 
     // ── Filtre LANGUE AnimeSama (VF / VOSTFR / tous) ──

@@ -917,19 +917,20 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
 
         findPreference<ListPreference>("p_doh_provider_url")?.apply {
             value = UserPreferences.dohProviderUrl
-            summary = entry
+            summary = resumeDoh(this, UserPreferences.dohProviderUrl)
             setOnPreferenceChangeListener { preference, newValue ->
                 val newUrl = newValue as String
+                val liste = preference as? ListPreference
+                // 2026-08-17 : « ➕ Mon propre DNS… » n'est pas une adresse, c'est
+                //   une porte d'entrée. On ouvre la saisie et on refuse d'enregistrer
+                //   la sentinelle — sinon DnsResolver recevrait « custom://saisie ».
+                if (newUrl == getString(R.string.doh_custom_sentinel)) {
+                    demanderDnsPerso(liste)
+                    return@setOnPreferenceChangeListener false
+                }
                 UserPreferences.dohProviderUrl = newUrl
                 DnsResolver.setDnsUrl(newUrl)
-                if (preference is ListPreference) {
-                    val index = preference.findIndexOfValue(newUrl)
-                    if (index >= 0 && preference.entries != null && index < preference.entries.size) {
-                        preference.summary = preference.entries[index]
-                    } else {
-                        preference.summary = null
-                    }
-                }
+                liste?.summary = resumeDoh(liste, newUrl)
                 Toast.makeText(requireContext(), getString(R.string.doh_provider_updated), Toast.LENGTH_LONG).show()
                 true
             }
@@ -2214,4 +2215,72 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             .setNegativeButton("Fermer", null)
             .show()
     }
+
+    /**
+     * 2026-08-17 — DNS personnalisé (demande d'utilisateurs : « serait-il
+     * possible de pouvoir modifier soi-même les DNS de l'application »).
+     *
+     * La liste couvre 16 résolveurs, mais certains fournisseurs d'accès en
+     * bloquent une partie, et d'autres personnes ont déjà leur propre
+     * résolveur (auto-hébergé, NextDNS, ControlD avec identifiant…).
+     * Cette saisie accepte n'importe quelle adresse DoH ou DoT.
+     *
+     * La valeur saisie est enregistrée telle quelle dans la préférence, même
+     * si elle ne figure pas dans `entryValues` : c'est autorisé par
+     * ListPreference, et `resumeDoh` affiche alors l'adresse brute au lieu
+     * d'un libellé vide.
+     */
+    private fun demanderDnsPerso(liste: androidx.preference.ListPreference?) {
+        val ctx = requireContext()
+        val actuel = UserPreferences.dohProviderUrl
+        val champ = android.widget.EditText(ctx).apply {
+            setText(if (estDnsPerso(actuel)) actuel else "")
+            hint = "https://exemple.net/dns-query"
+            setSingleLine(true)
+            val m = (16 * resources.displayMetrics.density).toInt()
+            setPadding(m * 2, m, m * 2, m)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle(R.string.doh_custom_title)
+            .setMessage(R.string.doh_custom_message)
+            .setView(champ)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val saisie = champ.text.toString().trim()
+                if (!dnsValide(saisie)) {
+                    Toast.makeText(ctx, getString(R.string.doh_custom_invalid),
+                        Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                UserPreferences.dohProviderUrl = saisie
+                DnsResolver.setDnsUrl(saisie)
+                liste?.value = saisie
+                liste?.summary = resumeDoh(liste, saisie)
+                Toast.makeText(ctx, getString(R.string.doh_provider_updated),
+                    Toast.LENGTH_LONG).show()
+            }
+            .show()
+    }
+
+    /** Adresse acceptable : DoH (https) ou DoT (dot://hôte). */
+    private fun dnsValide(url: String): Boolean = when {
+        url.startsWith("dot://", true) -> url.removePrefix("dot://").trim().length >= 3
+        url.startsWith("https://", true) ->
+            runCatching { java.net.URI(url).host.orEmpty().length >= 3 }.getOrDefault(false)
+        else -> false
+    }
+
+    /** Vrai si l'adresse enregistrée ne vient pas de la liste toute faite. */
+    private fun estDnsPerso(url: String): Boolean =
+        url.isNotBlank() &&
+            resources.getStringArray(R.array.doh_provider_urls).none { it == url }
+
+    /** Libellé de la liste, ou l'adresse elle-même quand elle est personnalisée. */
+    private fun resumeDoh(liste: androidx.preference.ListPreference?, url: String): CharSequence? {
+        val i = liste?.findIndexOfValue(url) ?: -1
+        val entrees = liste?.entries
+        return if (i >= 0 && entrees != null && i < entrees.size) entrees[i]
+        else url.ifBlank { null }
+    }
+
 }

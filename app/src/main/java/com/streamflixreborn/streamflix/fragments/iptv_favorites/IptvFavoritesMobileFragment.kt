@@ -208,7 +208,22 @@ class IptvFavoritesMobileFragment : Fragment() {
             updatePauseButton()
         }
         binding.miniPlayerFullscreen.setOnClickListener { navigateToFullPlayer() }
-        binding.miniPlayerView.setOnClickListener { navigateToFullPlayer() }
+        // 2026-08-18 — C'EST SUR CET ÉCRAN QUE ÇA SE PASSE (capture du user à 11:34 :
+        //   onglet « Favoris », dialogue de dossiers du TV Hub par-dessus le
+        //   mini-lecteur). Il y navigue dans « Clip vidéo musique », donc le bandeau
+        //   doit y être aussi — sinon « ta barre ne s'affiche jamais ».
+        //   ⚠ Rien de la logique IPTV n'est touché ici : on ne change QUE ce que fait
+        //   l'appui sur l'image du mini-lecteur.
+        com.streamflixreborn.streamflix.utils.MiniPlayerBarre.installer(
+            zoneVideo = binding.miniPlayerView,
+            barre = binding.miniPlayerOverlay,
+            boutonPrecedent = binding.miniPlayerPrev,
+            boutonSuivant = binding.miniPlayerNext,
+            progression = binding.miniPlayerSeek,
+            surPleinEcran = { navigateToFullPlayer() },
+            proprietaire = viewLifecycleOwner,
+            retour = requireActivity().onBackPressedDispatcher,
+        )
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
@@ -236,6 +251,9 @@ class IptvFavoritesMobileFragment : Fragment() {
 
     private fun navigateToFullPlayer() {
         if (!isAdded || _binding == null) return
+        // 2026-08-18 : voir HomeMobileFragment — le plein écran ferme TOUJOURS le
+        //   menu à jaquettes, sinon il resterait par-dessus le grand lecteur.
+        com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.dismissAllPublic()
         val channelId = MiniPlayerController.currentChannelId ?: return
         val channelName = MiniPlayerController.currentChannelName ?: channelId
         val channelPoster = MiniPlayerController.currentChannelPoster

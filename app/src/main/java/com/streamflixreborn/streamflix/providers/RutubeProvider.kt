@@ -79,6 +79,56 @@ object RutubeProvider {
         "\\b(hun|ita|ger|deu|esp|spa|pol|cze|tur|ned|dut|swe|nor|fin|dan|por|jap|jpn|kor|hindi)\\b"
     )
 
+    /**
+     * 2026-08-16 (user : « Rutube match sur n'importe quoi », cas Game of Thrones).
+     * Vidéos qui PARLENT de l'œuvre au lieu de LA CONTENIR : conférences, critiques, analyses,
+     * résumés, réactions, interviews, making-of… Rutube en est plein, et elles échappaient à
+     * tous les garde-fous parce qu'elles citent le titre ET durent longtemps.
+     * Cas prouvé : « George R.R. Martin Le Trone de fer B. Metraux #8 » — 92 min, une conférence
+     * sur l'auteur, qui passait `tousMotsPresents` (« trone » + « fer ») puis le plancher de
+     * durée, et se faisait étiqueter « VF » puisqu'elle contient le titre français demandé.
+     */
+    private val MARQUEUR_HORS_SUJET = Regex(
+        "\\b(conference|critique|analyse|analyses|resume|resumes|recap|reaction|reactions|" +
+        "interview|itw|making of|makingof|coulisses|explication|explique|decryptage|" +
+        "commentaire|commentee|theorie|theories|top \\d+|classement|documentaire|" +
+        "podcast|debat|chronique|avis|review|spoilers?|" +
+        // 2026-08-16 (user : « Rutube continue à matcher avec des musiques portant le même nom
+        //   que la série ») — génériques, BO, reprises, mixes… Ils citent le titre de l'œuvre
+        //   et échappaient donc au filtre. Le plafond de durée en attrape une partie, mais une
+        //   compilation d'une heure y survivrait : ces marqueurs ferment l'angle restant.
+        "musique|music|chanson|generique|soundtrack|ost|bande originale|theme song|" +
+        "cover|remix|mix|mashup|instrumental|karaoke|lyrics|paroles|audio officiel|" +
+        "clip officiel|official video|official audio|feat|album|playlist|nightcore|" +
+        "piano|guitare|violon|orchestre|concert|live session)\\b"
+    )
+
+    /**
+     * 2026-08-16 — Couverture INVERSE : quelle part des mots significatifs du CANDIDAT est
+     * expliquée par le titre de l'œuvre ?
+     *
+     * `tousMotsPresents` ne vérifie que ce que le candidat CONTIENT, jamais ce qu'il EST : rien
+     * n'interdisait qu'il parle d'autre chose. Sur l'exemple ci-dessus, « trone » et « fer » ne
+     * représentent que 2 mots sur 6 (george, martin, trone, fer, metraux…) → la vidéo porte
+     * majoritairement sur autre chose.
+     * Seuil VOLONTAIREMENT BAS (35 %) : les titres Rutube sont descriptifs (« … Film Complet En
+     * Français », noms d'acteurs) et un seuil élevé recalerait des films légitimes — c'est
+     * exactement la raison pour laquelle le contrôle mot-à-mot d'ok.ru avait été écarté ici.
+     */
+    private const val COUVERTURE_INVERSE_MIN = 0.50
+
+    /**
+     * Jetons TECHNIQUES d'un nom de release : ils ne parlent pas du sujet de la vidéo, donc ils
+     * ne doivent PAS peser dans la couverture inverse. Sans ça, « Le Trone de fer S08E01 FRENCH
+     * HDTV » tombait à 50 % (2 mots sur 4) et un jeton de plus (x264…) l'aurait fait rejeter,
+     * alors que c'est exactement la release qu'on veut.
+     */
+    private val JETON_TECHNIQUE = Regex(
+        "^(s\\d{1,3}e\\d{1,3}|\\d{1,3}x\\d{1,3}|x26[45]|h26[45]|xvid|divx|aac\\d*|ac3|dts|" +
+        "hdtv|hdrip|dvdrip|brrip|bdrip|web|dl|webrip|amzn|nf|ddp\\d*|mkv|mp4|avi|" +
+        "lostfilm|qqss\\d*|vostfr|multi|truefrench|french|\\d{3,4}p)$"
+    )
+
     /** Mots NEUTRES d'un titre : n'identifient aucune œuvre (bruit de release / descriptif). */
     private val MOTS_NEUTRES = (
         "the a an of and or les la le de du des un une et en au aux dans sur " +
@@ -177,6 +227,30 @@ object RutubeProvider {
             if (motsInterdits.any { n.contains(it) }) return@filter false
             if (MARQUEUR_ETRANGER.containsMatchIn(n)) return@filter false
 
+            // 2026-08-16 : la vidéo PARLE de l'œuvre au lieu de LA CONTENIR.
+            if (MARQUEUR_HORS_SUJET.containsMatchIn(n)) {
+                Log.d(TAG, "écarté « ${c.titre} » — hors-sujet (parle de l'œuvre)")
+                return@filter false
+            }
+
+            // 2026-08-16 : couverture INVERSE — le titre de l'œuvre doit expliquer une part
+            //   suffisante du candidat, sinon la vidéo porte majoritairement sur autre chose.
+            //   (« George R.R. Martin Le Trone de fer B. Metraux #8 » : 2 mots sur 6.)
+            val motsCandSig = n.split(" ")
+                .filter { it.length >= 2 && it !in MOTS_NEUTRES && !JETON_TECHNIQUE.matches(it) }
+            if (motsCandSig.isNotEmpty()) {
+                // Sont « expliqués » les mots du titre de l'œuvre ET ceux du titre d'épisode :
+                //   « Inspecteur Derrick- Appel De Nuit » est légitime, le nom de l'épisode n'est
+                //   pas du hors-sujet. Sans ce crédit, les séries nommées par épisode chutaient.
+                val motsOeuvre = (nOeuvre + " " + (titreEpisodeFr?.let { norm(it) } ?: ""))
+                    .split(" ").filter { it.length >= 2 && it !in MOTS_NEUTRES }.toSet()
+                val expliques = motsCandSig.count { it in motsOeuvre }
+                if (expliques.toDouble() / motsCandSig.size < COUVERTURE_INVERSE_MIN) {
+                    Log.d(TAG, "écarté « ${c.titre} » — couverture $expliques/${motsCandSig.size} < ${(COUVERTURE_INVERSE_MIN * 100).toInt()}%")
+                    return@filter false
+                }
+            }
+
             if (estEpisode) {
                 // Rutube nomme un épisode soit par son NOM (« Appel De Nuit »), soit par un code
                 //   SSxEE / SxxExx (« 22x04 », « 08x10 », « s03e03 »). Lookbehind + lookahead
@@ -185,7 +259,15 @@ object RutubeProvider {
                 //   la chaîne ESPACÉE (les tokens sont séparés).
                 val re = Regex("(?<![0-9])(s0*${saison}e0*${episode}|0*${saison}x0*${episode})(?![0-9])")
                 val parCode = re.containsMatchIn(n)
-                val parTitreEp = !titreEpisodeFr.isNullOrBlank() && n.contains(norm(titreEpisodeFr))
+                // 2026-08-16 : le titre d'épisode ne vaut comme preuve QUE s'il est
+                //   DISCRIMINANT. TMDB renvoie souvent un libellé générique (« Épisode 1 »,
+                //   « Episode 12 ») dont tous les mots sont neutres → `contains` devenait
+                //   trivialement vrai et laissait entrer n'importe quelle vidéo de la série.
+                //   On exige donc au moins un mot significatif (hors MOTS_NEUTRES, ≥ 3 lettres).
+                val nEp = titreEpisodeFr?.let { norm(it) }.orEmpty()
+                val epDiscriminant = nEp.split(" ")
+                    .any { it.length >= 3 && it !in MOTS_NEUTRES && !it.all(Char::isDigit) }
+                val parTitreEp = epDiscriminant && n.contains(nEp)
                 if (!parCode && !parTitreEp) return@filter false
             } else if (annee != null && annee > 1900) {
                 // On N'EXIGE PAS l'année (les uploads Rutube « Parker Film Complet En Français »
@@ -201,9 +283,40 @@ object RutubeProvider {
             if (bas != null && haut != null) {
                 if (c.dureeS < bas * 0.80 || c.dureeS > haut * 1.25) return@filter false
             } else {
-                // Sans runtime TMDB : un plancher suffit à écarter bandes-annonces et extraits.
-                val plancher = if (estEpisode) 12 * 60 else 55 * 60
+                // Sans runtime TMDB : plancher ET PLAFOND.
+                // 2026-08-16 (user : « l'épisode où il a matché dure 3 h, ça se peut pas ») —
+                //   il n'y avait AUCUN plafond ici, d'où des compilations musicales et des
+                //   rediffusions de plusieurs heures acceptées comme épisodes.
+                //   Pourquoi la borne TMDB ne jouait pas : `episode_run_time` est une liste, et
+                //   TMDB la rend VIDE sur beaucoup de séries récentes — vérifié en direct,
+                //   Game of Thrones renvoie `[]` (Dexter, lui, renvoie `[60]`). Les deux bornes
+                //   tombaient donc à null et seul le plancher subsistait.
+                //   Plafonds volontairement LARGES (marge pour les épisodes doubles, les
+                //   pilotes rallongés et les vidéos un peu tronquées) : ils ne visent que
+                //   l'aberration manifeste, pas l'ajustement fin.
+                // 2026-08-16 (user, après plusieurs faux positifs : « il a encore matché sur
+                //   un épisode de 37 min qui n'a rien à voir avec la série ») —
+                //   ÉPISODE SANS DURÉE DE RÉFÉRENCE = REJET SEC.
+                //   Le titre seul ne suffit pas à identifier un épisode sur Rutube : le site
+                //   est plein de clips, génériques et vidéos de fans qui citent le nom de la
+                //   série. Sans fenêtre de durée on ne peut RIEN vérifier — et c'est
+                //   précisément le cas où les faux positifs sont passés (TMDB renvoie
+                //   `episode_run_time: []` sur beaucoup de séries, dont Game of Thrones).
+                //   Application directe du principe « pas de serveur plutôt que le mauvais ».
+                //   Les séries dont TMDB déclare la durée (Dexter → [60]) ne sont PAS
+                //   touchées : elles passent par la branche `bas/haut` ci-dessus.
+                if (estEpisode) {
+                    Log.d(TAG, "écarté « ${c.titre} » — épisode sans durée TMDB de référence")
+                    return@filter false
+                }
+                // FILM : la durée TMDB manque rarement, et le titre + l'année discriminent.
+                val plancher = 55 * 60
+                val plafond = 240 * 60
                 if (c.dureeS in 1 until plancher) return@filter false
+                if (c.dureeS > plafond) {
+                    Log.d(TAG, "écarté « ${c.titre} » — ${c.dureeS / 60} min > plafond ${plafond / 60} min")
+                    return@filter false
+                }
             }
             true
         }

@@ -267,9 +267,25 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         serversCache.clear()
     }
 
+    /**
+     * 2026-08-16 — VERSION de la logique d'assemblage, inscrite dans la clé de cache.
+     *
+     * Le cache garde l'agrégat 5 min. Tant qu'il est chaud, `getServers` rend l'ANCIENNE liste
+     * sans rappeler un seul endpoint — donc sans écrire une ligne de journal non plus. Un
+     * correctif de filtrage passait ainsi pour inopérant : on relisait une liste bâtie avec le
+     * code précédent, et le journal restait muet, ce qui donnait l'impression que le filtre ne
+     * s'appliquait pas (constaté ce jour avec les 15 serveurs injectés via Cloudstream).
+     *
+     * En versionnant la clé, toute entrée produite par une version antérieure devient
+     * inatteignable : le premier appel après mise à jour reconstruit forcément la liste.
+     * ⚠ À INCRÉMENTER à chaque modification de ce qui est émis (filtres, bridages, libellés).
+     */
+    private const val SERVERS_CACHE_VERSION = 7
+
     private fun serversCacheKey(videoType: Video.Type): String = when (videoType) {
-        is Video.Type.Movie -> "movie:${videoType.id}"
-        is Video.Type.Episode -> "tv:${videoType.tvShow.id}:s${videoType.season.number}:e${videoType.number}"
+        is Video.Type.Movie -> "v$SERVERS_CACHE_VERSION:movie:${videoType.id}"
+        is Video.Type.Episode ->
+            "v$SERVERS_CACHE_VERSION:tv:${videoType.tvShow.id}:s${videoType.season.number}:e${videoType.number}"
     }
 
     private val tmdbService: TmdbService by lazy { buildTmdbService() }
@@ -332,6 +348,16 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         videoType: Video.Type,
     ): List<Video.Server> {
         if (!tmdbId.all { it.isDigit() }) return emptyList()
+        // 2026-08-16 : DEUXIÈME ARRIVÉE de Movix, hors de `links` — les 5 backups
+        //   TMDB-iframe (Vidsrc.icu et consorts). Ils sont ajoutés par SIX providers
+        //   (VoirDrama, AnimeSama, FrenchAnime, FrenchManga, VoirAnime, UnJourUnFilm)
+        //   et n'ont jamais rien de natif : ce sont des iframes TMDB génériques.
+        //   C'est cette voie qui continuait à gonfler la liste alors que le filtrage de
+        //   `links` était bien actif — d'où l'impression que rien ne changeait.
+        if (NATIFS_SEULEMENT) {
+            Log.d("MovixProvider", "backups TMDB-iframe écartés (natifs seulement)")
+            return emptyList()
+        }
         return when (videoType) {
             is Video.Type.Movie -> tmdbBackupSources.map { source ->
                 Video.Server(
@@ -2201,6 +2227,175 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         "a", "an", "to", "in", "on", "for", "saison", "season"
     )
 
+    /**
+     * 2026-08-16 (décision user : « je veux garder QUE les natifs de Movix, le reste on gère
+     * déjà ») — Movix est un AGRÉGATEUR : la plupart de ses endpoints rescrapent des sites que
+     * l'app interroge déjà en direct. Mesuré sur Game of Thrones S08E03 : un lot de 13 serveurs
+     * Movix rejeté INTÉGRALEMENT comme doublons (`PROG fresh=VIDE! batch=13 dupes=13`).
+     *
+     * NATIF conservé = `links` (Lecteur Movix, SeekStreaming 1 et 2 — ce que le site affiche
+     * sous « 🌟 »), plus `tmdb` qui est sa propre agrégation.
+     * Bridés : fstream, wiflix, purstream, j1f (on a le direct) et videasy, swiftflow,
+     * mazquest, seriesdl, cpasmal (tiers sans apport propre).
+     *
+     * ⚠ CPASMAL est le seul dont on n'a PAS d'équivalent direct : Cpasmal et Cpasmieux ont été
+     * retirés le 01/08 (cpasmieux.life exige une connexion). Le brider fait donc PERDRE cette
+     * source, ce n'est pas un simple retrait de doublon. Signalé au user.
+     *
+     * ⚠ 2026-08-16, SOIR — RESTE À `true` (user : « t'es pas obligé de tout déverrouiller,
+     * fallait juste débloquer notre backup Movix »). Ce filtre-ci ne touche PAS aux endpoints
+     * secondaires : il ne fait qu'écarter, dans `links` et `tmdb`, les hébergeurs TIERS que nos
+     * extracteurs couvrent déjà. C'est lui qui évite les lots de 13 serveurs en doublon.
+     * Le déverrouillage du soir porte uniquement sur `movixSecondaireUtile` (BackupRegistry).
+     *
+     * ⚠ Coût connu et assumé de ce filtre, mesuré sur « Nando entre deux mondes » (tmdb
+     * 1487864) : `api/links/movie/1487864` ne rendait que DEUX liens, `bll.embedseek.com/#ngw8j`
+     * et `luluvdo.com/e/56mgplx7n9c3`. Le second a été écarté (« déjà géré en direct ») alors
+     * qu'aucune autre source ne l'apportait sur ce film, et c'était le meilleur des deux :
+     * `…MULTI.1080p.WEB.X264-HiggsBoson`, piste française incluse. Si ce cas se reproduit, la
+     * correction ciblée est de ne plus filtrer `links` (qui ne rend qu'un ou deux liens choisis)
+     * tout en gardant le filtre sur `tmdb` (le gros agrégateur) — et PAS de passer cette
+     * constante à `false`, qui rouvrirait aussi les 13 hébergeurs de `tmdb`.
+     */
+    private const val NATIFS_SEULEMENT = true
+
+    /**
+     * 2026-08-16, SOIR — le filtre par hébergeur ne s'applique PLUS à `links`.
+     *
+     * Raisonnement du user, et il est juste : « pour que tu les aies bridés, c'est qu'ils sont
+     * présents déjà — s'ils sont pas présents, c'est complètement foutu ». Le motif du rejet
+     * (« déjà géré en direct ») est une AFFIRMATION DE PRÉSENCE. Elle n'est jamais vérifiée.
+     *
+     * Sur « Nando entre deux mondes », elle était fausse : `links` ne rendait que deux liens,
+     * EmbedSeek et `luluvdo.com/e/56mgplx7n9c3`, et AUCUNE autre source n'apportait de LuluVdo
+     * (relevé exhaustif des serveurs de CoflixWiki et Nakios : vidzy, doood, voe3, rien d'autre).
+     * Le lien écarté était le meilleur du film : `…MULTI.1080p.WEB.X264-HiggsBoson`.
+     *
+     * `links` ne rend qu'un ou deux liens CHOISIS — ce n'est pas l'agrégateur massif. On le
+     * laisse donc passer entièrement : les vrais doublons sont éliminés en aval par la dédup
+     * (langBucket|normSrc), qui MESURE au lieu de supposer.
+     *
+     * `tmdb`, lui, reste filtré : c'est celui qui émet les lots de 13 hébergeurs tiers.
+     */
+    private const val FILTRER_LINKS = false
+
+    /**
+     * 2026-08-16, SOIR — cpasmal RÉACTIVÉ.
+     *
+     * Même raisonnement, en plus net encore : Cpasmal et Cpasmieux ont été retirés des sources
+     * directes le 01/08 (cpasmieux.life exige une connexion). L'endpoint Movix est donc la
+     * SEULE voie d'accès qui reste. Le brider au motif que « c'est déjà géré en direct » ne
+     * pouvait pas être vrai — il n'y a pas de direct. C'était une perte sèche à chaque lecture,
+     * et le commentaire de NATIFS_SEULEMENT le disait déjà noir sur blanc.
+     */
+    private const val CPASMAL_ACTIF = true
+
+    /**
+     * 2026-08-16, SOIR — l'endpoint `wiflix` de Movix est rebridé, et cette fois sur MESURE,
+     * pas sur supposition.
+     *
+     * ⚠ D'abord, une découverte : cet endpoint ne scrape PAS Wiflix. Sa réponse porte un champ
+     * `wiflix_url` qui vaut « https://cinestream.info/film/… », et son message d'erreur dit
+     * « Film non trouve sur CineStream ». La vraie source est **cinestream.info**, un site FR de
+     * films absent de notre code. Nos serveurs s'affichaient donc « Wiflix · … » à tort.
+     *
+     * Preuve du doublon, relevée sur Spider-Man : Homecoming (tmdb 315635) — CineStream à
+     * gauche, notre Wiflix direct (flemmix.men) à droite, comparés par CODE DE FICHIER :
+     *
+     *     uqload.cx/embed-v1alx4mfphrg   ==  uqload.is/embed-v1alx4mfphrg
+     *     vidmoly.net/embed-r9olsqo1yu0x ==  vidmoly.org/embed-r9olsqo1yu0x
+     *     …/e/ifkxiqdbprms (VOE)         ==  …/e/ifkxiqdbprms
+     *
+     * Le troisième est confirmé jusqu'au flux : les deux serveurs joués l'un après l'autre ont
+     * rendu la MÊME URL CDN finale, à l'octet près
+     * (`ugc-cdn-caching-…/engine/hls2-c/01/14154/ifkxiqdbprms`).
+     *
+     * Seul l'HÔTE diffère (.cx/.is, .net/.org) : ce sont des miroirs du même hébergeur. Notre
+     * dédup compare l'URL entière, hôte compris — elle ne peut donc pas les fusionner, et on
+     * affichait chaque fichier deux fois.
+     *
+     * ⚠ Ce bridage est un PANSEMENT. La vraie correction est de dédoublonner sur le code de
+     * fichier plutôt que sur l'URL : elle réglerait ces trois cas ET tous les mêmes doublons
+     * entre sources qui n'ont rien à voir avec Movix. Quand elle sera en place, cette constante
+     * pourra repasser à `true` — CineStream a 10 lecteurs contre 7 à Wiflix, donc il en a
+     * peut-être d'exclusifs qu'on perd ici.
+     */
+    private const val MOVIX_WIFLIX_ACTIF = false
+
+    /**
+     * 2026-08-16, SOIR — l'endpoint `fstream` de Movix est bridé lui aussi, pour la même raison
+     * que `wiflix` et avec la même preuve : il double le direct ET il sert des hôtes morts.
+     *
+     * Mesuré sur Spider-Man : No Way Home (tmdb 634649). L'endpoint a émis 18 serveurs, dont
+     * TROIS `Fembed` et HUIT `RedirectProxy`. Les quatre premiers de la liste — donc ceux que le
+     * lecteur choisit en premier — ont échoué en cascade :
+     *
+     *     FS · Uqload (VFQ)        → « embed sans source (427b) → miroir mort »
+     *     FS · RedirectProxy (VFQ) → « Could not find md5 path on playmogo.com/e/8m8q46a5121p »
+     *     FS · RedirectProxy #2    → kakaflix.lol/sbtm//newPlayer.php ne redirige pas
+     *                                (double slash, et le segment `sbtm` n'est pas dans notre table)
+     *     FS · Fembed (VFQ)        → « HOTE NON COUVERT : www.fembed.com »
+     *
+     * Fembed est mort depuis des années et n'a aucun extracteur ici : ces trois-là ne pourront
+     * jamais jouer. Pendant ce temps, FrenchStream en DIRECT rendait 10 serveurs neufs sur 11.
+     *
+     * Coût pour l'utilisateur : quatre tentatives de lecture ratées avant d'atteindre un serveur
+     * qui marche — visible à l'écran, quatre entrées rouges avant la première verte.
+     *
+     * ⚠ CONCLUSION INVERSÉE (user : « attends, t'es sûr de toi, on va pas perdre les serveurs »)
+     * — il avait raison, et j'allais refaire l'erreur de la soirée. Sur SA capture d'écran, le
+     * serveur qui a EFFECTIVEMENT joué, en 1440p, est `FS · RedirectProxy (VFF - HD)` =
+     * `kakaflix.lol/voe1/newPlayer.php?id=6e112c78…` — c'est-à-dire un serveur de CET endpoint.
+     * Le brider aurait supprimé le seul qui marchait, sans que rien ne prouve que FrenchStream
+     * en direct fournisse le même fichier. Contrairement au cas `wiflix`, je n'avais AUCUNE
+     * preuve d'identité de flux ici. Supposer une présence au lieu de la mesurer : exactement
+     * la faute qu'on corrige depuis ce matin.
+     *
+     * → L'endpoint RESTE OUVERT. Seuls les hôtes INJOUABLES sont écartés, cf. HOTES_MORTS.
+     */
+    private const val MOVIX_FSTREAM_ACTIF = true
+
+    /**
+     * 2026-08-16 — Hôtes qu'on ne sait PAS lire : aucun extracteur, aucun alias dans le projet.
+     * Ce ne sont pas des doublons ni des sources concurrentes — ce sont des entrées rouges
+     * garanties, sur tous les films, qui remontent en tête de liste et coûtent une tentative de
+     * lecture ratée chacune avant d'atteindre un serveur valide.
+     *
+     * `fembed.com` : vérifié en cherchant « fembed » dans TOUT le code source — 6 occurrences,
+     *   les 6 étant des commentaires écrits ce soir. Zéro extracteur, zéro alias. Le journal le
+     *   confirme : « HOTE NON COUVERT: www.fembed.com (aucun extracteur) ». Movix en servait
+     *   TROIS sur Spider-Man : No Way Home (VFQ, DEFAULT, VOSTFR).
+     *   ⚠ À NE PAS CONFONDRE avec **Frembed** (`frembed.casa`), notre source de backup bien
+     *   vivante — 4 serveurs neufs sur ce même film. Un seul caractère les sépare.
+     *
+     * Si un jour on écrit un extracteur pour l'un d'eux, il suffit de le retirer d'ici.
+     */
+    private val HOTES_MORTS = Regex("""(^|\.)fembed\.com""", RegexOption.IGNORE_CASE)
+
+    private fun estHoteMort(url: String): Boolean =
+        HOTES_MORTS.containsMatchIn(runCatching { java.net.URI(url).host.orEmpty() }.getOrDefault(""))
+
+    /**
+     * 2026-08-16 — Hôtes réellement MAISON de Movix, dans l'endpoint `links`.
+     *
+     * ⚠ Correction d'une erreur d'analyse : j'avais conservé `links` en croyant que c'était le
+     * natif, en me fiant à ce que le site affiche sous ★ (« Lecteur Movix 1 », « SeekStreaming
+     * 1 et 2 ») et à un test d'API qui ne remontait que 3 hôtes sur cet épisode-là. En réalité
+     * `links` est le GROS agrégateur : mesuré sur Game of Thrones S08E03, il émet 13 serveurs —
+     * Filemoon, VOE, Uqload, Netu, Streamwish, LuluVdo, VidHide, VidGuard, Darkibox, Veev… tous
+     * des hébergeurs TIERS que nos propres extracteurs couvrent déjà et que nos backups
+     * fournissent en direct.
+     *
+     * On ne garde donc de `links` que les lecteurs propres à Movix : Moiflix/xtremestream,
+     * Rpmvid (coflix.upn…), SeekStreaming/seekplayer et EmbedSeek. Le reste est écarté.
+     */
+    private val HOTES_NATIFS_MOVIX = Regex(
+        "(xtremestream|seekplayer|embedseek|seekstreaming|rpmvid|rpmplay|rpmstream|upns?\\.|upn\\.one|moiflix)",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private fun estLecteurNatifMovix(url: String): Boolean = HOTES_NATIFS_MOVIX.containsMatchIn(url)
+
     private suspend fun fetchNativeMovixServers(
         id: String,
         videoType: Video.Type,
@@ -2223,6 +2418,19 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         catch (_: Exception) { null }
                     }
                     val fstreamDeferred = async {
+                        // 2026-08-16 (décision user : « on devrait prendre que les sources
+                        //   natives de Movix, tout le reste on est censé le gérer ») —
+                        //   ENDPOINT SECONDAIRE : Movix se contente ici de rescraper
+                        //   FrenchStream, que le registre interroge DÉJÀ en direct. En marche
+                        //   normale ses liens sont donc des doublons, fusionnés par la dédup
+                        //   après avoir coûté un appel réseau pour rien.
+                        //   On le rappelle UNIQUEMENT si la source directe est désactivée ou a
+                        //   échoué récemment (< 30 min) : Movix garde ses liens en cache côté
+                        //   serveur et devient alors le seul à les fournir.
+                        if (!MOVIX_FSTREAM_ACTIF) {
+                            Log.d("MovixProvider", "fstream-movie SKIP : doublons + hôtes morts (Fembed)")
+                            return@async emptyList()
+                        }
                         runEndpoint("fstream-movie") {
                             // 2026-07-09 : GARDE TITRE — l'API Movix fait du scraping FrenchStream
                             //   CÔTÉ SERVEUR dont le matching est mauvais pour les titres courts
@@ -2268,6 +2476,16 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val url = movixLinkUrl(el)
                                     if (!url.isNullOrBlank()) {
                                         val playerName = guessPlayerName(url)
+                                        // 2026-08-16 SOIR : filtre DÉSACTIVÉ sur `links` (cf. FILTRER_LINKS).
+                                        //   Il écartait des hébergeurs en AFFIRMANT qu'on les avait
+                                        //   ailleurs, sans jamais le vérifier — faux sur les films rares.
+                                        if (FILTRER_LINKS && !estLecteurNatifMovix(url)) {
+                                            android.util.Log.d(
+                                                "MovixProvider",
+                                                "links-movie : tiers écarté ($playerName) — déjà géré en direct",
+                                            )
+                                            return@forEachIndexed
+                                        }
                                         // 2026-07-31 : on précise la LANGUE quand on la connaît,
                                         //   sinon « LuluVdo #2 » (VOSTFR) se confond avec les VF.
                                         val lang = movixLinkLang(el, url)
@@ -2291,6 +2509,16 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     //   (scrapé CÔTÉ SERVEUR = zéro captcha CF pour l'app). C'est NOTRE backup Wiflix
                     //   direct (WiflixProvider, bypass CF avec captcha à chaque fois) qu'on retire.
                     val wiflixDeferred = async {
+                        // 2026-08-16 : bridé APRÈS réparation du Wiflix direct. La note du 07/07
+                        //   disait de le garder parce que le direct exigeait un captcha CF à
+                        //   chaque fois — mais le direct était en réalité cassé par un SUFFIXE
+                        //   D'ÉQUIPE dans le slug (« …-saison-8-stm.html »), corrigé ce jour :
+                        //   il rend désormais 6 serveurs neufs sur 6 bruts. La copie Movix est
+                        //   donc redevenue un doublon. Repli automatique si le direct retombe.
+                        if (!MOVIX_WIFLIX_ACTIF) {
+                            Log.d("MovixProvider", "wiflix-movie SKIP : doublons CineStream prouvés")
+                            return@async emptyList()
+                        }
                         runEndpoint("wiflix-movie") {
                             val wiflix = movixServiceInstance.getWiflixMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
@@ -2316,6 +2544,9 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     }
 
                     val cpasmalDeferred = async {
+                        // 2026-08-16 SOIR : RÉACTIVÉ (cf. CPASMAL_ACTIF) — aucune source directe
+                        //   n'existe depuis le retrait de Cpasmal/Cpasmieux le 01/08.
+                        if (!CPASMAL_ACTIF) return@async emptyList()
                         runEndpoint("cpasmal-movie") {
                             val cpasmal = movixServiceInstance.getCpasmalMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
@@ -2341,6 +2572,20 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     //   Le vrai fournisseur est Movix, comme pour les autres endpoints du fichier
                     //   (« Wiflix · », « FS · », « CPasMal · »).
                     val tmdbMovixDeferred = async {
+                        // 2026-08-16 : c'est CE constructeur qui produit les libellés
+                        //   « Movix · Filemoon - FileMon Vidéo 10 (VF) » — et donc les 13
+                        //   hébergeurs tiers vus au journal (Filemoon, VOE, Uqload, Vidoza,
+                        //   VidMoLy, Streamwish, LuluVdo, VidHide, VidGuard, Darkibox, Veev…).
+                        //   Je l'avais gardé en le croyant natif : il ne l'est pas, c'est une
+                        //   agrégation d'hébergeurs tiers que nos extracteurs couvrent déjà.
+                        //   Preuve à l'exécution : deux émissions à 78 ms d'écart — « emit 2 :
+                        //   EmbedSeek | SeekStreaming » (links, filtré) puis « emit 13 : Movix ·
+                        //   Filemoon… » (ici, non filtré). C'est aussi lui qui alimentait le
+                        //   « +15 Movix » injecté par CloudstreamProvider.
+                        //   ⚠ NE PAS couper l'endpoint EN ENTIER : il porte aussi DEUX natifs,
+                        //   Moiflix et Rpmvid (coflix.upn). Première tentative supprimée d'un
+                        //   bloc → le user a perdu « Movix · Moiflix » qu'il voulait garder.
+                        //   On filtre donc PAR HÉBERGEUR, comme sur `links`.
                         runEndpoint("tmdb-movie") {
                             val tmdbMovix = movixServiceInstance.getTmdbMovixMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
@@ -2351,6 +2596,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     else link.language ?: ""
                                 val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
                                 val playerName = guessPlayerName(url)
+                                // 2026-08-16 : ne garder que les lecteurs MAISON (Moiflix,
+                                //   Rpmvid…). Les tiers (Filemoon, VOE, Uqload, Streamwish…)
+                                //   sont déjà servis par nos backups directs.
+                                if (NATIFS_SEULEMENT && !estLecteurNatifMovix(url)) {
+                                    Log.d("MovixProvider", "tmdb : tiers écarté ($playerName)")
+                                    return@forEach
+                                }
                                 list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "Movix · $playerName - $qualityLabel ($lang)", src = url))
                             }
                             list
@@ -2384,6 +2636,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     //   par 2 nouvelles sources Movix vues sur movix.show (structure inspectée en direct) :
                     //   j1f (1Jour1Film via Movix) : players.{vf,vostfr}[] = {name,url,type,label,source}.
                     val j1fDeferred = async {
+                        // 2026-08-16 : endpoint SECONDAIRE — 1Jour1Film est interrogé en direct
+                        //   par le registre (boucle générique, avec ses titres alternatifs).
+                        if (!com.streamflixreborn.streamflix.utils.BackupRegistry.movixSecondaireUtile("1Jour1Film")) {
+                            Log.d("MovixProvider", "j1f-movie SKIP : 1Jour1Film répond en direct")
+                            return@async emptyList()
+                        }
                         runEndpoint("j1f-movie") {
                             val j1f = movixServiceInstance.getJ1fMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
@@ -2432,6 +2690,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     }
                     //   purstream : sources[] = {url,name,format} (source directe, sans langue).
                     val purstreamDeferred = async {
+                        // 2026-08-16 : endpoint SECONDAIRE. On a désormais un provider Purstream
+                        //   DIRECT (PurstreamProvider, films ET séries, mapping par tmdbId) —
+                        //   cette copie est donc un doublon en marche normale.
+                        if (!com.streamflixreborn.streamflix.utils.BackupRegistry.movixSecondaireUtile("Purstream")) {
+                            Log.d("MovixProvider", "purstream-movie SKIP : Purstream répond en direct")
+                            return@async emptyList()
+                        }
                         runEndpoint("purstream-movie") {
                             val ps = movixServiceInstance.getPurstreamMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
@@ -2513,6 +2778,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 // Parallel fetch all 6 API sources (timeout 4s + circuit breaker)
                 val allResults = coroutineScope {
                     val fstreamDeferred = async {
+                        // 2026-08-16 : endpoint SECONDAIRE (copie de FrenchStream) — cf. bloc film.
+                        if (!MOVIX_FSTREAM_ACTIF) {
+                            Log.d("MovixProvider", "fstream-tv SKIP : doublons + hôtes morts (Fembed)")
+                            return@async emptyList()
+                        }
                         runEndpoint("fstream-tv") {
                             // 2026-07-09 : GARDE TITRE (même que bloc movie) — titre court → skip fstream.
                             val showTitle = videoType.tvShow.title
@@ -2545,6 +2815,15 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val url = movixLinkUrl(el)
                                     if (!url.isNullOrBlank()) {
                                         val playerName = guessPlayerName(url)
+                                        // 2026-08-16 SOIR : filtre DÉSACTIVÉ sur `links` (cf. FILTRER_LINKS),
+                                        //   parité avec le bloc film.
+                                        if (FILTRER_LINKS && !estLecteurNatifMovix(url)) {
+                                            android.util.Log.d(
+                                                "MovixProvider",
+                                                "links-tv : tiers écarté ($playerName) — déjà géré en direct",
+                                            )
+                                            return@forEachIndexed
+                                        }
                                         // 2026-07-31 : langue affichée (parité avec les films)
                                         val lang = movixLinkLang(el, url)
                                         if (estVostfrAEcarter(lang)) {
@@ -2564,6 +2843,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     }
 
                     val wiflixDeferred = async {
+                        // 2026-08-16 : endpoint SECONDAIRE — cf. bloc film. Wiflix direct réparé
+                        //   ce jour (suffixe d'équipe dans le slug) → cette copie est un doublon.
+                        if (!MOVIX_WIFLIX_ACTIF) {
+                            Log.d("MovixProvider", "wiflix-tv SKIP : doublons CineStream prouvés")
+                            return@async emptyList()
+                        }
                         runEndpoint("wiflix-tv") {
                             val wiflix = movixServiceInstance.getWiflixTv(tmdbId, seasonNum)
                             val list = mutableListOf<Video.Server>()
@@ -2582,6 +2867,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     }
 
                     val cpasmalDeferred = async {
+                        // 2026-08-16 SOIR : RÉACTIVÉ (cf. CPASMAL_ACTIF) — parité avec le bloc film.
+                        if (!CPASMAL_ACTIF) return@async emptyList()
                         runEndpoint("cpasmal-tv") {
                             val cpasmal = movixServiceInstance.getCpasmalTv(tmdbId, seasonNum, episodeNum)
                             val list = mutableListOf<Video.Server>()
@@ -2599,6 +2886,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     }
 
                     val tmdbMovixDeferred = async {
+                        // 2026-08-16 : idem bloc film — c'est ce constructeur qui émet les 13
+                        //   hébergeurs tiers sous le libellé « Movix · … ». Non natif → bridé.
+                        //   ⚠ Filtrage PAR HÉBERGEUR (cf. bloc film) : Moiflix et Rpmvid sont
+                        //   natifs et doivent rester ; seuls les tiers sont écartés.
                         runEndpoint("tmdb-tv") {
                             val tmdbMovix = movixServiceInstance.getTmdbMovixTv(tmdbId, seasonNum, episodeNum)
                             val list = mutableListOf<Video.Server>()
@@ -2628,6 +2919,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     else link.language ?: ""
                                 val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
                                 val playerName = guessPlayerName(url)
+                                // 2026-08-16 : ne garder que les lecteurs MAISON (Moiflix,
+                                //   Rpmvid…). Les tiers (Filemoon, VOE, Uqload, Streamwish…)
+                                //   sont déjà servis par nos backups directs.
+                                if (NATIFS_SEULEMENT && !estLecteurNatifMovix(url)) {
+                                    Log.d("MovixProvider", "tmdb : tiers écarté ($playerName)")
+                                    return@forEach
+                                }
                                 list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "Movix · $playerName - $qualityLabel ($lang)", src = url))
                             }
                             list
@@ -2635,6 +2933,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     }
 
                     val seriesDlDeferred = async {
+                        // 2026-08-16 : non natif → bridé (cf. NATIFS_SEULEMENT).
+                        if (NATIFS_SEULEMENT) return@async emptyList()
                         runEndpoint("seriesdl-tv") {
                             val showTitle = videoType.tvShow.title
                             val searchResults = movixServiceInstance.searchMovix(showTitle)
@@ -2693,6 +2993,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     // plus. Pré-check de l'API ici pour ne pas afficher de
                     // serveur fantôme sur les épisodes qui n'ont pas de source.
                     val mazQuestDeferred = async {
+                        // 2026-08-16 : non natif → bridé (cf. NATIFS_SEULEMENT).
+                        if (NATIFS_SEULEMENT) return@async emptyList()
                         runEndpoint("mazquest-tv") {
                             val ssPad = "%02d".format(seasonNum)
                             val epPad = "%02d".format(episodeNum)
@@ -3934,8 +4236,20 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
      * Dédup par URL en bonus pour éviter qu'une même source remonte deux fois.
      */
     private fun sortServersByLanguage(servers: List<Video.Server>): List<Video.Server> {
+        // 2026-08-16 : hôtes INJOUABLES écartés ici, au point de passage COMMUN à tous les
+        //   endpoints (fstream, links, wiflix, tmdb, cpasmal…) — plutôt qu'au cas par cas, où
+        //   on en oublie forcément un. cf. HOTES_MORTS.
+        val vivants = servers.filterNot { s ->
+            estHoteMort(s.src).also { mort ->
+                if (mort) android.util.Log.d(
+                    "MovixProvider",
+                    "hôte injouable écarté (${s.name}) — aucun extracteur pour ${s.src}",
+                )
+            }
+        }
+
         val seen = HashSet<String>()
-        val unique = servers.filter { server ->
+        val unique = vivants.filter { server ->
             val key = server.src.lowercase().trim()
             key.isEmpty() || seen.add(key)
         }

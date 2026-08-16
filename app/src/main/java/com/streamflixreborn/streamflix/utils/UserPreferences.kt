@@ -42,6 +42,21 @@ object UserPreferences {
 
     lateinit var providerCache: JSONObject
 
+    /**
+     * Petit espace de stockage libre, pour les caches qui n'ont pas besoin
+     * d'une clé dédiée dans l'enum Key.
+     *
+     * 2026-08-17 : utilisé par VoeLibrary pour garder les jaquettes et titres
+     *   TMDB de la bibliothèque perso. Sans persistance, il faudrait
+     *   retélécharger 550 fiches à chaque démarrage de l'application.
+     */
+    fun cacheBrut(cle: String): String? =
+        if (::prefs.isInitialized) prefs.getString(cle, null) else null
+
+    fun ecrireCacheBrut(cle: String, valeur: String) {
+        if (::prefs.isInitialized) prefs.edit().putString(cle, valeur).apply()
+    }
+
     private inline fun debugLog(message: () -> String) {
         if (BuildConfig.DEBUG) {
             Log.d(TAG, message())
@@ -165,7 +180,7 @@ object UserPreferences {
     /** Sources décochées VOLONTAIREMENT — jamais réactivées par la migration. */
     private const val KEY_BACKUP_REFUSEES = "BACKUP_SOURCES_REFUSEES"
     private const val KEY_BACKUP_MIGRATION_V = "BACKUP_MIGRATION_V"
-    private const val CUR_BACKUP_MIGRATION = 14 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime ; v13 : ok.ru + archive.org ; v14 : Rutube)
+    private const val CUR_BACKUP_MIGRATION = 16 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime ; v13 : ok.ru + archive.org ; v14 : Rutube ; v15 : Purstream ; v16 : ONYX)
 
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :
