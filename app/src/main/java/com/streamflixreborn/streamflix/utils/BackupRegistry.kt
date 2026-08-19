@@ -685,7 +685,11 @@ object BackupRegistry {
     // 2026-07-09 : nettoie les décorations Wiflix/provider du titre avant recherche TMDB/backup.
     // Ex: "Spider-Noir (Version Couleur) – Saison 1" → "Spider-Noir"
     // Sans ça, TMDB Search.multi refuse le titre décoré → tmdbId null → backups vides.
-    private fun cleanTitle(raw: String): String {
+    // 2026-08-20 : rendu PUBLIC pour que DownloadManager nomme les fichiers avec
+    //   EXACTEMENT le titre qui servira ensuite à les rechercher (`key.title` passe
+    //   par ici). Dupliquer cette logique ailleurs, c'est se garantir une divergence
+    //   le jour où l'une des deux copies évolue.
+    fun cleanTitle(raw: String): String {
         var t = raw
         // Retire les blocs entre parenthèses : (Version Couleur), (VF), (Film), (Anime), etc.
         t = t.replace(Regex("\\s*\\([^)]*\\)"), "")
@@ -1306,6 +1310,13 @@ object BackupRegistry {
                 titrePrincipal = key.title,
                 dureeMinSec = runtimeSecondes,
                 dureeMaxSec = runtimeMaxSecondes,
+                // 2026-08-19 (user « elle n'a pas trouvé le serveur ONYX avec
+                //   Star Trek ») : on connaissait la saison et l'épisode depuis
+                //   le début sans les transmettre. Sans eux, aucun épisode de
+                //   série ne pouvait être rattaché — voir le commentaire dans
+                //   VoeLibrary.serveursPour.
+                saison = key.season,
+                episode = key.episode,
             )
         } }
         // 2026-07-06 : backups films/séries — SKIP sur provider anime (P3).

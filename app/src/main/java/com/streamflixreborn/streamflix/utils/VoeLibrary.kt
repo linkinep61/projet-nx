@@ -71,6 +71,12 @@ object VoeLibrary {
      *  nombre de requêtes et déclenchaient la limitation de débit de VOE. */
     private val verrou = kotlinx.coroutines.sync.Mutex()
 
+    /** Cadence : au moins ESPACEMENT_MS entre deux appels VOE, toutes origines
+     *  confondues (navigation, préchauffage, recherche, rattachement). */
+    private val verrouCadence = Any()
+    private const val ESPACEMENT_MS = 300L
+    @Volatile private var dernierAppel = 0L
+
     /**
      * ⚠ 2026-08-17 — NE PAS repasser à HttpURLConnection.
      * Première version faite comme ça : sur l'Oppo, les deux appels échouaient avec
@@ -99,6 +105,25 @@ object VoeLibrary {
         //   (pas de punition qui dure), et avec 1,2 s d'écart 12 appels passent
         //   sans un seul refus. Une courte attente croissante suffit donc, et
         //   coûte moins qu'une pause systématique entre tous les appels.
+        // ⚠ 2026-08-19 — CADENCE MINIMALE ENTRE DEUX APPELS, ajoutée après coup.
+        //   Le commentaire ci-dessus dit qu'« avec 1,2 s d'écart, 12 appels
+        //   passent sans un seul refus » — mais rien n'imposait cet écart. Or
+        //   depuis aujourd'hui deux mécanismes appellent VOE en même temps : la
+        //   navigation niveau par niveau (un appel par clic) et le préchauffage
+        //   de fond (un appel par dossier, 87 dossiers). Résultat mesuré sur
+        //   l'Oppo à 00:11, sans que rien ne tourne sur le PC :
+        //       /api/folder/list : refus 429, nouvel essai dans 500 ms
+        //       … quatorze fois d'affilée.
+        //   L'application se refusait elle-même l'accès. On espace donc TOUS
+        //   les appels, quelle que soit leur origine : mieux vaut 300 ms
+        //   d'attente choisie qu'un 429 qui en coûte 3 500.
+        synchronized(verrouCadence) {
+            val ecart = System.currentTimeMillis() - dernierAppel
+            if (ecart < ESPACEMENT_MS) {
+                try { Thread.sleep(ESPACEMENT_MS - ecart) } catch (_: InterruptedException) {}
+            }
+            dernierAppel = System.currentTimeMillis()
+        }
         var attente = 500L
         repeat(4) { essai ->
             try {
@@ -373,12 +398,106 @@ object VoeLibrary {
             .map { it.key to it.value } to fichiersIci.sortedBy { it.titre.lowercase() }
     }
 
-    /** Tuile d'un sous-dossier : rouvre le meme dialogue un cran plus bas. */
+    /** Tuile d'un sous-dossier : rouvre le meme dialogue un cran plus bas.
+     *  `nb` negatif = nombre inconnu (navigation niveau par niveau) : on
+     *  n'affiche alors pas de compteur plutot que d'en inventer un. */
     fun tuileDossier(chemin: String, nb: Int): TvShow =
         TvShow(
             id = "livehub::folder::voedir_$chemin",
-            title = "📁 ${chemin.substringAfterLast(SEP)} ($nb)",
+            title = if (nb >= 0) "📁 ${chemin.substringAfterLast(SEP)} ($nb)"
+                    else "📁 ${chemin.substringAfterLast(SEP)}",
         ).apply { providerName = "TV Hub" }
+
+    // ───────────────────────────────── navigation UN NIVEAU A LA FOIS
+    /**
+     * 2026-08-19 (user « le dossier films série met du temps à s'ouvrir quand
+     *   même, tu pouvais pas faire un chargement progressif à l'intérieur ? »
+     *   puis « au moins on a une ouverture rapide et le reste peu chargé en
+     *   tâche de fond ») — il a raison, et c'est le vrai correctif.
+     *
+     * Jusqu'ici, ouvrir « Film / série » chargeait TOUTE la bibliothèque
+     * (parcours complet de l'arborescence + 2000 fichiers) pour n'afficher que
+     * TROIS cartes : Films, Série, Clip vidéo musique. Et ça empirait à chaque
+     * dossier ajouté.
+     *
+     * Ici on ne demande QUE le dossier regardé : `/api/folder/list?fld_id=…`
+     * renvoie ses sous-dossiers ET ses fichiers en une seule réponse. Une
+     * requête (~0,6 s) par niveau, quel que soit le volume du compte.
+     *
+     * Le cache complet (`tout()`) reste utile pour la RECHERCHE, qui doit
+     * trouver un film sans savoir où il est ; il se charge en fond via
+     * `prechauffer()` et ne bloque plus personne.
+     */
+    data class Niveau(
+        /** (chemin complet, fld_id) des sous-dossiers directs. */
+        val sousDossiers: List<Pair<String, String>>,
+        val fichiers: List<Fichier>,
+    )
+
+    /** chemin de dossier → fld_id, appris au fil de la descente. La racine
+     *  n'a pas d'id : on part toujours d'elle, donc la carte est toujours
+     *  garnie pour le chemin qu'on est en train de parcourir. */
+    private val idsParChemin = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    fun idDe(chemin: String): String? = idsParChemin[chemin]
+
+    suspend fun niveau(chemin: String): Niveau = withContext(Dispatchers.IO) {
+        if (!actif) return@withContext Niveau(emptyList(), emptyList())
+        val fid = if (chemin.isBlank()) null else idsParChemin[chemin]
+        if (chemin.isNotBlank() && fid == null) {
+            // On ne sait pas où c'est : plutôt que d'inventer, on retombe sur
+            //   le cache complet s'il existe (cas d'un raccourci ou d'un
+            //   dossier ouvert après un redémarrage).
+            val (sous, fics) = enfantsDe(chemin)
+            return@withContext Niveau(sous.map { it.first to "" }, fics)
+        }
+        val sousDossiers = mutableListOf<Pair<String, String>>()
+        val fichiers = mutableListOf<Fichier>()
+        var page = 1
+        while (page <= 40) {
+            val p = HashMap<String, String>()
+            if (fid != null) p["fld_id"] = fid
+            p["page"] = "$page"
+            p["per_page"] = "250"
+            val res = get("/api/folder/list", p)?.optJSONObject("result") ?: break
+            if (page == 1) {
+                val sous = res.optJSONArray("folders")
+                for (i in 0 until (sous?.length() ?: 0)) {
+                    val o = sous?.optJSONObject(i) ?: continue
+                    val nom = o.optString("name")
+                    if (nom.isBlank()) continue
+                    val id = o.optString("fld_id")
+                    val plein = if (chemin.isBlank()) nom else "$chemin$SEP$nom"
+                    if (id.isNotBlank()) idsParChemin[plein] = id
+                    sousDossiers += plein to id
+                }
+            }
+            val fic = res.optJSONObject("files")
+            val data = fic?.optJSONArray("data")
+            for (i in 0 until (data?.length() ?: 0)) {
+                val o = data?.optJSONObject(i) ?: continue
+                val code = codeDe(o)
+                if (code.isBlank()) continue
+                val nom = o.optString("title").ifBlank { o.optString("name") }
+                if (nom.isBlank()) continue
+                fichiers += Fichier(
+                    code = code,
+                    nomBrut = nom,
+                    dossier = chemin.ifBlank { "Sans dossier" },
+                    poster = posterDe(o),
+                    dureeSec = o.optInt("length", 0),
+                )
+            }
+            if (fic == null || fic.isNull("next_page_url")) break
+            page++
+        }
+        // Les fiches TMDB manquantes (titre propre + affiche) : sur un seul
+        //   niveau c'est quelques requêtes, et le résultat est garde sur le
+        //   disque, donc payé une seule fois dans la vie de l'application.
+        runCatching { completerFiches(fichiers) }
+        Niveau(sousDossiers.sortedBy { it.first.lowercase() },
+               fichiers.sortedBy { titrePour(it).lowercase() })
+    }
 
     /** Tuile d'un film. */
     fun tuileFilm(f: Fichier): TvShow =
@@ -403,6 +522,62 @@ object VoeLibrary {
         //   du dialogue) est conservé, il faudra juste le brancher au bon
         //   endroit.
         return sectionsAPlat(fichiers)
+    }
+
+    /**
+     * Sections construites UNIQUEMENT depuis ce qui est déjà en mémoire.
+     * Aucune requête réseau, jamais : si le cache est vide, on rend une liste
+     * vide et c'est le clic sur la carte qui déclenchera le chargement.
+     *
+     * 2026-08-19 (user « le chargement du TV hub je trouve super long depuis
+     *   qu'on a ajouté notre dossier films série… le chargement du dossier
+     *   devrait être effectué qu'au clic ») : mesuré sur son Oppo,
+     *   `getHome: built+cached 5 sections in 30606ms`. Les 30 s venaient d'ici :
+     *   `sections()` appelait `tout()`, qui parcourt TOUTE l'arborescence VOE
+     *   (une requête par dossier ET par page), pagine tous les fichiers du
+     *   compte, se prend des 429 avec attentes 0,5/1/2 s, puis fabrique une
+     *   tuile pour les 1386 fichiers — alors que l'accueil n'affiche qu'UNE
+     *   carte « 📁 Film / série », déjà rendue inconditionnellement par
+     *   `alwaysShowKeys` (test de clé non vide, zéro réseau).
+     *   Chaque dossier ajouté rendait l'accueil plus lent : d'où sa remarque.
+     */
+    fun sectionsSiDejaCharge(): List<Category> {
+        if (!actif) return emptyList()
+        val fichiers = cache
+        if (fichiers.isEmpty()) return emptyList()
+        return sectionsAPlat(fichiers)
+    }
+
+    /** Un seul préchauffage à la fois : sans ça, deux appels rapprochés
+     *  doubleraient les requêtes et déclencheraient encore plus de 429. */
+    private val prechauffageEnCours = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Charge la bibliothèque EN FOND, sans rien faire attendre.
+     *
+     * 2026-08-19 (user « au pire le dossier on peut le précharger une fois que
+     *   le home a démarré, ça évite de cliquer dessus et ça ralentit pas
+     *   l'ouverture ? … parce que je sens que ça va être chiant à ouvrir
+     *   sinon ») : appelé par LiveTvHubProvider APRÈS la construction de
+     *   l'accueil. Rend la main immédiatement ; quand l'utilisateur clique sur
+     *   « Film / série », le cache est déjà chaud.
+     *   Ne fait RIEN si la clé est vide, si le cache est encore frais, ou si un
+     *   préchauffage tourne déjà.
+     */
+    fun prechauffer() {
+        if (!actif) return
+        if (cache.isNotEmpty() && System.currentTimeMillis() - cacheTs < TTL_MS) return
+        if (!prechauffageEnCours.compareAndSet(false, true)) return
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val n = tout().size
+                Log.d(TAG, "préchauffage terminé : $n fichier(s) prêts")
+            } catch (e: Exception) {
+                Log.w(TAG, "préchauffage KO : ${e.message}")
+            } finally {
+                prechauffageEnCours.set(false)
+            }
+        }
     }
 
     private fun sectionsAPlat(fichiers: List<Fichier>): List<Category> {
@@ -581,6 +756,98 @@ object VoeLibrary {
         return fichierSec >= bas - marge && fichierSec <= haut + marge
     }
 
+    // ─────────────────────────── liste rapide, pour le RATTACHEMENT seulement
+    @Volatile private var cacheRapide: List<Fichier> = emptyList()
+    @Volatile private var cacheRapideTs: Long = 0L
+
+    /**
+     * Tous les fichiers du compte, en ~11 requêtes au lieu de ~95.
+     *
+     * ⚠ 2026-08-19 (user « il est apparu mais vraiment longtemps après ») :
+     *   voilà pourquoi c'était si long. `serveursPour` appelait `tout()`, qui
+     *   parcourt l'arborescence dossier par dossier — 87 dossiers, donc 87
+     *   requêtes, donc des 429 en cascade. Plusieurs minutes avant que le
+     *   serveur ONYX n'apparaisse dans la fiche.
+     *
+     *   Or pour RATTACHER un fichier on n'a besoin que de son code, de son nom
+     *   et de sa durée — pas de savoir dans quel dossier il range.
+     *   `/api/file/list` donne tout ça, 250 par page : 8 requêtes pour 2000
+     *   fichiers. Le dossier ne sert qu'à une chose ici, écarter les clips : on
+     *   lit donc UNIQUEMENT les dossiers « clip » (3 requêtes) pour connaître
+     *   leurs codes.
+     *
+     *   `tout()` reste utilisé là où le rangement compte vraiment (navigation
+     *   de secours, sections), et garde son cache de 10 min.
+     */
+    private suspend fun toutRapide(): List<Fichier> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (cacheRapide.isNotEmpty() && now - cacheRapideTs < TTL_MS) return@withContext cacheRapide
+        // Si la liste complète est déjà chargée, elle est meilleure : on la prend.
+        if (cache.isNotEmpty() && now - cacheTs < TTL_MS) return@withContext cache
+
+        // 1. les codes des clips — on ne descend QUE dans les dossiers « clip ».
+        val clips = HashSet<String>()
+        fun lireClips(fid: String?) {
+            var page = 1
+            while (page <= 40) {
+                val p = HashMap<String, String>()
+                if (fid != null) p["fld_id"] = fid
+                p["page"] = "$page"
+                p["per_page"] = "250"
+                val res = get("/api/folder/list", p)?.optJSONObject("result") ?: return
+                if (page == 1) {
+                    val sous = res.optJSONArray("folders")
+                    for (i in 0 until (sous?.length() ?: 0)) {
+                        val o = sous?.optJSONObject(i) ?: continue
+                        val nom = java.text.Normalizer.normalize(o.optString("name"),
+                            java.text.Normalizer.Form.NFD)
+                            .replace(Regex("\\p{Mn}+"), "").lowercase()
+                        if (fid != null || nom.contains("clip")) lireClips(o.optString("fld_id"))
+                    }
+                }
+                val fic = res.optJSONObject("files")
+                val data = fic?.optJSONArray("data")
+                for (i in 0 until (data?.length() ?: 0)) {
+                    val o = data?.optJSONObject(i) ?: continue
+                    if (fid != null) clips += codeDe(o)
+                }
+                if (fic == null || fic.isNull("next_page_url")) break
+                page++
+            }
+        }
+        runCatching { lireClips(null) }
+
+        // 2. tous les fichiers, 250 par page.
+        val out = mutableListOf<Fichier>()
+        var page = 1
+        while (page <= 60) {
+            val r = get("/api/file/list", mapOf("page" to "$page", "per_page" to "250"))
+                ?.optJSONObject("result") ?: break
+            val data = r.optJSONArray("data") ?: break
+            for (i in 0 until data.length()) {
+                val o = data.optJSONObject(i) ?: continue
+                val code = codeDe(o)
+                if (code.isBlank()) continue
+                val nom = o.optString("title").ifBlank { o.optString("name") }
+                if (nom.isBlank()) continue
+                out += Fichier(
+                    code = code,
+                    nomBrut = nom,
+                    dossier = if (code in clips) "Clip vidéo musique" else "",
+                    poster = posterDe(o),
+                    dureeSec = o.optInt("length", 0),
+                )
+            }
+            if (r.isNull("next_page_url")) break
+            page++
+        }
+        if (out.isEmpty()) return@withContext cacheRapide
+        cacheRapide = out
+        cacheRapideTs = now
+        Log.d(TAG, "liste rapide : ${out.size} fichier(s), dont ${clips.size} clips")
+        out
+    }
+
     suspend fun serveursPour(
         tmdbId: String?,
         titresConnus: Collection<String>,
@@ -592,6 +859,19 @@ object VoeLibrary {
         titrePrincipal: String? = null,
         dureeMinSec: Int? = null,
         dureeMaxSec: Int? = null,
+        /**
+         * Saison et episode demandes. ⚠ 2026-08-19 (user « quand j'ai recherche
+         * la serie sur Movix elle n'a pas trouve le serveur ONYX avec Star
+         * Trek ») : c'etait LE trou. BackupRegistry connait la saison et
+         * l'episode depuis toujours (`Key(title, year, season, episode,
+         * isMovie)`) mais ne les transmettait pas ici. On comparait donc
+         * « Star Trek - S01E01 » au titre « Star Trek », et meme en cas de
+         * match on n'avait aucun moyen de designer LE bon episode parmi 79.
+         * Aucun rattachement de serie n'etait possible — ce n'etait pas un
+         * mauvais match, c'etait l'absence de l'information.
+         */
+        saison: Int = 0,
+        episode: Int = 0,
     ): List<Video.Server> {
         if (!actif) return emptyList()
         val fichiers = try {
@@ -606,7 +886,11 @@ object VoeLibrary {
             //   Ça ne change rien à leur lecture : ils restent visibles et lisibles dans le
             //   dossier « Clip vidéo musique » du TV Hub, c'est uniquement la recherche de
             //   serveurs VOD qui les ignore.
-            tout().filterNot { estUnClip(it) }
+            //   2026-08-19 : toutRapide() et non tout() — voir son commentaire.
+            //   tout() parcourait les 87 dossiers un par un (429 en cascade,
+            //   plusieurs minutes avant l'apparition du serveur ONYX) alors que
+            //   le rattachement n'a besoin que du code, du nom et de la durée.
+            toutRapide().filterNot { estUnClip(it) }
         } catch (e: Exception) {
             Log.w(TAG, "lecture bibliothèque KO : ${e.message}")
             return emptyList()
@@ -631,6 +915,30 @@ object VoeLibrary {
         if (exacts.isNotEmpty()) {
             Log.d(TAG, "rattachement par identifiant TMDB $tmdbId : ${exacts.size}")
             return exacts.map { serveurDe(it.code, "VOE") }
+        }
+
+        // ── EPISODE DE SERIE : le numero decide, pas le titre ────────────────
+        //   2026-08-19 — « Star Trek - S02E01 » ne peut pas ressembler a
+        //   « Star Trek » pour un comparateur de titres, et c'est normal : ce
+        //   n'est pas le meme objet. Pour un episode, la seule chose qui
+        //   identifie vraiment le fichier, c'est SxxExx. On s'appuie dessus, et
+        //   on ne garde que ce qui porte AUSSI le nom de la serie — sinon
+        //   « Fringe - S02E01 » repondrait pour Star Trek.
+        if (!estUnFilm && saison > 0 && episode > 0) {
+            val marque = Regex("(?i)s0*${saison}[ ._-]?e0*${episode}(?!\\d)")
+            val episodes = fichiers.filter { f ->
+                val propre = RE_ID_TETE.replace(f.titre, "")
+                marque.containsMatchIn(propre) &&
+                    motTeteCouvert(propre, titresConnus)
+            }
+            if (episodes.isNotEmpty()) {
+                Log.d(TAG, "rattachement episode S${saison}E${episode} : " +
+                    "${episodes.size} (${episodes.first().titre})")
+                return episodes.map { serveurDe(it.code, "VOE") }
+            }
+            Log.i(TAG, "aucun fichier pour S${saison}E${episode} de " +
+                "${titresConnus.firstOrNull()}")
+            return emptyList()
         }
 
         if (titresConnus.isEmpty()) return emptyList()

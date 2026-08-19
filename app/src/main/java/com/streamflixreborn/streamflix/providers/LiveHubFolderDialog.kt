@@ -249,6 +249,21 @@ object LiveHubFolderDialog {
         return "$group/$sub/$index"
     }
 
+    /** Un niveau de la bibliothèque perso : ses sous-dossiers puis ses films,
+     *  dans la même grille de jaquettes que les autres dossiers du hub. */
+    private fun afficherNiveau(
+        ctx: Context,
+        titre: String,
+        items: List<TvShow>,
+        onChannelSelected: (TvShow) -> Unit,
+    ) {
+        displayCategories(
+            ctx, titre,
+            listOf(Category(name = titre, list = items)),
+            onChannelSelected,
+        )
+    }
+
     fun show(
         ctx: Context,
         folderKey: String,
@@ -295,32 +310,52 @@ object LiveHubFolderDialog {
         //   voedir_ juste en dessous, avec le chemin racine (chaîne vide).
         //   Repli volontaire : tant que le cache n'est pas chargé, on laisse
         //   passer vers l'ancien affichage à plat — mieux qu'un dossier vide.
-        if (folderKey == "ma_bibliotheque" &&
-            com.streamflixreborn.streamflix.utils.VoeLibrary.cacheActuel().isNotEmpty()) {
+        // 2026-08-19 (user « le chargement du TV hub je trouve super long… le
+        //   chargement du dossier devrait être effectué qu'au clic dossier ») :
+        //   c'est ICI que la bibliothèque se charge désormais, plus dans getHome().
+        //   Cache chaud → ouverture immédiate, comme avant. Cache froid → on lit
+        //   VOE en tâche de fond puis on ouvre, au lieu de faire payer les 30 s
+        //   à l'accueil du hub (mesuré sur son Oppo, cf. VoeLibrary.sectionsSiDejaCharge).
+        //   `activeCtx` garde la fenêtre en vie ; si l'utilisateur a quitté entre-temps,
+        //   `isFinishing` évite d'ouvrir un dialogue sur une activité morte.
+        if (folderKey == "ma_bibliotheque") {
             show(ctx, "voedir_", folderName, onChannelSelected)
             return
         }
         if (folderKey.startsWith("voedir_")) {
             val chemin = folderKey.removePrefix("voedir_")
-            val (sousDossiers, films) =
-                com.streamflixreborn.streamflix.utils.VoeLibrary.enfantsDe(chemin)
-            if (sousDossiers.isEmpty() && films.isEmpty()) {
-                android.widget.Toast.makeText(
-                    ctx, "Dossier vide : $folderName", android.widget.Toast.LENGTH_SHORT
-                ).show()
+            val v = com.streamflixreborn.streamflix.utils.VoeLibrary
+            // Cache complet déjà chargé (préchauffage fini, ou on revient en
+            //   arrière) : affichage immédiat, sans toucher au réseau.
+            val (sousCache, filmsCache) = v.enfantsDe(chemin)
+            if (sousCache.isNotEmpty() || filmsCache.isNotEmpty()) {
+                afficherNiveau(ctx, folderName,
+                    sousCache.map { (c, n) -> v.tuileDossier(c, n) } +
+                        filmsCache.map { v.tuileFilm(it) },
+                    onChannelSelected)
                 return
             }
-            val items =
-                sousDossiers.map { (c, n) ->
-                    com.streamflixreborn.streamflix.utils.VoeLibrary.tuileDossier(c, n)
-                } + films.map {
-                    com.streamflixreborn.streamflix.utils.VoeLibrary.tuileFilm(it)
+            // 2026-08-19 (user « tu pouvais pas faire un chargement progressif
+            //   à l'intérieur, qu'il ait une ouverture rapide ? ») : sinon on
+            //   ne demande QUE ce dossier — une requête, ~0,6 s — au lieu de
+            //   charger les 2000 fichiers du compte pour afficher trois cartes.
+            val att = android.widget.Toast.makeText(
+                ctx, "Ouverture…", android.widget.Toast.LENGTH_SHORT)
+            att.show()
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                val n = runCatching { v.niveau(chemin) }.getOrNull()
+                att.cancel()
+                if ((ctx as? android.app.Activity)?.isFinishing == true) return@launch
+                val items = (n?.sousDossiers.orEmpty().map { (c, _) -> v.tuileDossier(c, -1) } +
+                    n?.fichiers.orEmpty().map { v.tuileFilm(it) })
+                if (items.isEmpty()) {
+                    android.widget.Toast.makeText(
+                        ctx, "Dossier vide : $folderName",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                    return@launch
                 }
-            displayCategories(
-                ctx, folderName,
-                listOf(Category(name = folderName, list = items)),
-                onChannelSelected,
-            )
+                afficherNiveau(ctx, folderName, items, onChannelSelected)
+            }
             return
         }
         if (folderKey.startsWith("wlsub_")) {
