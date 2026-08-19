@@ -756,8 +756,22 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   personnel arrivent comme sections « Ma bibliothèque - <dossier VOE> »,
         //   captées juste après par la FolderDef "ma_bibliotheque".
         //   Clé API vide ⇒ liste vide ⇒ aucun appel réseau, aucun dossier affiché.
+        // 2026-08-19 (user « le chargement du TV hub je trouve super long depuis
+        //   qu'on a ajouté notre dossier films série… alors que le chargement du
+        //   dossier devrait être effectué qu'au clic dossier ») : il avait raison,
+        //   et son Oppo l'a chiffré — `getHome: built+cached 5 sections in 30606ms`.
+        //   L'appel d'avant était `VoeLibrary.sections()`, qui déclenche `tout()` :
+        //   parcours récursif de TOUTE l'arborescence VOE (une requête par dossier
+        //   ET par page), pagination de tous les fichiers du compte, 429 avec
+        //   attentes bloquantes, puis une tuile par fichier (1386 ce jour-là).
+        //   Or l'accueil n'affiche qu'UNE carte « 📁 Film / série », et elle est
+        //   déjà rendue sans condition par `alwaysShowKeys` (plus bas) qui ne teste
+        //   que « la clé API est renseignée » — zéro réseau.
+        //   On ne prend donc plus QUE ce qui est déjà en mémoire : accueil instantané
+        //   quand le cache est froid, contenu complet quand il est chaud. Le vrai
+        //   chargement se fait au clic, dans LiveHubFolderDialog.
         val sectionsAvecVoe = sections + try {
-            com.streamflixreborn.streamflix.utils.VoeLibrary.sections()
+            com.streamflixreborn.streamflix.utils.VoeLibrary.sectionsSiDejaCharge()
         } catch (e: Exception) {
             Log.w(TAG, "Ma bibliothèque KO : ${e.message}"); emptyList()
         }
@@ -789,6 +803,15 @@ object LiveTvHubProvider : Provider, IptvProvider {
         cachedHomeSignature = sig
         cachedHomeAt = System.currentTimeMillis()
         Log.d(TAG, "getHome: built+cached ${foldered.size} sections (dossier Rutube rangé avec les autres) in ${System.currentTimeMillis() - tHomeStart}ms (TTL 60s)")
+        // 2026-08-19 (user « au pire le dossier on peut le précharger une fois que le
+        //   home a démarré, ça évite de cliquer dessus et ça ralentit pas l'ouverture ?
+        //   … parce que je sens que ça va être chiant à ouvrir sinon ») : oui, et c'est
+        //   la bonne place — APRÈS le `return` logique, une fois l'accueil construit et
+        //   mis en cache. Rien n'est attendu ici : `prechauffer()` part sur son propre
+        //   scope et rend la main tout de suite. L'accueil reste instantané, et quand
+        //   l'utilisateur clique sur « Film / série » quelques secondes plus tard, le
+        //   cache est déjà chaud → ouverture immédiate, sans le toast d'attente.
+        com.streamflixreborn.streamflix.utils.VoeLibrary.prechauffer()
         return foldered
     }
 
@@ -1401,8 +1424,15 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   perso passe EN TÊTE des résultats — c'est notre propre copie, elle est
         //   toujours plus pertinente qu'un replay homonyme. Lecture depuis le cache
         //   de VoeLibrary (10 min), donc pas d'appel réseau à chaque frappe.
+        // 2026-08-19 : depuis que l'accueil ne charge plus la bibliothèque
+        //   (user « à la première ouverture il ne devrait pas impacter »), le cache
+        //   peut être froid ici. On accepte d'attendre 5 s au plus : au-delà, la
+        //   recherche répond sans la bibliothèque plutôt que de figer l'écran —
+        //   le chargement continue en fond, la frappe suivante en profitera.
         val voeHits = try {
-            com.streamflixreborn.streamflix.utils.VoeLibrary.tout()
+            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                com.streamflixreborn.streamflix.utils.VoeLibrary.tout()
+            }.orEmpty()
                 // On cherche dans titreAffiche (sans l'identifiant TMDB) : taper
                 //   « mojave » doit trouver « 237584 - Mojave.avi ». Chercher dans
                 //   `titre` marcherait aussi, mais un utilisateur qui tape un

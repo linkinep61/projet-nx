@@ -179,6 +179,23 @@ object RadioPickerDialog {
          */
         var generationRecherche = 0
 
+        /**
+         * Numéro du dernier titre cliqué.
+         *
+         * ⚠ DÉFAUT QUE J'AI MOI-MÊME INTRODUIT le 2026-08-21, signalé aussitôt par le
+         *   user : « quand je change de musique, des fois il rejoue la même ».
+         *
+         * En résolvant le morceau AVANT de lancer la lecture (correctif du saut
+         * silencieux), j'ai créé un délai entre le clic et la lecture. Deux clics
+         * rapprochés lancent donc deux résolutions en parallèle, et c'est celle qui
+         * FINIT la dernière qui commande le lecteur — pas celle qu'on a demandée en
+         * dernier. Résultat : le morceau précédent repart.
+         *
+         * Même remède que pour la recherche : chaque clic prend un numéro, et une
+         * résolution qui revient avec un numéro périmé ne touche plus au lecteur.
+         */
+        var generationClicMusique = 0
+
 
         // Titre du niveau courant (nom d'artiste, d'album, état de recherche…). Quand il est
         //   renseigné il prime sur l'en-tête générique « Musique » — sinon `refresh()` l'écraserait
@@ -1145,7 +1162,81 @@ object RadioPickerDialog {
                         val queue = jouables.map { st -> st.streamUrl!! to st.name }
                         if (queue.isEmpty()) return@setOnItemClickListener
                         val pos = jouables.indexOfFirst { it.id == r.id }.coerceAtLeast(0)
-                        mp.playMusicPlaylist(queue, pos, musicShuffle)
+
+                        // ══════════════════════════════════════════════════════════════
+                        // ⚠ ON RÉSOUT LE TITRE CLIQUÉ AVANT DE LANCER LA LECTURE.
+                        //
+                        // user 2026-08-21 : « je clique sur Overflow et il passe à la
+                        //   lecture suivante sans rien demander », puis « au lieu de
+                        //   résoudre la musique que j'ai cliquée ».
+                        //
+                        // POURQUOI ÇA SAUTAIT. On donnait au lecteur toute la file d'URL
+                        // `youtube.com/watch?v=…`, résolues PARESSEUSEMENT par
+                        // ResolvingDataSource, donc SUR LE FIL DE CHARGEMENT D'ExoPlayer.
+                        // Ce fil est interrompu dès qu'une tâche de l'écran se termine
+                        // (la recherche qui se poursuit en arrière-plan) — le journal le
+                        // montre : « InterruptedIOException — interrupted » en moins
+                        // d'une demi-seconde, alors qu'un vrai appel réseau en prend
+                        // une à trois. ExoPlayer conclut « piste illisible » et
+                        // ENCHAÎNE SUR LA SUIVANTE, sans rien dire.
+                        //
+                        // C'est aussi ce qui expliquait que le même morceau marche
+                        // depuis les FAVORIS : là, aucune recherche ne tourne en
+                        // parallèle, donc rien n'interrompt.
+                        //
+                        // On résout donc ici, sur notre propre fil, que rien n'annule.
+                        // Le résultat est mis en cache par NewPipeAudio, si bien que la
+                        // résolution paresseuse du lecteur le retrouve instantanément :
+                        // plus aucune fenêtre pendant laquelle l'interruption peut
+                        // frapper le titre choisi.
+                        //
+                        // ⚠ Et si ça échoue vraiment, ON LE DIT. Passer silencieusement
+                        //   au titre suivant est le pire des comportements : on croit
+                        //   l'application cassée alors qu'elle a « décidé » toute seule.
+                        // ══════════════════════════════════════════════════════════════
+                        val urlChoisie = queue[pos].first
+                        if (com.streamflixreborn.streamflix.providers.NewPipeAudio
+                                .isYouTubeUrl(urlChoisie)) {
+                            // ⚠ Jeton de clic : voir `generationClicMusique`. Sans lui,
+                            //   deux clics rapprochés font gagner la résolution la plus
+                            //   LENTE, donc le morceau précédent repart.
+                            val genClic = ++generationClicMusique
+                            android.util.Log.i(
+                                "RadioPicker",
+                                "clic #$genClic sur « ${r.name} » (pos=$pos/${queue.size}, " +
+                                    "id=${com.streamflixreborn.streamflix.providers.NewPipeAudio
+                                        .videoIdOf(urlChoisie)}, " +
+                                    "file[pos]=« ${queue[pos].second} ») → résolution")
+                            kotlin.concurrent.thread {
+                                val resolue = try {
+                                    com.streamflixreborn.streamflix.providers.NewPipeAudio
+                                        .resolveAudioUrl(urlChoisie)
+                                } catch (_: Throwable) { null }
+                                searchInput.post {
+                                    if (genClic != generationClicMusique) {
+                                        android.util.Log.i(
+                                            "RadioPicker",
+                                            "clic #$genClic périmé (dernier = " +
+                                                "$generationClicMusique) → ignoré")
+                                        return@post
+                                    }
+                                    android.util.Log.i(
+                                        "RadioPicker",
+                                        "clic #$genClic résolu=${!resolue.isNullOrBlank()} " +
+                                            "→ lecture pos=$pos « ${r.name} »")
+                                    if (resolue.isNullOrBlank()) {
+                                        Toast.makeText(
+                                            ctx, "« ${r.name} » n'a pas pu être lu",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    } else {
+                                        mp.playMusicPlaylist(queue, pos, musicShuffle)
+                                    }
+                                }
+                            }
+                        } else {
+                            mp.playMusicPlaylist(queue, pos, musicShuffle)
+                        }
                     } else if (r.streamUrl != null) {
                         mp.initPlayer(ctx)
                         mp.playRadioDirect(r.id, r.name, r.poster, r.streamUrl, r.fallbackUrls)

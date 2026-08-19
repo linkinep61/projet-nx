@@ -96,6 +96,50 @@ abstract class Extractor {
                 }
                 .build()
 
+        /**
+         * Client réservé au TÉLÉCHARGEMENT de gros corps (segments HLS, fichiers directs).
+         *
+         * ══════════════════════════════════════════════════════════════════════════
+         * POURQUOI IL EXISTE — user 2026-08-21 : « pourquoi le chargement se coupe
+         *   comme ça ? on a mis une reprise automatique c'est bien, mais pourquoi ils
+         *   coupent ».
+         *
+         * Ce n'était PAS le serveur. La trace le prouve :
+         *     java.io.InterruptedIOException: timeout
+         *         at okhttp3.internal.connection.RealCall.timeoutExit
+         *     Caused by: java.net.SocketException: Socket closed
+         * `timeoutExit` + « Socket closed » = c'est NOTRE `callTimeout` qui ferme la
+         * socket. Un vrai lâchage serveur donnerait un SocketTimeoutException ou un
+         * ConnectionReset.
+         *
+         * ⚠ LA DIFFÉRENCE QUI TUE : `readTimeout` compte le temps SANS AUCUN octet
+         *   reçu ; `callTimeout` plafonne l'appel ENTIER, corps compris. Avec 30 s de
+         *   callTimeout, un segment HLS de ~7 Mo tiré à 4 en parallèle (donc ~500 Ko/s
+         *   chacun) met ~14 s dans de bonnes conditions — et dépasse les 30 s dès que
+         *   le débit faiblit. La socket était tuée EN PLEIN TRANSFERT, alors que tout
+         *   allait bien. Le journal le dit : « coupure (timeout) — reprise 1/20,
+         *   0 Mo déjà écrits ».
+         *
+         * ⚠ NE PAS SUPPRIMER LE callTimeout DE `sharedClient` POUR AUTANT. Il a été
+         *   ajouté le 2026-07-07 pour une vraie raison : sans lui, un appel figé dans
+         *   execute() ne se libérait jamais et la Chromecast se bloquait en permanence.
+         *   Le défaut était qu'un seul réglage servait deux usages opposés — interroger
+         *   un serveur (réponse courte) et télécharger une vidéo (plusieurs Mo). D'où
+         *   ce second client : les extracteurs gardent leurs 30 s, les téléchargements
+         *   ont le leur.
+         *
+         * Ce qui protège encore ici : `readTimeout` à 60 s. Un flux réellement mort
+         * est donc toujours coupé — mais un flux lent, non.
+         * ══════════════════════════════════════════════════════════════════════════
+         */
+        val downloadClient: OkHttpClient by lazy {
+            sharedClient.newBuilder()
+                .readTimeout(60, TimeUnit.SECONDS)
+                .callTimeout(0, TimeUnit.MILLISECONDS)   // 0 = aucun plafond global
+                .cache(null)                             // inutile de cacher 900 Mo
+                .build()
+        }
+
         /** Build a Retrofit with JsoupConverterFactory. */
         fun jsoupRetrofit(baseUrl: String, client: OkHttpClient = sharedClient): Retrofit =
             Retrofit.Builder()

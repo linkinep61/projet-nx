@@ -180,6 +180,64 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         return attendus.any { it == declare }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════════════
+    // CONTRÔLE D'IDENTITÉ CPASMAL — 2026-08-20 (user « ET MOVIX un mauvais match »)
+    //
+    // Sur un épisode de Star Trek 1966 (TMDB tv 253, S01E03), l'app affichait 10 serveurs
+    //   Movix (5 VF + 5 VOSTFR) qui lisaient une AUTRE série. Relevé en direct sur l'API
+    //   (tools/test_movix_253.py) :
+    //     GET api.movix.fun/api/cpasmal/tv/253/1/3
+    //     {"title":"Star Trek","year":"1966",
+    //      "cpasmalUrl":"https://www.cpasmal.rip/19695-star-trek-starfleet-academy.html",
+    //      "links":{"vf":[5],"vostfr":[5]}}
+    //   Les 10 URLs correspondaient exactement à celles du journal de l'Oppo. L'œuvre
+    //   réellement servie est « Star Trek: Starfleet Academy » (2025).
+    //
+    // POURQUOI PAS `title` NI `year`. Ils valent « Star Trek » et « 1966 » : l'API les
+    //   recopie de TMDB. Ils décrivent la DEMANDE, pas la RÉPONSE. Les contrôler revient
+    //   à comparer une chaîne avec elle-même — ça passe toujours.
+    //
+    // POURQUOI UNE ÉGALITÉ ET PAS UN « CONTAINS ». Le slug servi
+    //   (« star trek starfleet academy ») CONTIENT le titre demandé (« star trek »).
+    //   Même leçon que La Quatrième Dimension 1959/2019 plus haut : seule l'égalité tranche.
+    //
+    // POURQUOI ON RETIRE DES MARQUEURS AVANT DE COMPARER. Les slugs cpasmal portent
+    //   souvent « -saison-1 », « -vostfr », « -1966 » — présents sur le BON contenu aussi.
+    //   Les garder ferait échouer des matchs légitimes. Ils sont retirés des deux côtés.
+    //
+    // FAIL-OPEN ASSUMÉ : slug illisible ou absent → on garde. On ne supprime que sur une
+    //   contradiction explicite, jamais sur un doute.
+    // ══════════════════════════════════════════════════════════════════════════════════
+
+    /** Marqueurs de langue / position / qualité présents dans les slugs cpasmal. */
+    private val MARQUEURS_SLUG = Regex(
+        "(?i)\\b(saison\\s*\\d{1,3}|s\\d{1,3}e?\\d{0,3}|\\d{1,3}x\\d{1,3}|episode\\s*\\d+|" +
+            "vostfr|vost|vf|truefrench|french|multi|streaming|complet|complete|" +
+            "integrale|hd|4k|1080p|720p|\\d{4})\\b",
+    )
+
+    /** Nom de l'œuvre tel qu'il apparaît dans l'URL cpasmal servie.
+     *  `…/19695-star-trek-starfleet-academy.html` → `star trek starfleet academy`. */
+    private fun oeuvreDansSlugCpasmal(url: String?): String {
+        if (url.isNullOrBlank()) return ""
+        val fichier = url.substringBefore('?').substringAfterLast('/').removeSuffix(".html")
+        val sansId = fichier.replaceFirst(Regex("^\\d+-"), "")
+        val n = MARQUEURS_SLUG.replace(normTitre(sansId.replace('-', ' ')), " ")
+        return n.replace(Regex("\\s+"), " ").trim()
+    }
+
+    /** L'URL cpasmal servie désigne-t-elle bien l'œuvre demandée ?
+     *  @return `true` si on garde (correspondance, ou information absente). */
+    private fun slugCpasmalCorrespond(url: String?, titresConnus: List<String?>): Boolean {
+        val declare = oeuvreDansSlugCpasmal(url)
+        if (declare.isBlank()) return true
+        val attendus = titresConnus.filterNotNull()
+            .map { MARQUEURS_SLUG.replace(normTitre(it), " ").replace(Regex("\\s+"), " ").trim() }
+            .filter { it.isNotBlank() }.distinct()
+        if (attendus.isEmpty()) return true
+        return attendus.any { it == declare }
+    }
+
     private const val TMDB_API_KEY = "f3d757824f08ea2cff45eb8f47ca3a1e"
     private const val TMDB_BASE_URL = "https://api.themoviedb.org/3/"
     private const val TMDB_IMG_W500 = "https://image.tmdb.org/t/p/w500"
@@ -812,13 +870,20 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val url: String?
     )
 
+    // ⚠ 2026-08-20 : `cpasmalUrl` est le SEUL champ qui trahit une mauvaise œuvre.
+    //   `title` et `year` sont recopiés de TMDB par l'API movix — ils décrivent ce
+    //   qu'on a DEMANDÉ, jamais ce qui est SERVI. Voir slugCpasmalCorrespond().
     data class CpasmalResponse(
         val title: String?,
+        val year: String?,
+        val cpasmalUrl: String?,
         val links: Map<String, List<CpasmalLink>>?
     )
 
     data class CpasmalMovieResponse(
         val title: String?,
+        val year: String?,
+        val cpasmalUrl: String?,
         val links: Map<String, List<CpasmalLink>>?
     )
 
@@ -2550,6 +2615,24 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         runEndpoint("cpasmal-movie") {
                             val cpasmal = movixServiceInstance.getCpasmalMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
+                            // CONTRÔLE D'IDENTITÉ (cf. pavé slugCpasmalCorrespond).
+                            //   Posé aussi côté film : rien ne garantit que le mauvais
+                            //   rattachement observé sur les séries épargne les films.
+                            if (!slugCpasmalCorrespond(
+                                    cpasmal.cpasmalUrl,
+                                    listOf((videoType as? Video.Type.Movie)?.title, cpasmal.title),
+                                )
+                            ) {
+                                Log.w(
+                                    "MovixProvider",
+                                    "cpasmal-movie ÉCARTÉ — mauvaise œuvre. Demandé " +
+                                        "« ${(videoType as? Video.Type.Movie)?.title} » (tmdb=$tmdbId), " +
+                                        "cpasmal sert « ${oeuvreDansSlugCpasmal(cpasmal.cpasmalUrl)} » " +
+                                        "(${cpasmal.cpasmalUrl}) → " +
+                                        "${cpasmal.links?.values?.sumOf { it.size } ?: 0} lecteur(s) supprimé(s)",
+                                )
+                                return@runEndpoint list
+                            }
                             cpasmal.links?.forEach { (lang, links) ->
                                 val displayLang = formatLang(lang)
                                 links.forEach { link ->
@@ -2872,6 +2955,23 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         runEndpoint("cpasmal-tv") {
                             val cpasmal = movixServiceInstance.getCpasmalTv(tmdbId, seasonNum, episodeNum)
                             val list = mutableListOf<Video.Server>()
+                            // CONTRÔLE D'IDENTITÉ (cf. pavé slugCpasmalCorrespond).
+                            if (!slugCpasmalCorrespond(
+                                    cpasmal.cpasmalUrl,
+                                    listOf(videoType.tvShow.title, cpasmal.title),
+                                )
+                            ) {
+                                Log.w(
+                                    "MovixProvider",
+                                    "cpasmal-tv ÉCARTÉ — mauvaise œuvre. Demandé " +
+                                        "« ${videoType.tvShow.title} » (tmdb=$tmdbId, " +
+                                        "S${seasonNum}E$episodeNum), cpasmal sert " +
+                                        "« ${oeuvreDansSlugCpasmal(cpasmal.cpasmalUrl)} » " +
+                                        "(${cpasmal.cpasmalUrl}) → " +
+                                        "${cpasmal.links?.values?.sumOf { it.size } ?: 0} lecteur(s) supprimé(s)",
+                                )
+                                return@runEndpoint list
+                            }
                             cpasmal.links?.forEach { (lang, links) ->
                                 val displayLang = formatLang(lang)
                                 links.forEach { link ->

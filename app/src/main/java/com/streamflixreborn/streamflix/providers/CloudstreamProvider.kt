@@ -592,10 +592,19 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         return n
     }
 
-    private suspend fun findSubjectId(title: String, year: Int? = null): String? {
+    /** Types MovieBox+ relevés le 2026-08-20 sur une recherche « Star Trek » :
+     *  1 = film, 2 = série. 5/6/9 = shorts, clips, extraits, jeux — jamais du VOD. */
+    private const val TYPE_FILM = 1
+    private const val TYPE_SERIE = 2
+
+    /**
+     * @param typeAttendu TYPE_FILM, TYPE_SERIE, ou 0 pour « peu importe ».
+     */
+    private suspend fun findSubjectId(title: String, year: Int? = null,
+                                      typeAttendu: Int = 0): String? {
         val cleanQuery = TitleNormalizer.cleanForTmdbSearch(title).ifBlank { title }
         val normQuery = normalizeForMatch(cleanQuery)
-        val cacheKey = "$normQuery|${year ?: 0}"
+        val cacheKey = "$normQuery|${year ?: 0}|$typeAttendu"
         tmdbToSubjectIdCache[cacheKey]?.let { return it.ifBlank { null } }
 
         // 2026-07-08 : endpoint v2 (v1 deprecated). page=1 (v2 est 1-indexed).
@@ -646,9 +655,46 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             val itTitle = s.optString("title")
             val cleanIt = itTitle.replace(LANG_SUFFIX_REGEX, "").trim()
             val itYear = s.optString("releaseDate").take(4).toIntOrNull() ?: 0
-            val itType = s.optInt("subjectType", 1)
+            // 0 = type absent de la réponse → inconnu, on ne l'écarte pas.
+            val itType = if (s.has("subjectType")) s.optInt("subjectType", 0) else 0
             candidates.add(Candidate(sid, cleanIt, normalizeForMatch(cleanIt), itYear, itType))
         }
+
+        // ⚠ 2026-08-20 (user « t'as récupéré 2 mauvais matchs avec Cloudstream ») —
+        //   GARDE DE TYPE, NE PAS LA RETIRER.
+        //   `subjectType` était lu depuis 2026-07 et rangé dans Candidate… puis JAMAIS
+        //   utilisé par aucune des 5 étapes de matching. Résultat mesuré sur « Star Trek »
+        //   (script tools/test_moviebox_type.py, api6.aoneroom.com, 22 résultats) :
+        //     0  type 1  2009  Star Trek [Hindi]   ← film
+        //     1  type 1  2009  Star Trek           ← film
+        //     2  type 2  1966  Star Trek           ← LA série demandée
+        //   Pour un épisode, `year` vaut `videoType.tvShow.releaseDate?...` — souvent NUL.
+        //   L'étape 1 (exact+année) est donc sautée, l'étape 2 accepte `year == null`,
+        //   et elle prend le PREMIER titre exact : le film de 2009. D'où deux serveurs
+        //   720p/1080p qui lisent le film sur un épisode de la série de 1966.
+        //   Même famille de piège que les identifiants TMDB film/série (cf. VoeLibrary).
+        //   Touche tout homonyme film/série : Star Trek, Fargo, Westworld, Le Prisonnier…
+        //   Bonus : écarte aussi les types 5/6/9 (clips, extraits, jeux) qui polluaient
+        //   les recherches à titre court.
+        //   2026-08-20, 2e passe (user « LOG TROP PERMISSIVE ») : la garde était
+        //   STRICTE, sans échappatoire. Première version : on laissait passer les
+        //   candidats sans `subjectType` (valeur 0). Mesuré avec
+        //   tools/test_moviebox_type.py : « Star Trek » 22/22 résultats et « Fargo »
+        //   16/16 portent tous un subjectType. L'échappatoire ne couvrait donc AUCUN
+        //   cas réel — elle ne servait qu'à laisser le bug revenir en silence le jour
+        //   où MovieBox+ omet le champ. Type inconnu = candidat REFUSÉ.
+        if (typeAttendu != 0) {
+            val avant = candidates.size
+            val rejetes = candidates.filter { it.subjectType != typeAttendu }
+            candidates.retainAll { it.subjectType == typeAttendu }
+            Log.d(TAG, "findSubjectId('$cleanQuery') : garde de type ($typeAttendu) → " +
+                "${candidates.size}/$avant retenu(s)" +
+                if (rejetes.isEmpty()) ""
+                else ", écartés : " + rejetes.joinToString(", ") {
+                    "${it.cleanTitle}(t=${it.subjectType},${it.year})"
+                })
+        }
+
         if (candidates.isEmpty()) {
             tmdbToSubjectIdCache[cacheKey] = ""
             Log.d(TAG, "findSubjectId('$cleanQuery' year=$year): 0 candidates")
@@ -1861,8 +1907,11 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                         }
                     }
                     var matched = queryTitle
+                    // 2026-08-20 : on dit à findSubjectId CE QU'ON CHERCHE. Sans ça, un
+                    //   épisode de série pouvait tomber sur le film homonyme (Star Trek).
+                    val typeAttendu = if (videoType is Video.Type.Movie) TYPE_FILM else TYPE_SERIE
                     for (t in titles) {
-                        subjectId = findSubjectId(t, year)
+                        subjectId = findSubjectId(t, year, typeAttendu)
                         if (!subjectId.isNullOrBlank()) { matched = t; break }
                     }
                     if (subjectId.isNullOrBlank()) {
@@ -1873,6 +1922,26 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                 } else {
                     Log.d(TAG, "getServers : titre vide pour $id")
                 }
+            }
+        }
+
+        // ⚠ 2026-08-20 (user « et sur le mauvais épisode ? » → « LES 2 ») —
+        //   FILET DE SÉCURITÉ SAISON/ÉPISODE. NE PAS RETIRER.
+        //   Preuve par les empreintes de fichiers : sur « Charlie X » (S01E02), le
+        //   lecteur a chargé `d0956a3c…mp4` et `7983aa02…mp4` — qui sont, relevés en
+        //   direct sur l'API (tools/test_moviebox_playinfo.py), les fichiers de
+        //   l'ÉPISODE 1. Bon sujet, bonne série, mauvais épisode.
+        //   Cause : le `when` ci-dessus ne renseigne se/ep que pour `cs::ep::…` et pour
+        //   les identifiants TMDB. Avec `cs::s::…` ou `cs::m::…` ils restent à 0, et
+        //   `/play-info` est alors appelé SANS `se` ni `ep` — MovieBox+ répond par
+        //   défaut l'épisode 1, sans erreur ni avertissement. Une dégradation muette
+        //   qui donne un flux parfaitement lisible… du mauvais épisode.
+        if (videoType is Video.Type.Episode) {
+            if (se <= 0) se = videoType.season.number
+            if (ep <= 0) ep = videoType.number
+            if (se <= 0 || ep <= 0) {
+                Log.w(TAG, "getServers $id : épisode sans saison/numéro exploitable " +
+                    "(se=$se ep=$ep) — on n'interroge pas MovieBox+, il servirait l'épisode 1")
             }
         }
 

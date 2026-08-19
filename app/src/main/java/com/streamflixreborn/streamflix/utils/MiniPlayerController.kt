@@ -586,7 +586,11 @@ object MiniPlayerController {
             currentChannelPoster = null
             _state.value = State.Playing("music::$url", title, null)
             try { appContext?.let { rememberLastRadio(it, "music::$url", title, null, url) } } catch (_: Throwable) {}
-            Log.d(TAG, "music transition → $title")
+            // 2026-08-21 (bug user « je tape sur un titre, il en joue un autre ») : on veut
+            //   savoir SUR QUEL INDEX le lecteur se trouve réellement et POURQUOI il y est
+            //   allé. reason : 0=REPEAT/auto, 1=AUTO (fin de piste), 2=SEEK, 3=liste modifiée.
+            val idx = try { player?.currentMediaItemIndex ?: -1 } catch (_: Throwable) { -1 }
+            Log.i(TAG, "music transition → idx=$idx « $title » (reason=$reason) url=${url.takeLast(20)}")
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -596,7 +600,15 @@ object MiniPlayerController {
                 try {
                     val p = player
                     if (p != null && p.hasNextMediaItem()) {
-                        Log.w(TAG, "Music track KO → skip suivant: ${error.message}")
+                        // 2026-08-21 : on trace CE QUI a échoué — c'est le candidat n°1 pour
+                        //   « il joue un autre titre » : le morceau demandé casse au chargement
+                        //   et on enchaîne en silence sur le suivant.
+                        val idxKo = try { p.currentMediaItemIndex } catch (_: Throwable) { -1 }
+                        val titreKo = try {
+                            p.currentMediaItem?.mediaMetadata?.title?.toString()
+                        } catch (_: Throwable) { null }
+                        Log.w(TAG, "Music track KO idx=$idxKo « $titreKo » → skip suivant: " +
+                            "${error.errorCodeName} ${error.message}")
                         p.seekToNextMediaItem(); p.prepare(); p.playWhenReady = true
                         return
                     }
@@ -960,7 +972,12 @@ object MiniPlayerController {
                         curChIdForBuf.startsWith("match::") || curChIdForBuf.startsWith("vavoo::") ||
                         curChIdForBuf.startsWith("myiptv-live::")
                     )
-                    if (!isLiveIptvForBuf) {
+                    if (musicPlaylistActive) {
+                        // 2026-08-21 : une playlist musique n'a NI serveurs alternatifs NI
+                        //   flux de secours — `tryNextServer` n'aurait rien à essayer et
+                        //   `recordHostFail` blacklisterait le CDN de YouTube. On laisse
+                        //   simplement la piste se charger ; onPlayerError fait le reste.
+                    } else if (!isLiveIptvForBuf) {
                         // Start a watchdog: if buffering doesn't reach READY within
                         // BUFFERING_WATCHDOG_MS, force-failover. ExoPlayer can otherwise hang
                         // on a stream that returns headers but no segments.
@@ -1002,7 +1019,31 @@ object MiniPlayerController {
                     //   après un seek est normal, pas un stream mort.
                     val isReplayMini = currentChannelId?.contains("replay") == true
                     val sinceLastSwapAtBuf = System.currentTimeMillis() - lastSwapTimestampMs
-                    if (!isReplayMini && hasBackup && sinceLastSwapAtBuf >= SWAP_RECENT_COOLDOWN_MS) {
+                    // ══════════════════════════════════════════════════════════════════
+                    // 2026-08-21 — BUG « je clique sur Overflow, il joue Two Faced ».
+                    //
+                    // Ce JUMELAGE est un mécanisme IPTV : « le flux met plus de 500 ms à
+                    // se remplir → il est mort → bascule sur l'élément SUIVANT de la file,
+                    // qui est le MÊME programme sur un autre serveur ».
+                    //
+                    // Dans une PLAYLIST MUSICALE, l'élément suivant n'est pas un secours :
+                    // c'est LE MORCEAU D'APRÈS. Et une piste YouTube met 1 à 3 secondes à
+                    // démarrer (résolution + CDN), donc les 500 ms étaient TOUJOURS
+                    // dépassées : le lecteur sautait systématiquement au titre suivant,
+                    // une demi-seconde après le clic. Journal du 21/08 :
+                    //   44.682 ouverture piste SlVa6DK_Kqw  (Overflow, le titre cliqué)
+                    //   45.211 JUMELAGE: primary stuck buffering 500ms swap to backup
+                    //   45.216 transition → idx=7 « Two Faced »
+                    //
+                    // C'est aussi ce qui expliquait que le même morceau marche DEPUIS LES
+                    // FAVORIS : il y était déjà résolu et en cache, donc il démarrait sous
+                    // les 500 ms et la bascule ne se déclenchait pas.
+                    //
+                    // Une playlist musique a son propre filet (onPlayerError → piste
+                    // suivante) : elle n'a rien à faire ici.
+                    // ══════════════════════════════════════════════════════════════════
+                    if (!musicPlaylistActive &&
+                        !isReplayMini && hasBackup && sinceLastSwapAtBuf >= SWAP_RECENT_COOLDOWN_MS) {
                         scope.launch {
                             delay(BUFFERING_SWAP_THRESHOLD_MS)
                             val p2 = player ?: return@launch
@@ -2470,6 +2511,11 @@ object MiniPlayerController {
                         val u = dataSpec.uri.toString()
                         if (com.streamflixreborn.streamflix.providers.NewPipeAudio.isYouTubeUrl(u)) {
                             val real = com.streamflixreborn.streamflix.providers.NewPipeAudio.resolveAudioUrl(u)
+                            // 2026-08-21 : trace de VÉRITÉ — quelle vidéo le lecteur ouvre-t-il
+                            //   vraiment ? Si l'identifiant n'est pas celui du titre cliqué, le
+                            //   problème est dans l'index de départ, pas dans la résolution.
+                            Log.i(TAG, "ouverture piste ${com.streamflixreborn.streamflix.providers
+                                .NewPipeAudio.videoIdOf(u)} → résolue=${!real.isNullOrBlank()}")
                             if (!real.isNullOrBlank()) dataSpec.withUri(android.net.Uri.parse(real)) else dataSpec
                         } else dataSpec
                     }
@@ -2482,7 +2528,15 @@ object MiniPlayerController {
                 }
                 p.prepare()
                 p.playWhenReady = true
-                Log.d(TAG, "playMusicPlaylist: prepared ${items.size} items (loop+shuffle=$shuffle)")
+                // 2026-08-21 : on compare CE QU'ON A DEMANDÉ (start / startTrack) à CE QUE LE
+                //   LECTEUR A RETENU (currentMediaItemIndex + titre courant). S'ils diffèrent,
+                //   le coupable est ici ; s'ils concordent, c'est plus loin (erreur → saut).
+                val idxReel = try { p.currentMediaItemIndex } catch (_: Throwable) { -1 }
+                val titreReel = try {
+                    p.currentMediaItem?.mediaMetadata?.title?.toString()
+                } catch (_: Throwable) { null }
+                Log.i(TAG, "playMusicPlaylist: demandé start=$start « ${startTrack.second} » | " +
+                    "lecteur idx=$idxReel « $titreReel » (${items.size} items, shuffle=$shuffle)")
             } catch (t: Throwable) {
                 Log.w(TAG, "playMusicPlaylist failed: ${t.message}")
                 _state.value = State.Error(currentChannelId ?: "music", t.message ?: "Erreur lecture musique")

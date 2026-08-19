@@ -4,6 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
@@ -161,11 +165,21 @@ object DownloadManager {
         val type: String
         val fileName: String
 
-        // Use .ts extension for HLS downloads (concatenated TS segments need TS container)
+        // ⚠ 2026-08-20 — TOUT SORT EN .mp4, Y COMPRIS LE HLS. NE PAS REVENIR À .ts.
+        //   Avant : « .ts pour le HLS, car les segments concaténés exigent un conteneur TS ».
+        //   C'était vrai tant qu'on se contentait de coller les segments bout à bout.
+        //   Depuis, les segments sont MUXÉS dans un MP4 au moment de l'assemblage
+        //   (voir `assemblerEnMp4`) — sans ré-encodage, donc sans perte ni coût.
+        //   Raison du changement, mesurée : VOE refuse les .ts. L'envoi montait 1,3 Go
+        //   entier puis répondait « File type not allowed ». Or le HLS couvre VOE lui-même,
+        //   Movix·Voe et la plupart des serveurs en m3u8 — donc l'essentiel de ce que le
+        //   user veut remettre en ligne pour ajouter des serveurs.
+        //   Les deux cas qui restent en .ts rectifient le nom eux-mêmes : l'enregistrement
+        //   direct (flux sans fin) et l'échec de muxage (repli sûr).
         val isHls = video.type?.contains("mpegURL", ignoreCase = true) == true
                 || video.type?.contains("m3u8", ignoreCase = true) == true
                 || video.source.contains(".m3u8", ignoreCase = true)
-        val ext = if (isHls) "ts" else "mp4"
+        val ext = "mp4"
 
         when (videoType) {
             is Video.Type.Movie -> {
@@ -174,7 +188,14 @@ object DownloadManager {
                 subtitle = serverName.ifBlank { null }
                 poster = videoType.poster
                 type = "movie"
-                fileName = sanitizeFileName("${videoType.title}_${serverTag}.$ext")
+                // « 550 - Fight Club (1999).mp4 » — cf. le pavé NOMMAGE plus bas.
+                val idFilm = idTmdbOuNull(videoType.id)
+                val annee = videoType.releaseDate.take(4).takeIf { a -> a.length == 4 && a.all(Char::isDigit) }
+                fileName = nomPropre(
+                    (if (idFilm != null) "$idFilm - " else "") +
+                        videoType.title +
+                        (if (annee != null) " ($annee)" else "")
+                ) + ".$ext"
             }
             is Video.Type.Episode -> {
                 id = "${providerName}_ep_${videoType.tvShow.id}_S${videoType.season.number}E${videoType.number}_$serverTag"
@@ -184,9 +205,32 @@ object DownloadManager {
                         if (serverName.isNotBlank()) " ($serverName)" else ""
                 poster = videoType.poster ?: videoType.tvShow.poster
                 type = "episode"
-                fileName = sanitizeFileName(
-                    "${videoType.tvShow.title}_S${videoType.season.number}E${videoType.number}_${serverTag}.$ext"
+                // « Star Trek - S01E03 - Where No Man Has Gone Before [tv-253].mp4 »
+                //   Ordre imposé par VoeLibrary : série en mot de tête, puis SxxExx sur
+                //   deux chiffres, et l'identifiant de série en FIN (jamais en tête, il
+                //   serait lu comme un identifiant de FILM). Cf. le pavé NOMMAGE plus bas.
+                val idSerie = idTmdbOuNull(videoType.tvShow.id)
+                // Saison RÉELLE, pas `season.number` — voir le pavé ANIME plus bas.
+                val marque = "S${deuxChiffres(saisonReelle(videoType))}E${deuxChiffres(videoType.number)}"
+                val titreEp = videoType.title?.takeIf { t -> t.isNotBlank() }
+                // Sur AnimeSama le titre de série peut être vide : on le reconstruit depuis
+                //   le slug, exactement comme BackupRegistry.titleFromId le fait pour ses
+                //   recherches. Sans nom de série en tête, `motTeteCouvert` rejette le fichier.
+                //   `cleanTitle` est celui qu'utilise BackupRegistry pour bâtir `key.title`,
+                //   donc le nom écrit ici et le titre recherché plus tard sont le MÊME texte
+                //   (« Spider-Noir (Version Couleur) – Saison 1 » → « Spider-Noir »).
+                val nomSerie = com.streamflixreborn.streamflix.utils.BackupRegistry.cleanTitle(
+                    videoType.tvShow.title.ifBlank {
+                        com.streamflixreborn.streamflix.utils.BackupRegistry.titleFromId(videoType.id)
+                    }
                 )
+                val langue = langueDansId(videoType.id)
+                fileName = nomPropre(
+                    nomSerie + " - " + marque +
+                        (if (titreEp != null) " - $titreEp" else "") +
+                        (if (langue != null) " ($langue)" else "") +
+                        (if (idSerie != null) " [tv-$idSerie]" else "")
+                ) + ".$ext"
             }
         }
 
@@ -199,7 +243,17 @@ object DownloadManager {
         }
 
         val downloadDir = getDownloadDir()
-        val filePath = File(downloadDir, fileName).absolutePath
+        // ⚠ 2026-08-20 — DEUX TÉLÉCHARGEMENTS NE DOIVENT JAMAIS VISER LE MÊME FICHIER.
+        //   Le nom ne porte plus le tag du serveur (il polluait le nom au repartage), donc
+        //   le même épisode pris sur deux serveurs produit le même nom. Or la reprise se
+        //   fait par en-tête `Range: bytes=<taille du fichier>-` : le second téléchargement
+        //   croirait reprendre là où le premier s'est arrêté et écrirait la suite d'une
+        //   source dans le fichier d'une AUTRE. Résultat : un fichier illisible, sans la
+        //   moindre erreur signalée. On suffixe donc « (2) », « (3) »…
+        //   Exception volontaire : si c'est LE MÊME téléchargement qui repart (échec ou
+        //   pause), on garde son chemin — sinon on repartirait de zéro à chaque reprise.
+        val filePath = existing?.filePath?.takeIf { !it.startsWith("content://") }
+            ?: cheminLibre(downloadDir, fileName, id).absolutePath
 
         val headersJson = video.headers?.let { gson.toJson(it) }
 
@@ -218,16 +272,20 @@ object DownloadManager {
 
         dao.insert(entity)
         Log.d(TAG, "Enqueued download: $id → ${video.source}")
+        Log.i(TAG, "nom du fichier : « ${File(filePath).name} »")
         showToast("⬇ Téléchargement ajouté : $title")
 
         // Start processing the queue directly
         triggerProcessQueue()
     }
 
+    // Toute action MANUELLE remet le compteur de reprises à zéro : l'utilisateur reprend
+    //   la main, il repart donc avec ses 20 tentatives entières.
     fun requestPause(id: String) {
         synchronized(pauseRequests) {
             pauseRequests.add(id)
         }
+        tentatives.remove(id)
         scope.launch {
             dao.updateStatus(id, DownloadEntity.Status.PAUSED)
         }
@@ -237,10 +295,12 @@ object DownloadManager {
         synchronized(pauseRequests) {
             pauseRequests.add(id)
         }
+        tentatives.remove(id)
         dao.updateStatus(id, DownloadEntity.Status.PAUSED)
     }
 
     suspend fun resume(id: String) {
+        tentatives.remove(id)
         dao.updateStatus(id, DownloadEntity.Status.PENDING)
         triggerProcessQueue()
     }
@@ -248,12 +308,15 @@ object DownloadManager {
     suspend fun cancel(id: String) {
         val download = dao.getById(id) ?: return
         synchronized(pauseRequests) { pauseRequests.add(id) } // stop if active
+        tentatives.remove(id)
         delay(200) // let the download loop notice
         deletePhysicalFile(download.filePath)
         dao.deleteById(id)
     }
 
     suspend fun retry(id: String) {
+        tentatives.remove(id)
+        synchronized(pauseRequests) { pauseRequests.remove(id) }
         dao.updateStatus(id, DownloadEntity.Status.PENDING)
         triggerProcessQueue()
     }
@@ -339,10 +402,15 @@ object DownloadManager {
                     download.mimeType?.contains("mpegURL", ignoreCase = true) == true ||
                     download.mimeType?.contains("m3u8", ignoreCase = true) == true
 
-            if (isHls) {
+            // 2026-08-20 : le HLS choisit lui-même son fichier final (MP4 muxé, ou .ts si
+            //   le muxage a échoué, ou .ts pour un enregistrement direct). On travaille
+            //   ensuite sur CE fichier et non sur `download.filePath`, qui date de la mise
+            //   en file et serait périmé.
+            val fichierFinal: File = if (isHls) {
                 downloadHls(download)
             } else {
                 downloadDirect(download)
+                File(download.filePath)
             }
 
             // Clean up live-stop flag (set by downloadHlsLive when user stops a live
@@ -361,7 +429,7 @@ object DownloadManager {
                 // Download fully written to app-private dir. Now publish into MediaStore
                 // so the file appears in /Movies/StreamFlix/ and is visible to VLC, gallery,
                 // file managers, etc. The DB filePath becomes the content:// URI.
-                val srcFile = File(download.filePath)
+                val srcFile = fichierFinal
                 val displayName = srcFile.name
                 val mime = guessMimeType(srcFile, isHls)
                 val publishedUri = com.streamflixreborn.streamflix.utils.MediaStoreHelper.publish(
@@ -378,6 +446,7 @@ object DownloadManager {
                     Log.w(TAG, "MediaStore publish failed for ${download.id} — keeping app-private path as fallback")
                 }
                 dao.markCompleted(download.id)
+                tentatives.remove(download.id)   // compteur de reprises remis à zéro
                 showCompletedNotification(download.title)
                 showToast("✅ Téléchargement terminé : ${download.title}")
                 Log.d(TAG, "Download completed: ${download.id}")
@@ -386,8 +455,10 @@ object DownloadManager {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Download failed: ${download.id}", e)
-            dao.markFailed(download.id, e.message ?: "Unknown error")
-            showToast("❌ Échec : ${download.title}")
+            if (!reprogrammerApresEchec(download, e)) {
+                dao.markFailed(download.id, e.message ?: "Unknown error")
+                showToast("❌ Échec : ${download.title}")
+            }
         } finally {
             synchronized(activeDownloads) {
                 activeDownloads.remove(download.id)
@@ -395,6 +466,89 @@ object DownloadManager {
             // Try to fill the freed slot with next pending
             triggerProcessQueue()
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════
+    // REPRISE AUTOMATIQUE APRÈS COUPURE — 2026-08-20
+    //   (user « quand on télécharge, souvent le téléchargement se met en échec et on est
+    //    obligé de le relancer manuellement… des fois la coupure peut être 5 à 6 fois
+    //    voire 8 fois pendant le téléchargement »)
+    //
+    // Avant : toute exception menait à markFailed(), point final. Le fichier partiel était
+    //   conservé mais plus personne ne le reprenait — d'où le bouton « réessayer » pressé
+    //   huit fois de suite sur un seul film.
+    //
+    // Ce qui rend la reprise sûre ici : les deux moteurs SAVENT déjà repartir de l'octet
+    //   où ils se sont arrêtés. `downloadDirectSingle` envoie `Range: bytes=<taille>-` à
+    //   partir du fichier existant, et le mode parallèle relit ses fichiers de progression
+    //   par tronçon. Relancer ne retélécharge donc PAS ce qui est déjà là.
+    //
+    // Ce qu'on ne relance PAS, volontairement :
+    //   · une pause ou une annulation de l'utilisateur — c'est sa décision, pas une panne ;
+    //   · une erreur qui ne guérira pas d'elle-même (404, 403, 410, disque plein). Réessayer
+    //     vingt fois un lien mort ne fait que masquer la vraie cause dans le journal.
+    //
+    // Le compteur vit en mémoire et non en base : au redémarrage de l'app on repart à zéro,
+    //   ce qui est le comportement voulu — une nouvelle session mérite une nouvelle chance,
+    //   et ça évite une migration Room pour une valeur aussi éphémère.
+    // ══════════════════════════════════════════════════════════════════════════════════
+
+    private const val MAX_TENTATIVES = 20
+
+    /** Nombre de reprises déjà consommées, par identifiant de téléchargement. */
+    private val tentatives = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** Une erreur dont on sait qu'elle ne guérira pas en réessayant. */
+    private fun erreurDefinitive(e: Exception): Boolean {
+        val m = (e.message ?: "").lowercase()
+        return m.contains("http 404") || m.contains("http 403") || m.contains("http 410") ||
+            m.contains("http 401") || m.contains("enospc") || m.contains("no space left")
+    }
+
+    /**
+     * Programme une reprise après coupure.
+     * @return true si une reprise est programmée (l'appelant ne doit alors PAS marquer
+     *   l'échec comme définitif), false s'il faut abandonner.
+     */
+    private suspend fun reprogrammerApresEchec(download: DownloadEntity, e: Exception): Boolean {
+        if (isPauseRequested(download.id)) return false
+        if (erreurDefinitive(e)) {
+            Log.w(TAG, "pas de reprise pour ${download.id} : erreur définitive (${e.message})")
+            tentatives.remove(download.id)
+            return false
+        }
+        val n = tentatives.merge(download.id, 1, Int::plus) ?: 1
+        if (n > MAX_TENTATIVES) {
+            Log.w(TAG, "abandon de ${download.id} après $MAX_TENTATIVES reprises")
+            tentatives.remove(download.id)
+            return false
+        }
+        // 5s, 10s, 20s, 40s, puis 60s pour toutes les suivantes.
+        val attenteMs = minOf(60_000L, 5_000L shl minOf(n - 1, 4))
+        val dejaLa = runCatching { File(download.filePath).length() }.getOrDefault(0L)
+        Log.i(
+            TAG,
+            "coupure sur ${download.id} (${e.message}) — reprise $n/$MAX_TENTATIVES dans " +
+                "${attenteMs / 1000}s, ${dejaLa / 1_000_000} Mo déjà écrits",
+        )
+        dao.markFailed(
+            download.id,
+            "Coupure — reprise automatique $n/$MAX_TENTATIVES dans ${attenteMs / 1000} s",
+        )
+        showToast("↻ Coupure — reprise auto ($n/$MAX_TENTATIVES) : ${download.title}")
+
+        scope.launch {
+            delay(attenteMs)
+            val actuel = dao.getById(download.id) ?: return@launch   // supprimé entre-temps
+            if (actuel.isCompleted || actuel.isDownloading) return@launch
+            if (actuel.isPaused || isPauseRequested(download.id)) {
+                Log.d(TAG, "reprise annulée pour ${download.id} : mis en pause entre-temps")
+                return@launch
+            }
+            dao.updateStatus(download.id, DownloadEntity.Status.PENDING)
+            triggerProcessQueue()
+        }
+        return true
     }
 
     // ── Download Methods ──
@@ -459,7 +613,9 @@ object DownloadManager {
         }
 
         val response = withContext(Dispatchers.IO) {
-            Extractor.sharedClient.newCall(requestBuilder.build()).execute()
+            // ⚠ downloadClient et NON sharedClient : ce dernier a un callTimeout de
+            //   30 s qui tuait la socket en plein transfert. Voir Extractor.downloadClient.
+            Extractor.downloadClient.newCall(requestBuilder.build()).execute()
         }
 
         if (!response.isSuccessful && response.code != HttpURLConnection.HTTP_PARTIAL) {
@@ -626,7 +782,7 @@ object DownloadManager {
      * Downloads N segments concurrently to temp files, then concatenates in order.
      * Supports resume by checking which temp segment files already exist.
      */
-    private suspend fun downloadHls(download: DownloadEntity) {
+    private suspend fun downloadHls(download: DownloadEntity): File {
         val file = File(download.filePath)
         file.parentFile?.mkdirs()
         val headers = parseHeaders(download.headersJson)
@@ -636,10 +792,19 @@ object DownloadManager {
         val isLive = !playlistBody.contains("#EXT-X-ENDLIST")
         if (isLive) {
             Log.d(TAG, "HLS LIVE detected for ${download.id} — switching to continuous live recording")
+            // ⚠ 2026-08-20 : l'enregistrement direct reste en .ts, et c'est voulu. Il écrit
+            //   au fil de l'eau, sans fin connue ; un MP4 ne peut pas être clôturé
+            //   proprement si l'utilisateur coupe le courant, alors qu'un .ts tronqué
+            //   reste lisible. On rectifie donc le nom, décidé en .mp4 à la mise en file.
+            val fichierDirect = File(file.parentFile, file.nameWithoutExtension + ".ts")
+            if (fichierDirect.absolutePath != file.absolutePath) {
+                dao.updateFilePath(download.id, fichierDirect.absolutePath)
+            }
             // Pass the body we just fetched to avoid an immediate re-fetch (which can
             // return a different segment window or fail).
-            downloadHlsLive(download, mediaPlaylistUrl, headers, initialBody = playlistBody)
-            return
+            downloadHlsLive(download, mediaPlaylistUrl, headers, initialBody = playlistBody,
+                sortie = fichierDirect)
+            return fichierDirect
         }
 
         // VOD path: parse all segments and download in parallel as before
@@ -695,7 +860,9 @@ object DownloadManager {
                             .apply { headers.forEach { (k, v) -> header(k, v) } }
                             .build()
 
-                        val response = Extractor.sharedClient.newCall(request).execute()
+                        // ⚠ downloadClient : le callTimeout de 30 s de sharedClient
+                        //   coupait les segments de ~7 Mo en pleine réception.
+                        val response = Extractor.downloadClient.newCall(request).execute()
                         try {
                             if (!response.isSuccessful) {
                                 throw Exception("Segment $index: HTTP ${response.code}")
@@ -730,7 +897,7 @@ object DownloadManager {
             }
         }
 
-        if (isPauseRequested(download.id)) return
+        if (isPauseRequested(download.id)) return file
 
         // Verify all segments are present
         val missing = (0 until segments.size).filter { i ->
@@ -741,23 +908,235 @@ object DownloadManager {
             throw Exception("Missing ${missing.size} segments after download: first=${missing.first()}")
         }
 
-        // Concatenate all segments into final file in order
-        Log.d(TAG, "HLS: concatenating ${segments.size} segments → ${file.name}")
+        // ── ASSEMBLAGE ────────────────────────────────────────────────────────────────
+        //   2026-08-20 (user, après le refus « File type not allowed » de VOE) :
+        //   on MUXE les segments dans un MP4 au lieu de les coller bout à bout en .ts.
+        //   Voir le pavé `assemblerEnMp4`. Si le muxage échoue, on retombe sur la
+        //   concaténation d'origine et le fichier reprend son extension .ts — mieux
+        //   vaut un .ts à convertir à la main qu'aucun fichier du tout.
+        val segFiles = segments.indices.map { i -> File(tempDir, "seg_${String.format("%05d", i)}") }
+        var sortie = file
+
+        // ══════════════════════════════════════════════════════════════════════════
+        // ⚠ 2026-08-21 — ON COLLE D'ABORD, ON MUXE ENSUITE. NE PAS REVENIR EN ARRIÈRE.
+        //
+        //   Avant, on muxait SEGMENT PAR SEGMENT. Résultat, dans le journal de l'Oppo :
+        //       « muxage MP4 impossible : IOException — Failed to instantiate extractor. »
+        //   MediaExtractor n'arrivait pas à ouvrir un segment isolé : un morceau de flux
+        //   MPEG-TS sans extension, et sans forcément de PAT/PMT en tête, n'est pas
+        //   reconnu par le renifleur d'Android.
+        //
+        //   PREUVE que le contenu n'y est pour rien : le même flux, une fois collé,
+        //   est lu SANS PROBLÈME par Android — MediaStore en a extrait
+        //   `duration=1412371` et `mime_type=video/mp2ts` sur le fichier produit.
+        //   Le conteneur, les codecs (H.264 High + AAC-LC) et la taille étaient donc
+        //   tous hors de cause ; seule la découpe posait problème.
+        //
+        //   On concatène donc TOUJOURS dans un .ts temporaire, puis on muxe CE fichier
+        //   unique et continu — celui-là, Android sait le lire. Bénéfice annexe : plus
+        //   aucun recollage d'horloge entre segments, qui était la partie la plus
+        //   fragile du code.
+        // ══════════════════════════════════════════════════════════════════════════
+        val brut = File(tempDir, "flux_complet.ts")
         withContext(Dispatchers.IO) {
-            FileOutputStream(file).use { output ->
-                for (i in segments.indices) {
-                    val segFile = File(tempDir, "seg_${String.format("%05d", i)}")
-                    segFile.inputStream().use { input ->
-                        input.copyTo(output, BUFFER_SIZE)
+            FileOutputStream(brut).use { output ->
+                for (segFile in segFiles) {
+                    if (!segFile.exists()) continue
+                    segFile.inputStream().use { input -> input.copyTo(output, BUFFER_SIZE) }
+                }
+            }
+        }
+
+        val muxe = withContext(Dispatchers.IO) { assemblerEnMp4(listOf(brut), file) }
+        if (!muxe) {
+            sortie = File(file.parentFile, file.nameWithoutExtension + ".ts")
+            Log.w(TAG, "HLS : muxage impossible → on garde le flux brut ${sortie.name}")
+            withContext(Dispatchers.IO) {
+                runCatching { file.delete() }
+                // Simple déplacement : le fichier collé est déjà exactement ce qu'il faut.
+                if (!brut.renameTo(sortie)) {
+                    brut.inputStream().use { input ->
+                        FileOutputStream(sortie).use { output -> input.copyTo(output, BUFFER_SIZE) }
                     }
                 }
             }
+            dao.updateFilePath(download.id, sortie.absolutePath)
         }
 
         // Clean up temp directory
         tempDir.listFiles()?.forEach { it.delete() }
         tempDir.delete()
-        Log.d(TAG, "HLS parallel download complete: ${download.id}")
+        Log.d(TAG, "HLS parallel download complete: ${download.id} → ${sortie.name}")
+        return sortie
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════
+    // MUXAGE DES SEGMENTS HLS EN MP4 — 2026-08-20
+    //   (user « je vais télécharger un anime déjà présent pour le réuploader et avoir
+    //    des serveurs supplémentaires », puis choix « muxer pendant le téléchargement »)
+    //
+    // POURQUOI. VOE refuse les `.ts` : l'envoi monte entièrement puis se solde par
+    //   « File type not allowed » — 1,3 Go de débit perdus. Or `.ts` était l'extension de
+    //   TOUT téléchargement HLS, donc de tout ce qui vient de VOE lui-même, de Movix·Voe,
+    //   et de la plupart des serveurs en m3u8.
+    //
+    // POURQUOI ICI ET PAS APRÈS COUP. Les segments sont déjà écrits séparément et
+    //   n'étaient assemblés qu'à la toute fin. On remplace donc l'assemblage, sans rien
+    //   ajouter : les segments sont lus une seule fois, comme avant. Un remux après coup
+    //   aurait coûté une seconde passe complète sur 1,3 Go et le double d'espace disque.
+    //   La reprise par segment, elle, reste intacte — elle se joue avant cette étape.
+    //
+    // CE QUE FAIT LE MUXAGE. Il ne décode ni ne ré-encode RIEN : il sort les échantillons
+    //   vidéo et audio déjà compressés de leur conteneur MPEG-TS et les réécrit tels quels
+    //   dans un conteneur MP4. Qualité rigoureusement identique, coût processeur nul.
+    //
+    // LES DEUX PIÈGES DES HORODATAGES, traités plus bas :
+    //   · un flux MPEG-TS ne commence pas à zéro (l'horloge de départ est arbitraire, par
+    //     exemple 10 s) — sans correction, le MP4 débuterait par 10 s de vide ;
+    //   · d'un segment à l'autre l'horloge peut repartir en arrière — sans correction, le
+    //     lecteur verrait le film revenir en arrière au milieu.
+    //
+    // FILET. Toute erreur (codec que MediaMuxer ne sait pas écrire, segment illisible…)
+    //   renvoie `false` : l'appelant reprend alors la concaténation d'origine. On ne perd
+    //   jamais le téléchargement.
+    // ══════════════════════════════════════════════════════════════════════════════════
+
+    /** Tampon d'échantillon : départ large, plafond de sécurité. Voir le pavé plus bas. */
+    private val TAMPON_DEPART = 8 * 1024 * 1024
+    private val TAMPON_MAX = 64 * 1024 * 1024
+
+    /** @return true si le MP4 a été écrit, false s'il faut retomber sur le .ts brut. */
+    private fun assemblerEnMp4(segments: List<File>, sortie: File): Boolean {
+        if (segments.isEmpty()) return false
+        var muxer: MediaMuxer? = null
+        var demarre = false
+        try {
+            muxer = MediaMuxer(sortie.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            // pistes du muxeur, indexées par type (« video » / « audio ») : les segments
+            //   suivants n'ont aucune raison de présenter leurs pistes dans le même ordre.
+            val pistes = HashMap<String, Int>()
+            val finPar = HashMap<String, Long>()      // dernier horodatage écrit par piste
+            var decalage = 0L                          // correction appliquée au segment courant
+            var premierSegment = true
+            // ⚠ 2026-08-21 — LE TAMPON ÉTAIT LA CAUSE DES .ts QUI RESSORTAIENT.
+            //
+            //   Symptôme : « yomi no tsugai - S01E19 » est sorti en .ts, donc refusé
+            //   par VOE. Codecs pourtant irréprochables (mesuré à ffprobe sur le
+            //   fichier lui-même) : H.264 High 1080p + AAC-LC stéréo, tout ce que
+            //   MediaMuxer accepte. Ce n'était donc pas un problème de format.
+            //
+            //   CAUSE : `readSampleData` lève une exception si l'échantillon ne tient
+            //   pas dans le tampon — et le catch global transformait ça en « muxage
+            //   impossible », donc en repli .ts, SANS jamais dire pourquoi. Or
+            //   l'en-tête x264 du fichier annonce `vbv_bufsize=16000`, soit
+            //   16 000 kbit ≈ 1,91 Mio pour une seule image. Le tampon faisait
+            //   2 Mio : la moindre image-clé un peu chargée le dépassait.
+            //
+            //   CORRECTIF : on démarre plus large ET on AGRANDIT à la volée au lieu
+            //   d'abandonner. Un échantillon plus gros que prévu ne doit jamais
+            //   coûter tout le muxage.
+            var tampon = java.nio.ByteBuffer.allocate(TAMPON_DEPART)
+            val info = MediaCodec.BufferInfo()
+
+            for (segment in segments) {
+                if (!segment.exists() || segment.length() == 0L) return false
+                val ex = MediaExtractor()
+                try {
+                    ex.setDataSource(segment.absolutePath)
+                    // piste du segment -> piste du muxeur
+                    val corr = HashMap<Int, String>()
+                    for (i in 0 until ex.trackCount) {
+                        val fmt = ex.getTrackFormat(i)
+                        val mime = fmt.getString(MediaFormat.KEY_MIME) ?: continue
+                        val type = mime.substringBefore('/')
+                        if (type != "video" && type != "audio") continue
+                        if (type in corr.values) continue      // une seule piste par type
+                        if (!pistes.containsKey(type)) {
+                            if (demarre) {
+                                // Une piste apparaît en cours de route : MediaMuxer
+                                //   n'accepte plus d'ajout après start(). On abandonne.
+                                Log.w(TAG, "muxage : piste $type apparue en cours de flux")
+                                return false
+                            }
+                            pistes[type] = muxer.addTrack(fmt)
+                        }
+                        corr[i] = type
+                        ex.selectTrack(i)
+                    }
+                    if (pistes.isEmpty()) return false
+                    if (!demarre) {
+                        muxer.start()
+                        demarre = true
+                    }
+
+                    // Premier horodatage du segment, tous types confondus.
+                    var premierPts = Long.MAX_VALUE
+                    run {
+                        val t = ex.sampleTime
+                        if (t >= 0) premierPts = t
+                    }
+                    if (premierPts == Long.MAX_VALUE) { ex.release(); continue }
+
+                    val finGlobale = finPar.values.maxOrNull() ?: 0L
+                    decalage = when {
+                        // 1er segment : on ramène le début du film à zéro.
+                        premierSegment -> -premierPts
+                        // Horloge repartie en arrière : on recolle derrière ce qui est écrit.
+                        premierPts + decalage < finGlobale -> finGlobale - premierPts
+                        else -> decalage
+                    }
+                    premierSegment = false
+
+                    while (true) {
+                        // Lecture avec agrandissement du tampon si nécessaire.
+                        var taille = -1
+                        while (true) {
+                            try {
+                                taille = ex.readSampleData(tampon, 0)
+                                break
+                            } catch (e: Exception) {
+                                if (tampon.capacity() >= TAMPON_MAX) throw e
+                                val neuf = minOf(tampon.capacity() * 2, TAMPON_MAX)
+                                Log.w(TAG, "muxage : échantillon trop grand pour " +
+                                    "${tampon.capacity() / 1024} Ko → tampon porté à " +
+                                    "${neuf / 1024} Ko")
+                                tampon = java.nio.ByteBuffer.allocate(neuf)
+                            }
+                        }
+                        if (taille < 0) break
+                        val type = corr[ex.sampleTrackIndex]
+                        val piste = type?.let { pistes[it] }
+                        if (piste != null) {
+                            info.offset = 0
+                            info.size = taille
+                            info.presentationTimeUs = ex.sampleTime + decalage
+                            info.flags = ex.sampleFlags
+                            if (info.presentationTimeUs >= 0) {
+                                muxer.writeSampleData(piste, tampon, info)
+                                val precedent = finPar[type] ?: 0L
+                                if (info.presentationTimeUs > precedent) {
+                                    finPar[type] = info.presentationTimeUs
+                                }
+                            }
+                        }
+                        ex.advance()
+                    }
+                } finally {
+                    runCatching { ex.release() }
+                }
+            }
+            if (!demarre) return false
+            Log.d(TAG, "muxage MP4 : ${segments.size} segment(s) → ${sortie.name}")
+            return true
+        } catch (e: Exception) {
+            // ⚠ Ce message est la SEULE trace du pourquoi. Sans lui, on ne voit qu'un
+            //   fichier .ts inexplicable — c'est ce qui a coûté une matinée le 21/08.
+            Log.w(TAG, "muxage MP4 impossible : ${e.javaClass.simpleName} — ${e.message}", e)
+            return false
+        } finally {
+            runCatching { if (demarre) muxer?.stop() }
+            runCatching { muxer?.release() }
+        }
     }
 
     /**
@@ -775,8 +1154,12 @@ object DownloadManager {
         mediaPlaylistUrl: String,
         headers: Map<String, String>,
         initialBody: String? = null,
+        // 2026-08-20 : fichier de sortie explicite. `download.filePath` porte désormais
+        //   un nom en .mp4 (décidé à la mise en file pour les flux HLS), or un
+        //   enregistrement direct s'écrit en .ts — voir le commentaire dans downloadHls.
+        sortie: File? = null,
     ) {
-        val file = File(download.filePath)
+        val file = sortie ?: File(download.filePath)
         val outputStream = FileOutputStream(file)
         val seenSegments = mutableSetOf<String>()
         var totalSegments = 0
@@ -1180,6 +1563,108 @@ object DownloadManager {
             .replace("\\s+".toRegex(), "_")
             .take(200)
     }
+
+    // ══════════════════════════════════════════════════════════════════════════════════
+    // NOMMAGE DES FICHIERS TÉLÉCHARGÉS — 2026-08-20
+    //   (user « que l'épisode porte au moins le nom de la série suivi de la saison et de
+    //    l'épisode, pour qu'on puisse plus facilement le repartager de notre côté »)
+    //
+    // Le nom produit doit être relu par NOTRE PROPRE bibliothèque après remise en ligne
+    //   sur VOE, sinon le fichier repartagé ne sera jamais proposé comme serveur. Trois
+    //   contraintes viennent directement de VoeLibrary et ne sont pas négociables :
+    //
+    //   1. `RE_ID_TETE = ^(\d{2,8})\s*-\s*` — l'identifiant TMDB n'est reconnu qu'en TÊTE,
+    //      suivi d'un tiret entouré d'ESPACES. D'où `nomPropre` ci-dessous : l'ancien
+    //      `sanitizeFileName` remplace les espaces par des underscores, ce qui rendrait
+    //      l'identifiant illisible (« 550_-_Fight_Club » ne correspond pas au motif).
+    //
+    //   2. ⚠ L'identifiant en tête est TOUJOURS interprété comme un identifiant de FILM
+    //      (les fiches sont résolues via /3/movie/{id}). Poser l'identifiant d'une SÉRIE
+    //      en tête ferait afficher l'affiche d'un film sans rapport. C'est le piège déjà
+    //      documenté dans VoeLibrary : « l'identifiant 550 désigne Fight Club côté film ET
+    //      une série sans aucun rapport côté série ». Pour les épisodes, l'identifiant va
+    //      donc en FIN, sous la forme `[tv-253]` — hors de portée de RE_ID_TETE.
+    //      C'est le « préfixe distinct (tv:<id>) » que le commentaire de VoeLibrary
+    //      appelait de ses vœux ; `:` étant interdit dans un nom de fichier, on écrit `tv-`.
+    //
+    //   3. Le rattachement d'un épisode exige DEUX choses (VoeLibrary.serveursPour) :
+    //      le motif `s0*<saison>[ ._-]?e0*<épisode>` ET le nom de la série en MOT DE TÊTE
+    //      (`motTeteCouvert`). D'où « Star Trek - S01E03 - … » : série d'abord, SxxExx
+    //      ensuite, avec des numéros sur deux chiffres.
+    //
+    // Exemples produits :
+    //   film    « 550 - Fight Club (1999).mp4 »
+    //   épisode « Star Trek - S01E03 - Where No Man Has Gone Before [tv-253].mp4 »
+    // ══════════════════════════════════════════════════════════════════════════════════
+
+    /** Nettoyage minimal : on n'ôte que ce qu'Android et FAT32 refusent vraiment.
+     *  Espaces, tirets, parenthèses et crochets sont PRÉSERVÉS — ils portent du sens
+     *  pour le rapprochement (voir le pavé ci-dessus). */
+    private fun nomPropre(name: String): String =
+        name.replace("[\\\\/:*?\"<>|\\r\\n\\t]".toRegex(), " ")
+            .replace("\\s+".toRegex(), " ")
+            .trim()
+            .take(180)
+
+    /** Premier chemin libre pour `nom` dans `dir` : « … (2).mp4 », « … (3).mp4 »…
+     *  Un chemin est considéré pris s'il existe sur le disque OU s'il est déjà réservé
+     *  par un autre téléchargement en base. Voir le commentaire dans `enqueue`. */
+    private suspend fun cheminLibre(dir: File, nom: String, idCourant: String): File {
+        val base = nom.substringBeforeLast('.')
+        val ext = nom.substringAfterLast('.', "")
+        val reserves = runCatching { dao.getAllSnapshot() }.getOrDefault(emptyList())
+            .asSequence()
+            .filter { it.id != idCourant }
+            .map { it.filePath.substringAfterLast('/') }
+            .filter { it.isNotBlank() }
+            .toHashSet()
+        var n = 1
+        while (n <= 50) {
+            val candidat = File(
+                dir,
+                if (n == 1) nom
+                else if (ext.isBlank()) "$base ($n)" else "$base ($n).$ext",
+            )
+            if (!candidat.exists() && candidat.name !in reserves) return candidat
+            n++
+        }
+        return File(dir, "$base ${System.currentTimeMillis()}.$ext")
+    }
+
+    /** Numéro sur deux chiffres : 3 → « 03 ». Au-delà de 99 on laisse tel quel. */
+    private fun deuxChiffres(n: Int): String = if (n in 0..9) "0$n" else "$n"
+
+    // ── ANIME : LA SAISON N'EST PAS OÙ ON CROIT ───────────────────────────────────────
+    // ⚠ 2026-08-20 (user « il faudrait que le provider anime comme Anime Sama puisse aussi
+    //   accéder à ce dossier… c'est pour ça qu'il faut que le nom soit parfait ») —
+    //   NE PAS REMPLACER PAR `videoType.season.number`.
+    //   Sur AnimeSama, une œuvre disponible en VF ET en VOSTFR expose les DEUX LANGUES sous
+    //   forme de « saisons » : `season.number` vaut 1 ou 2 selon la langue, jamais la vraie
+    //   saison. Celle-ci n'existe que dans l'identifiant d'épisode, qui est un chemin :
+    //     « mushoku-tensei/saison4/vostfr/2 »
+    //   Nommer d'après `season.number` produirait « S01E02 » pour un épisode de la saison 4,
+    //   et le fichier remis en ligne ne serait JAMAIS rattaché : BackupRegistry, lui, cherche
+    //   la vraie saison (il fait déjà cette extraction dans `keyOf`, ligne « saison(\d+) »).
+    //   On reproduit donc exactement sa règle, pour que les deux bouts de la chaîne — le nom
+    //   écrit au téléchargement et la recherche faite à la lecture — parlent de la même saison.
+    private fun saisonReelle(ep: Video.Type.Episode): Int =
+        Regex("(?i)saison\\s*(\\d+)").find(ep.id)?.groupValues?.get(1)?.toIntOrNull()
+            ?: ep.season.number.let { if (it <= 0) 1 else it }
+
+    /** « VF » / « VOSTFR » quand l'identifiant du provider le porte (cas AnimeSama).
+     *  Sert à distinguer les deux versions d'un même épisode, qui portent sinon
+     *  rigoureusement le même nom. */
+    private fun langueDansId(id: String): String? = when {
+        Regex("(?i)(^|[/_-])vostfr([/_-]|$)").containsMatchIn(id) -> "VOSTFR"
+        Regex("(?i)(^|[/_-])vf([/_-]|$)").containsMatchIn(id) -> "VF"
+        else -> null
+    }
+
+    /** L'identifiant n'est utilisable que s'il est purement numérique : selon le
+     *  fournisseur, `videoType.id` peut être un slug (« cs::m::87203… ») qui n'a
+     *  aucun sens pour TMDB et polluerait le nom. */
+    private fun idTmdbOuNull(id: String?): String? =
+        id?.takeIf { it.isNotBlank() && it.length <= 8 && it.all(Char::isDigit) }
 
     /**
      * Guess a sensible MIME type for the downloaded file. We use the file extension first

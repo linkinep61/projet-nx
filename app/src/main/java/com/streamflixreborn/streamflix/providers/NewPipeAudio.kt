@@ -762,33 +762,109 @@ object NewPipeAudio {
     }
 
     /** Résout une URL watch YouTube → URL audio DIRECTE (m4a/webm progressif). Caché en session. */
+    /**
+     * ⚠ UNE INTERRUPTION N'EST PAS UN ÉCHEC — 2026-08-21.
+     *
+     * user : « la musique Overflow ne se lit pas, alors qu'elle fonctionne sur le site »,
+     *   puis « le fait de l'avoir mise en favori, la lecture a pu se faire ».
+     *
+     * Le journal de l'Oppo montre pourquoi, et ce n'est pas YouTube :
+     *     12:26:09  recherche 'Linkin Park' → 3 albums
+     *     12:26:11  resolve KO: InterruptedIOException null → secours audio
+     *     12:26:11  secours SlVa6DK_Kqw : tous les clients ont refusé
+     *                 ANDROID_VR / IOS / MWEB : InterruptedIOException — interrupted
+     *     12:26:16  recherche 'Linkin Park' → 20 morceaux
+     *
+     * Le message est « interrupted », pas « timeout » : le FIL a été interrompu. Les
+     * quatre clients de secours ont été essayés alors qu'ils étaient condamnés d'avance
+     * — d'où un demi-seconde pour tout échouer, là où un vrai appel réseau prend une à
+     * trois secondes. La recherche tournait encore (sa 2e phase n'arrive qu'à 12:26:16)
+     * et sa fin a annulé le travail en cours, dont cette résolution.
+     *
+     * C'est aussi pourquoi le FAVORI marche : aucune recherche ne tourne en parallèle,
+     * donc rien ne vient interrompre.
+     *
+     * D'où deux règles ici :
+     *   1. sur interruption, NE PAS dérouler la voie de secours (elle échouera pareil et
+     *      fera croire que le morceau est illisible) ;
+     *   2. effacer le drapeau d'interruption et RÉESSAYER UNE FOIS — si l'annulation
+     *      venait d'une tâche périmée, la seconde tentative aboutit.
+     */
+    private fun estInterruption(t: Throwable): Boolean {
+        var e: Throwable? = t
+        var profondeur = 0
+        while (e != null && profondeur < 6) {
+            if (e is InterruptedException || e is java.io.InterruptedIOException) return true
+            if (e.message?.contains("interrupted", ignoreCase = true) == true) return true
+            e = e.cause
+            profondeur++
+        }
+        return Thread.currentThread().isInterrupted
+    }
+
+    /** Une tentative de résolution, sans filet : les erreurs remontent. */
+    private fun tenterResolution(watchUrl: String): String? {
+        ensureInit()
+        val se = ServiceList.YouTube.getStreamExtractor(watchUrl)
+        se.fetchPage()
+        val audios: List<AudioStream> = se.audioStreams
+        val progressive = audios.filter {
+            it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP && !it.content.isNullOrBlank()
+        }
+        val pool = progressive.ifEmpty { audios.filter { !it.content.isNullOrBlank() } }
+        return pool.maxByOrNull { it.averageBitrate }?.content
+    }
+
     fun resolveAudioUrl(watchUrl: String): String? {
         resolveCache[watchUrl]?.let { return it }
-        return try {
-            ensureInit()
-            val se = ServiceList.YouTube.getStreamExtractor(watchUrl)
-            se.fetchPage()
-            val audios: List<AudioStream> = se.audioStreams
-            val progressive = audios.filter {
-                it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP && !it.content.isNullOrBlank()
+        var interrompuAvant = false
+        repeat(2) { essai ->
+            try {
+                val url = tenterResolution(watchUrl)
+                if (!url.isNullOrBlank()) {
+                    resolveCache[watchUrl] = url
+                    return url
+                }
+                // Aucun flux : là, la voie de secours a un sens.
+                return audioSecours(watchUrl)
+            } catch (t: Throwable) {
+                derniereErreurNewPipe = t
+                if (estInterruption(t) && essai == 0) {
+                    // `Thread.interrupted()` LIT ET EFFACE le drapeau : sans ça, tout
+                    //   appel réseau suivant échouerait instantanément lui aussi.
+                    interrompuAvant = Thread.interrupted()
+                    Log.w(TAG, "resolve interrompu (tâche annulée en cours de route) " +
+                        "→ 2e tentative sur un fil propre")
+                    return@repeat
+                }
+                if (estInterruption(t)) {
+                    // Toujours interrompu : c'est une VRAIE annulation. On repose le
+                    //   drapeau pour ne pas masquer l'arrêt demandé, et on se tait —
+                    //   ce morceau n'est pas illisible, il n'a simplement pas été joué.
+                    if (interrompuAvant) Thread.currentThread().interrupt()
+                    Log.w(TAG, "resolve annulé pour $watchUrl (lecture abandonnée)")
+                    return null
+                }
+                return secoursApres(t, watchUrl)
             }
-            val pool = progressive.ifEmpty { audios.filter { !it.content.isNullOrBlank() } }
-            val best = pool.maxByOrNull { it.averageBitrate }
-            val url = best?.content
-            if (!url.isNullOrBlank()) { resolveCache[watchUrl] = url; url } else null
-        } catch (t: Throwable) {
-            // ── 2026-08-15 (user : « sur la Bbox 4K, on trouve l'album, on voit les
-            //   musiques, mais au moment du play l'appli crashe ») ────────────────────────
-            //   Même cause que la vidéo : l'extracteur appelle une méthode absente avant
-            //   Android 13 et lève une `Error`. Elle remontait ici SANS ÊTRE ATTRAPÉE
-            //   (`Exception` ne couvre pas les `Error`) — et comme ce code tourne dans le
-            //   fil du lecteur, l'application mourait pile au moment du play.
-            //   On l'absorbe, et surtout on bascule sur la voie de secours pour que la
-            //   musique JOUE quand même sur ces appareils.
-            Log.w(TAG, "resolve KO: ${t.javaClass.simpleName} ${t.message} → secours audio")
-            derniereErreurNewPipe = t
-            audioSecours(watchUrl)
         }
+        return null
+    }
+
+    /**
+     * Voie de secours après une VRAIE erreur (pas une interruption).
+     *
+     * ── 2026-08-15 (user : « sur la Bbox 4K, on trouve l'album, on voit les musiques,
+     *   mais au moment du play l'appli crashe ») : l'extracteur appelle une méthode
+     *   absente avant Android 13 et lève une `Error`. Elle remontait SANS ÊTRE ATTRAPÉE
+     *   (`Exception` ne couvre pas les `Error`) — et comme ce code tourne dans le fil du
+     *   lecteur, l'application mourait pile au moment du play. On l'absorbe, et on
+     *   bascule sur la voie de secours pour que la musique JOUE quand même.
+     */
+    private fun secoursApres(t: Throwable, watchUrl: String): String? {
+        Log.w(TAG, "resolve KO: ${t.javaClass.simpleName} ${t.message} → secours audio")
+        derniereErreurNewPipe = t
+        return audioSecours(watchUrl)
     }
 
     /**
