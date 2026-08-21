@@ -189,12 +189,9 @@ object UserPreferences {
     val backupsEnabled: Boolean
         get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_BACKUPS_ENABLED, true) else true
 
-    // 2026-07-13 (user "quand un backup/provider échoue parce que l'URL a changé, je veux
-    //   recevoir UNE notification GitHub (xdata-mix/onyx-crash-reports) pour réparer sans
-    //   chercher — sans spam, 1 fois par URL") : master switch du rapport auto de sources cassées.
-    private const val KEY_REPORT_BROKEN = "pref_report_broken_sources"
-    val reportBrokenSources: Boolean
-        get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_REPORT_BROKEN, true) else true
+    // 2026-08-21 : `reportBrokenSources` SUPPRIMÉ. C'était l'interrupteur du rapport auto
+    //   de sources cassées, retiré de l'interface le 06/08 puis vidé de son objet le 21/08
+    //   avec BrokenSourceReporter. Il ne commandait plus rien.
 
     fun isBackupSourceEnabled(source: String): Boolean {
         if (!::prefs.isInitialized) return true

@@ -456,11 +456,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         }
         // Tous les mirrors épuisés. Si AUCUN n'a répondu (que des erreurs réseau) → domaine mort.
         if (!anyHostResponded && lastNetError != null) {
-            runCatching {
-                com.streamflixreborn.streamflix.utils.BrokenSourceReporter.maybeReportProvider(
-                    providerName = "Cloudstream", url = "https://aoneroom.com", error = lastNetError,
-                )
-            }
+            Log.w(TAG, "tous les mirrors KO (domaine mort ?) : ${lastNetError?.message}")
         }
         null
     }
@@ -2263,18 +2259,6 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val movixD = async { fetchMovixBackupForCs(tmdbId, videoType) }
         val out = mutableListOf<Video.Server>()
         val nativeCs = nativeD.await()
-        // 2026-07-13 : casse silencieuse — Cloudstream natif (MovieBox+) répond mais 0 source
-        //   de façon répétée (structure changée). Titre recherché joint pour aiguiller.
-        runCatching {
-            val t = when (videoType) {
-                is Video.Type.Movie -> videoType.title
-                is Video.Type.Episode -> "${videoType.tvShow.title} S${videoType.season.number}E${videoType.number}"
-                else -> id
-            }
-            com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteProviderResult(
-                "Cloudstream (natif)", found = nativeCs.isNotEmpty(), searchedTitle = t,
-            )
-        }
         out += nativeCs
         nakiosD.await().let { if (it.isNotEmpty()) { Log.d(TAG, "getServers $id : +${it.size} Nakios"); out += it } }
         movixD.await().let { if (it.isNotEmpty()) { Log.d(TAG, "getServers $id : +${it.size} Movix"); out += it } }

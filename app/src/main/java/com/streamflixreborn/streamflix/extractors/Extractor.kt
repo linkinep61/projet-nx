@@ -463,12 +463,6 @@ abstract class Extractor {
         private fun recordSuccess(serverName: String) {
             // Successful extraction resets the failure counter for that server.
             serverHealth.remove(serverName)
-            // Reset aussi le compteur « extracteur mort » (un succès = l'extracteur vit).
-            runCatching {
-                com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteExtractorOutcome(
-                    name = serverName, success = true,
-                )
-            }
             // Reset aussi le compteur persistant — l'écran "Extracteurs" affiche
             // donc les échecs CONSÉCUTIFS (depuis le dernier succès), pas le
             // cumul. Détecte mieux les extracteurs vraiment cassés vs bruit.
@@ -665,10 +659,7 @@ abstract class Extractor {
                 rec.brokenUntilMs = now + HEALTH_BROKEN_DURATION_MS
             }
             Log.w("Extractor", "Server '$serverName' marked broken (external/$errorTag, instant flag, until ${rec.brokenUntilMs})")
-            // 2026-07-13 : « flux mort » — l'extracteur a réussi mais le stream final est KO
-            //   (HEAD 404/timeout). Cumul → issue [flux mort] (l'extracteur crache des liens périmés).
-            runCatching { com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteStreamDead(serverName) }
-            // Track aussi en persistance pour l'écran "Extracteurs"
+            // Track en persistance pour l'écran "Extracteurs"
             val providerName = runCatching { UserPreferences.currentProvider?.name }.getOrNull()
             com.streamflixreborn.streamflix.utils.ExtractorFailureTracker.recordFailure(
                 extractorName = serverName,
@@ -1006,20 +997,9 @@ abstract class Extractor {
                     // le provider source (UserPreferences.currentProvider) dans le
                     // rapport bug — utile pour debug à distance.
                     recordFailure(name, error = e)
-                    // 2026-07-13 : rapport auto « source cassée » (URL/domaine changé) → GitHub,
-                    //   1 seule fois par source+domaine, seulement pour dns/connect/ssl/404/parsing.
-                    runCatching {
-                        com.streamflixreborn.streamflix.utils.BrokenSourceReporter.maybeReport(
-                            sourceName = name,
-                            url = finalLink,
-                            error = e,
-                            providerName = runCatching { UserPreferences.currentProvider?.name }.getOrNull(),
-                        )
-                        // Détection « extracteur mort » : cumul d'échecs consécutifs.
-                        com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteExtractorOutcome(
-                            name = name, success = false, error = e, url = finalLink,
-                        )
-                    }
+                    // 2026-08-21 : le rapport automatique vers GitHub a été retiré (voir
+                    //   ExtractorFailureTracker, qui garde la trace des échecs EN LOCAL et
+                    //   alimente l'écran « Extracteurs »).
                     throw e
                 }
                 val extractDurationMs = System.currentTimeMillis() - extractStartMs
