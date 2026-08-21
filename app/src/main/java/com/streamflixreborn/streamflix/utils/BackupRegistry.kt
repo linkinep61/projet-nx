@@ -1256,34 +1256,8 @@ object BackupRegistry {
                 failure = e
                 Log.w(TAG, "$source failed: ${e.message}"); emptyList()
             }
-            runCatching {
-                val reporterName = "Backup $source"
-                if (failure != null) {
-                    com.streamflixreborn.streamflix.utils.BrokenSourceReporter.maybeReportProvider(
-                        reporterName,
-                        backupProbeUrl(source) ?: "https://$source",
-                        failure,
-                    )
-                }
-                // Compteur consécutif : 0 source → bump, ≥1 → reset. Le titre cherché est joint
-                //   à l'issue, c'est lui qui aiguille la réparation.
-                //   ⚠ On ne compte QUE dans le périmètre de la source (cf. ANIME_ORIENTED_SOURCES) :
-                //   un 0 hors-périmètre n'est PAS une panne. Les erreurs réseau, elles, restent
-                //   signalées dans tous les cas (au-dessus) — une source vraiment morte est donc
-                //   toujours détectée.
-                val inScope = when (source) {
-                    in ANIME_ORIENTED_SOURCES -> isAnimeContent
-                    in DRAMA_ORIENTED_SOURCES -> false // périmètre (contenu asiatique) non détectable
-                    else -> true
-                }
-                if (inScope) {
-                    com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteProviderResult(
-                        reporterName,
-                        servers.isNotEmpty(),
-                        key.title,
-                    )
-                }
-            }
+            // 2026-08-21 : le signalement automatique vers GitHub a été retiré ; en cas
+            //   d'échec on se contente du journal (ligne « $source failed » ci-dessus).
             pushServers(source, servers)
         }
 

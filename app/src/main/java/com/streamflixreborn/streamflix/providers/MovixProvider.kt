@@ -289,13 +289,6 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             withTimeoutOrNull(ENDPOINT_TIMEOUT_MS) { block() }
         } catch (e: Exception) {
             Log.w("MovixProvider", "Endpoint '$endpointName' threw: ${e.message}")
-            // 2026-07-13 : si le DOMAINE Movix lui-même est mort (dns/connect/ssl), signaler
-            //   « provider cassé » (1 fois par provider+domaine, dédup GitHub globale).
-            runCatching {
-                com.streamflixreborn.streamflix.utils.BrokenSourceReporter.maybeReportProvider(
-                    providerName = "Movix", url = baseUrl, error = e,
-                )
-            }
             null
         }
         val health = endpointHealth.getOrPut(endpointName) { EndpointHealth() }
@@ -2194,18 +2187,6 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
 
         val servers = mutableListOf<Video.Server>()
         val nativeMovix = fetchNativeMovixServers(id, videoType)
-        // 2026-07-13 : casse silencieuse — Movix natif répond mais 0 source de façon répétée
-        //   (structure changée). On joint le titre recherché pour aiguiller.
-        runCatching {
-            val t = when (videoType) {
-                is Video.Type.Movie -> videoType.title
-                is Video.Type.Episode -> "${videoType.tvShow.title} S${videoType.season.number}E${videoType.number}"
-                else -> id
-            }
-            com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteProviderResult(
-                "Movix (natif)", found = nativeMovix.isNotEmpty(), searchedTitle = t,
-            )
-        }
         servers.addAll(nativeMovix)
         // 2026-07-04 : backups inline DÉSACTIVÉS → registre central.
         if (!skipBackupsForBackupCall && !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) {

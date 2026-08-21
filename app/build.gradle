@@ -67,8 +67,8 @@ android {
         buildConfigField "String", "SUBDL_API_KEY", "\"${properties.getProperty("SUBDL_API_KEY")}\""
         buildConfigField "String", "RABBITSTREAM_SOURCE_API", "\"${properties.getProperty("RABBITSTREAM_SOURCE_API")}\""
         buildConfigField "String", "OPENSUBTITLES_API_KEY", "\"${properties.getProperty("OPENSUBTITLES_API_KEY") ?: ""}\""
-        buildConfigField "String", "GITHUB_CRASH_TOKEN", "\"${properties.getProperty("GITHUB_CRASH_TOKEN") ?: ""}\""
-        buildConfigField "String", "GITHUB_CRASH_REPO", "\"${properties.getProperty("GITHUB_CRASH_REPO") ?: ""}\""
+        // 2026-08-21 : GITHUB_CRASH_TOKEN / GITHUB_CRASH_REPO supprimés avec le rapporteur
+        //   automatique. Plus aucun jeton GitHub n'est compilé dans l'application.
         // 2026-08-17 : clé API VOE (bibliothèque perso). Onglet COMPTE du site, section
         //   « Détails de l'API ». Vide = provider inactif, aucun appel réseau.
         buildConfigField "String", "VOE_API_KEY", "\"${properties.getProperty("VOE_API_KEY") ?: ""}\""

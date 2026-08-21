@@ -35,9 +35,10 @@ object HealthReporter {
      * Décision user : « couper les requêtes envoyées par l'application pour la casse et
      * remettre la même chose directement sur GitHub ».
      *
-     * Le signalement repart donc par [BrokenSourceReporter.maybeReport] → issue GitHub, avec sa
-     * dédup stricte par (source, domaine) : UNE issue par couple, jamais de spam. On passe de
-     * « des dizaines d'écritures par lecture » à « une issue par panne réelle ».
+     * 2026-08-21 : le relais GitHub qui avait pris la suite (BrokenSourceReporter) a lui
+     * aussi été retiré, à la demande du user — l'application ne signale donc plus rien
+     * vers l'extérieur. Les échecs restent visibles en local via ExtractorFailureTracker
+     * et l'écran « Extracteurs ».
      *
      * Pour réactiver un jour : repasser cette constante à `true` — mais il faudra d'abord
      * n'envoyer QUE les échecs (jamais `ok=true`) et échantillonner, sinon la base ressaturera.
@@ -76,7 +77,6 @@ object HealthReporter {
     fun record(source: String, kind: String, ok: Boolean, errorType: String? = null, host: String? = null) {
         // 2026-08-17 : coupé net — plus AUCUNE requête vers la base D1. cf. TELEMETRIE_D1_ACTIVE.
         if (!TELEMETRIE_D1_ACTIVE) return
-        if (!UserPreferences.reportBrokenSources) return
         if (source.isBlank()) return
         val ev = JSONObject().apply {
             put("source", source); put("kind", kind); put("ok", ok)
