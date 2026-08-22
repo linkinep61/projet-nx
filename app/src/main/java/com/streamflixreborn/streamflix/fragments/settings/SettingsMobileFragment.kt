@@ -648,7 +648,9 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         }
 
         findPreference<Preference>("p_settings_telegram")?.setOnPreferenceClickListener {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+Jxyj7znoNQsyMjg0")))
+            // 2026-08-22 : ancien lien +Jxyj7znoNQsyMjg0 MORT — le groupe a été supprimé par
+            //   erreur. Un lien d'invitation privé ne se redirige pas : il faut republier.
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+VcXqW4DA1w1lNTg0")))
             true
         }
 
