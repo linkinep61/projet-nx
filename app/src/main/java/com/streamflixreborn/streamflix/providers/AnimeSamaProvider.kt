@@ -860,6 +860,76 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
      *  Sert à reprendre APRÈS les pages de scans sautées au chargement précédent. */
     @Volatile private var curseurGenre: Pair<String, Int>? = null
 
+    // ══════════════════════════════════════════════════════════════════════════════
+    // ANTI-BOUCLE DE PAGINATION — 2026-08-22
+    //
+    // CE QUE FAIT LE SITE (mesuré, pas supposé). AnimeSama ne renvoie JAMAIS de page
+    // vide : il BORNE le numéro de page à la dernière page existante et la re-sert
+    // indéfiniment. Vérifié sur le catalogue réel :
+    //     genre Isekai + VOSTFR + Anime : p1=48, p2=48, p3=21, p4=21, p5=21 … p99=21
+    //                                     (p4..p99 = COPIE EXACTE de p3)
+    //     genre Ghibli : 19 cartes, et p1 = p2 = p3 = … = p99
+    //     genre Yuri   : 13 cartes, idem
+    //     type[]=Film  : p2 = p3 = … = p99
+    //
+    // POURQUOI ÇA CASSE L'APPLI. Tous les ViewModels concluent « fin de liste » avec
+    // `hasMore = résultats.isNotEmpty()` (GenreViewModel:327, TvShowsViewModel:220,
+    // MoviesViewModel:221). Comme la dernière page n'est jamais vide, hasMore reste
+    // VRAI pour toujours : l'appli redemande la même page en boucle et empile les
+    // mêmes titres. La liste enfle sans fin, AppAdapter.identityAt est en O(n²) sur
+    // le nombre d'items, et l'affichage se fige en « ça mouline » alors que le
+    // contenu, lui, n'avance plus. Symptôme rapporté : « isekai ne charge pas tout
+    // le contenu et mouline sur une page ».
+    //
+    // LA PARADE. On mémorise les slugs déjà rendus pour la liste en cours ; une page
+    // qui n'apporte AUCUN slug inédit est rendue VIDE — le seul signal que les
+    // ViewModels savent lire pour dire « on est au bout ». Rien à changer côté UI,
+    // et ça borne aussi les doublons (un titre ne peut plus apparaître deux fois).
+    // Corollaire : ça vaut pour TOUS les genres et pour les onglets Séries/Films,
+    // pas seulement Isekai — c'est la pagination du site qui est ainsi faite.
+    // ══════════════════════════════════════════════════════════════════════════════
+    //
+    // ⚠ UN JEU DE SLUGS PAR LISTE, pas un seul global. HomeViewModel appelle
+    //   getTvShows()/getMovies() en tâche de fond pendant que l'user scrolle un
+    //   autre onglet (c'est déjà ce qui avait piégé les flags langue/type le
+    //   2026-06-20). Avec une mémoire unique, cet appel parasite remettrait à zéro
+    //   la liste que l'user est en train de lire. Chaque liste a donc la sienne.
+    private val slugsRendus = LinkedHashMap<String, HashSet<String>>()
+
+    /** À appeler au début de chaque liste paginée. Repart de zéro quand le
+     *  ViewModel redemande la page 1 (= nouvelle ouverture de l'écran). */
+    private fun ouvrirListe(cle: String, page: Int): Unit = synchronized(slugsRendus) {
+        if (page <= 1) slugsRendus.remove(cle)
+        slugsRendus.getOrPut(cle) { HashSet() }
+        while (slugsRendus.size > 6) {
+            val plusVieille = slugsRendus.keys.firstOrNull() ?: break
+            slugsRendus.remove(plusVieille)
+        }
+    }
+
+    /** Vrai la PREMIÈRE fois seulement. [section] sépare les sous-listes fusionnées
+     *  dans un même appel (onglet FR = animes VF + films dans la même réponse). */
+    private fun inedit(cle: String, section: String, slug: String): Boolean =
+        synchronized(slugsRendus) {
+            slugsRendus.getOrPut(cle) { HashSet() }.add("$section:$slug")
+        }
+
+    // Variante SANS mémoire cumulative, pour les onglets Séries/Films.
+    //   Pourquoi une variante : HomeViewModel pagine EN TÂCHE DE FOND sur les mêmes
+    //   listes (getMovies(1..n) / getTvShows(1..n), HomeViewModel:732-748). Avec une
+    //   mémoire cumulative partagée, cet appel parasite marquerait des titres comme
+    //   « déjà rendus » et l'onglet que l'user regarde en PERDRAIT. Ici on ne compare
+    //   qu'à la page précédente : si l'enrichissement s'intercale, au pire on rate la
+    //   détection de recyclage une fois — jamais on ne supprime du contenu.
+    private val signaturePage = HashMap<String, String>()
+
+    /** Vrai si cette page est la copie conforme de la précédente pour la même liste. */
+    private fun pageRecyclee(cle: String, ids: List<String>): Boolean = synchronized(signaturePage) {
+        if (ids.isEmpty()) return@synchronized false
+        val signature = ids.sorted().joinToString("|")
+        signaturePage.put(cle, signature) == signature
+    }
+
     /** 2026-06-20 (user "VOSTFR + arts martiaux + Série OK / + Film → séries au
      *  lieu de films") : quand un genre est actif, le ViewModel rappelle
      *  `getGenre()` SANS repasser par getFilteredXxx → mes flags langue/type
@@ -1046,7 +1116,11 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
                 val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
-            }.let { movies.addAll(it) }
+            }.let { lot ->
+                // Anti-boucle : le site borne le n° de page et re-sert sa dernière page
+                //   à l'infini (voir le pavé ANTI-BOUCLE DE PAGINATION).
+                if (!pageRecyclee("movies-fr|anime", lot.map { it.id })) movies.addAll(lot)
+            }
         } catch (_: Exception) {}
 
         // 2. Standalone films from catalogue type=Film → Movie with isSeries=false
@@ -1059,7 +1133,9 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
                 val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 Movie(id = "$slug@film0", title = title, poster = img)
-            }.let { movies.addAll(it) }
+            }.let { lot ->
+                if (!pageRecyclee("movies-fr|film", lot.map { it.id })) movies.addAll(lot)
+            }
         } catch (_: Exception) {}
 
         return movies
@@ -1079,6 +1155,8 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         //   enrichment appelle getTvShows() → écraserait le contexte
         //   Movies posé par MoviesViewModel. Le tracking est fait via
         //   `setActiveTabContext()` appelé depuis les ViewModels.
+        // Anti-boucle de pagination (voir le pavé plus haut) : le site re-sert sa
+        //   dernière page à l'infini, la liste s'empilait donc sans jamais finir.
         return when (language) {
             "film" -> try {
                 val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
@@ -1089,7 +1167,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                     val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     TvShow(id = "$slug@vostfr-film0", title = title, poster = img).also { it.isMovie = true }
-                }
+                }.let { lot -> if (pageRecyclee("tv|film", lot.map { it.id })) emptyList() else lot }
             } catch (_: Exception) { emptyList() }
             else -> try {
                 val filmSlugs = getFilmSlugs()
@@ -1102,7 +1180,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                     val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     TvShow(id = "$slug@vostfr", title = title, poster = img)
-                }
+                }.let { lot -> if (pageRecyclee("tv|serie", lot.map { it.id })) emptyList() else lot }
             } catch (_: Exception) { emptyList() }
         }
     }
@@ -1110,6 +1188,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     override suspend fun getFilteredMovies(language: String, page: Int): List<Movie> {
         // "language" = type-filter "serie" / "film". Onglet Films Onyx → contexte langue=vf.
         // 2026-06-20 (FIX) : NE PAS toucher aux flags ici. Tracking via setActiveTabContext.
+        // Anti-boucle de pagination : voir le pavé plus haut.
         return when (language) {
             "film" -> try {
                 val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
@@ -1120,7 +1199,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                     val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     Movie(id = "$slug@film0", title = title, poster = img)
-                }
+                }.let { lot -> if (pageRecyclee("mv|film", lot.map { it.id })) emptyList() else lot }
             } catch (_: Exception) { emptyList() }
             else -> try {
                 val filmSlugs = getFilmSlugs()
@@ -1133,7 +1212,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                     val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
-                }
+                }.let { lot -> if (pageRecyclee("mv|serie", lot.map { it.id })) emptyList() else lot }
             } catch (_: Exception) { emptyList() }
         }
     }
@@ -2011,6 +2090,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         //   des pages en sautant les pages de scans, on reprend APRÈS elles au lieu de
         //   relire ce qu'on a déjà rendu.
         val cle = "$id|$lang|$type"
+        ouvrirListe("genre|$cle", page)
         var pageCourante = page
         val curseur = curseurGenre
         if (page > 1 && curseur != null && curseur.first == cle && curseur.second >= page) {
@@ -2046,6 +2126,9 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 val link = card.selectFirst("a[href*=/catalogue/]") ?: return@flatMap emptyList<Show>()
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                     .split("/").firstOrNull() ?: return@flatMap emptyList<Show>()
+                // Anti-boucle : le site re-sert sa dernière page à l'infini (voir le
+                //   pavé ANTI-BOUCLE DE PAGINATION). Un slug déjà rendu = page recyclée.
+                if (!inedit("genre|$cle", "g", slug)) return@flatMap emptyList<Show>()
                 val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@flatMap emptyList<Show>()
                 val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 // 2026-06-20 (user "sur FR il y a rien") : MoviesViewModel
