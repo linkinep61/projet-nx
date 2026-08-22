@@ -98,6 +98,58 @@ class GenreViewModel(private val id: String, private val genreName: String = "",
 
     private var page = 1
 
+    // ══════════════════════════════════════════════════════════════════════════════
+    // DOUBLONS D'AFFICHAGE — 2026-08-22
+    //
+    // Constaté sur l'appareil : dans le genre Isekai, CHAQUE titre s'affichait deux
+    // fois (« Youjo Senki », « Youjo Senki », « Zero no Tsukaima », « Zero no
+    // Tsukaima »…). 117 animes rendus en 234 vignettes.
+    //
+    // Cause : AnimeSamaProvider.getGenre émet volontairement DEUX objets par fiche,
+    // un Movie ET un TvShow (commentaire du 2026-06-20 dans le provider). C'est
+    // nécessaire ailleurs — MoviesViewModel fait filterIsInstance<Movie>() et
+    // TvShowsViewModel filterIsInstance<TvShow>(), chacun garde celui qui le
+    // concerne. Mais l'écran Genre, lui, affiche la liste TELLE QUELLE : il reçoit
+    // les deux et les montre tous les deux.
+    //
+    // On ne touche donc pas au provider (on casserait les onglets FR/VOSTFR) : on
+    // dédoublonne à l'affichage. Deux fiches qui pointent le même slug sont la même
+    // œuvre ; on garde celle qui correspond à sa nature — le TvShow pour une série,
+    // le Movie pour un film — en se fiant aux drapeaux posés par le provider.
+    // ══════════════════════════════════════════════════════════════════════════════
+    // ⚠ PRUDENCE : on ne fusionne QUE si le provider a lui-même signalé que l'une
+    //   des deux fiches est de l'autre nature (un Movie marqué isSeries, ou un
+    //   TvShow marqué isMovie). Sans ce signal explicite on garde les deux. Sinon,
+    //   sur un provider dont les identifiants sont numériques (TMDB), un film et
+    //   une série portant le même numéro s'annuleraient l'un l'autre — on
+    //   supprimerait du contenu au lieu de retirer un doublon.
+    private fun List<Show>.sansDoublonDeFiche(): List<Show> {
+        val gardes = LinkedHashMap<String, Show>()
+        val sansCle = ArrayList<Show>()
+        for (show in this) {
+            val identifiant = when (show) {
+                is Movie -> show.id
+                is TvShow -> show.id
+                else -> null
+            }
+            if (identifiant == null || !identifiant.contains('@')) { sansCle.add(show); continue }
+            val slug = identifiant.substringBefore('@')
+            val dejaLa = gardes[slug]
+            if (dejaLa == null) { gardes[slug] = show; continue }
+            val vainqueur = when {
+                show is TvShow && dejaLa is Movie && dejaLa.isSeries -> show   // c'est une série
+                show is Movie && dejaLa is TvShow && dejaLa.isMovie -> show    // c'est un film
+                show is Movie && dejaLa is TvShow && show.isSeries -> dejaLa
+                show is TvShow && dejaLa is Movie && show.isMovie -> dejaLa
+                dejaLa === show -> dejaLa
+                // Aucun signal du provider : on ne tranche pas, on garde les deux.
+                else -> { sansCle.add(show); dejaLa }
+            }
+            gardes[slug] = vainqueur
+        }
+        return gardes.values.toList() + sansCle
+    }
+
     sealed class State {
         data object Loading : State()
         data object LoadingMore : State()
@@ -126,7 +178,7 @@ class GenreViewModel(private val id: String, private val genreName: String = "",
                 } else {
                     // Genre standard → utiliser getGenre(id)
                     val genre = provider.getGenre(id).let {
-                        it.copy(shows = ParentalControlUtils.filterShows(it.shows))
+                        it.copy(shows = ParentalControlUtils.filterShows(it.shows).sansDoublonDeFiche())
                     }
 
                     page = 1
@@ -311,7 +363,7 @@ class GenreViewModel(private val id: String, private val genreName: String = "",
             try {
                 val provider = UserPreferences.currentProvider ?: return@launch
                 val genre = provider.getGenre(id, page + 1).let {
-                    it.copy(shows = ParentalControlUtils.filterShows(it.shows))
+                    it.copy(shows = ParentalControlUtils.filterShows(it.shows).sansDoublonDeFiche())
                 }
 
                 page += 1
@@ -322,7 +374,7 @@ class GenreViewModel(private val id: String, private val genreName: String = "",
                             id = genre.id,
                             name = genre.name,
 
-                            shows = currentState.genre.shows + genre.shows,
+                            shows = (currentState.genre.shows + genre.shows).sansDoublonDeFiche(),
                         ),
                         hasMore = genre.shows.isNotEmpty(),
                     )
