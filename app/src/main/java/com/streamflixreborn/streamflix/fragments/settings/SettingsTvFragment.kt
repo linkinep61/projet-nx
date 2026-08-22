@@ -690,7 +690,8 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         }
 
         findPreference<Preference>("p_settings_telegram")?.setOnPreferenceClickListener {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+Jxyj7znoNQsyMjg0")))
+            // 2026-08-22 : ancien lien +Jxyj7znoNQsyMjg0 MORT (groupe supprimé par erreur).
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+VcXqW4DA1w1lNTg0")))
             true
         }
 

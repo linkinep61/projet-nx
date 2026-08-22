@@ -51,8 +51,16 @@ class EmbedSeekExtractor : Extractor() {
     //   « No extractors found » (serveur bloqué sur « Chargement… »). Cette regex capte
     //   N'IMPORTE QUEL sous-domaine *.embedseek.com (3ᵉ passe de routage = containsMatchIn).
     //   L'extract() est déjà host-agnostique (il lit uri.host), donc rien d'autre à changer.
+    // 2026-08-22 (user : serveur ignoré sur l'Oppo) : embedseek a AUSSI changé d'extension.
+    //   Log : « HOTE NON COUVERT: movixupload.embedseek.xyz (aucun extracteur) » → le serveur
+    //   était écarté AVANT toute tentative d'extraction, alors que la page fonctionne : ouverte
+    //   dans Chrome elle charge son lecteur et affiche le vrai fichier
+    //   (« Obsession.2025.MULTi.VF2.1080p.WEB.H265-SUPPLY.mp4 »).
+    //   On ne fige donc plus l'extension : n'importe quel domaine embedseek.<tld> est accepté,
+    //   ce qui couvre le .xyz d'aujourd'hui et les déménagements suivants.
     override val rotatingDomain: List<Regex> = listOf(
-        Regex("""[a-z0-9-]+\.embedseek\.com"""),
+        Regex("""[a-z0-9-]+\.embedseek\.[a-z]{2,6}"""),
+        Regex("""(?<![a-z0-9-])embedseek\.[a-z]{2,6}"""),
     )
 
     // 2026-08-04 (user : « le serveur EmbedSeek, vous n'avez pas fait en sorte qu'il ait une
