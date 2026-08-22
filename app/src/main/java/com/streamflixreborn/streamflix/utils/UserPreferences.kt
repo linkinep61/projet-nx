@@ -378,6 +378,55 @@ object UserPreferences {
                 .apply()
         }
 
+    /**
+     * 2026-08-27 (user : « sur le provider Vavoo on a intégré un VPN, j'aimerais
+     *   utiliser ce VPN pour toute l'application, pour les VOD… dans Paramètres ›
+     *   Connexion et services une nouvelle option qui fera un VPN entier pour
+     *   l'application. Je parle bien des 2 variantes de VPN ») :
+     *
+     * VPN GLOBAL — étend le tunnel Shadowsocks VYPN (jusqu'ici réservé au
+     * provider Vavoo) à tout le trafic HTTP de l'app, via le ProxySelector
+     * installé par `VpnGlobal`.
+     *
+     * Mêmes valeurs que `vavooTunnelMode`, pour ne pas inventer un 2e vocabulaire :
+     *   OFF        → aucun VPN global (défaut = comportement historique)
+     *   VYPN       → « VPN 1 » : meilleur serveur du pool  (skipBestN = 0)
+     *   PLANETVPN  → « VPN 2 » : serveur alternatif        (skipBestN = 1)
+     *
+     * Il n'y a qu'UN seul VavooTunnel dans l'app : quand le VPN global est
+     * actif, c'est lui qui décide du serveur, et Vavoo en profite au passage.
+     */
+    private const val KEY_VPN_GLOBAL_MODE = "vpn_global_mode"
+    var vpnGlobalMode: String
+        get() {
+            if (!::prefs.isInitialized) return TUNNEL_MODE_OFF
+            return prefs.getString(KEY_VPN_GLOBAL_MODE, TUNNEL_MODE_OFF) ?: TUNNEL_MODE_OFF
+        }
+        set(value) {
+            if (!::prefs.isInitialized) return
+            val sanitized = when (value) {
+                TUNNEL_MODE_VYPN, TUNNEL_MODE_PLANETVPN -> value
+                else -> TUNNEL_MODE_OFF
+            }
+            prefs.edit().putString(KEY_VPN_GLOBAL_MODE, sanitized).apply()
+        }
+
+    /** true dès qu'une des 2 variantes de VPN global est sélectionnée. */
+    val vpnGlobalActif: Boolean
+        get() = vpnGlobalMode != TUNNEL_MODE_OFF
+
+    /** skipBestN du VPN global : 0 = VPN 1 (serveur principal), 1 = VPN 2. */
+    fun vpnGlobalSkipBestN(): Int =
+        if (vpnGlobalMode == TUNNEL_MODE_PLANETVPN) 1 else 0
+
+    /** Serveur à cibler pour l'unique tunnel de l'app : le VPN global prime sur
+     *  le réglage Vavoo quand il est activé. */
+    fun tunnelSkipBestNEffectif(): Int =
+        if (vpnGlobalActif) vpnGlobalSkipBestN() else vavooTunnelSkipBestN()
+
+    /** Le tunnel doit-il être monté au démarrage ? (VPN global OU Vavoo) */
+    fun tunnelDoitDemarrer(): Boolean = vpnGlobalActif || vavooUseTunnel
+
     /** 2026-05-13 (user "à l'ouverture d'un profil pas par maman c'est Mon IPTV
      *  qui s'ouvre au lieu du home fournisseur") : currentProvider est
      *  maintenant stocké PAR PROFIL. Chaque profil a sa propre clé
@@ -710,13 +759,20 @@ object UserPreferences {
         }
 
     /** Écran "Qui regarde ?" au lancement + verrouillage auto Home.
-     *  Activé par défaut. Si désactivé, pas de ProfilePicker auto,
-     *  l'user change de profil manuellement via les paramètres. */
+     *  Si désactivé, pas de ProfilePicker auto, l'user change de profil
+     *  manuellement via les paramètres (Apparence).
+     *
+     *  2026-08-27 (user : « l'écran de profil au lancement, je voudrais qu'il
+     *  soit désactivé par défaut » puis « faut juste que l'option soit
+     *  désactivée de base, et si on active ça fonctionne ») : le défaut passe
+     *  de `true` à `false`, pour tout le monde, sans migration ni cas
+     *  particulier. Qui veut l'écran l'active dans Paramètres › Apparence. */
     var profilePickerEnabled: Boolean
-        get() = Key.PROFILE_PICKER_ENABLED.getBoolean() ?: true
+        get() = Key.PROFILE_PICKER_ENABLED.getBoolean() ?: false
         set(value) {
             Key.PROFILE_PICKER_ENABLED.setBoolean(value)
         }
+
 
     var playerGestures: Boolean
         get() = Key.PLAYER_GESTURES.getBoolean() ?: true

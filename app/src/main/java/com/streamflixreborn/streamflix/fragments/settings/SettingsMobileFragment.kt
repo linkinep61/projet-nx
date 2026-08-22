@@ -917,6 +917,43 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             }
         }
 
+        // 2026-08-27 (user : « j'aimerais utiliser ce VPN pour toute l'application,
+        //   pour les VOD… tu me mets cette nouvelle option dans Connexion et services
+        //   qui fera un VPN entier pour l'application. Je parle bien des 2 variantes ») :
+        //   OFF / VPN 1 / VPN 2 — les 2 variantes partagent le tunnel VavooTunnel,
+        //   elles ne different que par le serveur cible dans le pool VYPN.
+        findPreference<ListPreference>("p_vpn_global")?.apply {
+            value = UserPreferences.vpnGlobalMode
+            summary = resumeVpnGlobal(this, UserPreferences.vpnGlobalMode)
+            setOnPreferenceChangeListener { preference, newValue ->
+                val mode = newValue as String
+                val liste = preference as? ListPreference
+                UserPreferences.vpnGlobalMode = mode
+                liste?.summary = resumeVpnGlobal(liste, mode)
+                if (mode != UserPreferences.TUNNEL_MODE_OFF) {
+                    Toast.makeText(
+                        requireContext(),
+                        getString(R.string.settings_vpn_global_demarrage),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                com.streamflixreborn.streamflix.utils.VpnGlobal.appliquer { ok ->
+                    activity?.runOnUiThread {
+                        if (!isAdded) return@runOnUiThread
+                        liste?.summary = resumeVpnGlobal(liste, UserPreferences.vpnGlobalMode)
+                        if (mode == UserPreferences.TUNNEL_MODE_OFF) return@runOnUiThread
+                        Toast.makeText(
+                            requireContext(),
+                            if (ok) getString(R.string.settings_vpn_global_avertissement)
+                            else getString(R.string.settings_vpn_global_echec),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+                true
+            }
+        }
+
         findPreference<ListPreference>("p_doh_provider_url")?.apply {
             value = UserPreferences.dohProviderUrl
             summary = resumeDoh(this, UserPreferences.dohProviderUrl)
@@ -2278,6 +2315,18 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             resources.getStringArray(R.array.doh_provider_urls).none { it == url }
 
     /** Libellé de la liste, ou l'adresse elle-même quand elle est personnalisée. */
+
+    /** Resume affiche sous « VPN pour toute l'application » : le libelle choisi
+     *  + l'etat reel du tunnel (il met quelques secondes a monter). */
+    private fun resumeVpnGlobal(liste: ListPreference?, mode: String): String {
+        if (mode == UserPreferences.TUNNEL_MODE_OFF) {
+            return getString(R.string.settings_vpn_global_summary_off)
+        }
+        val index = liste?.findIndexOfValue(mode) ?: -1
+        val libelle = if (index >= 0) liste?.entries?.getOrNull(index)?.toString() ?: mode else mode
+        return "$libelle · ${com.streamflixreborn.streamflix.utils.VpnGlobal.etatLisible()}"
+    }
+
     private fun resumeDoh(liste: androidx.preference.ListPreference?, url: String): CharSequence? {
         val i = liste?.findIndexOfValue(url) ?: -1
         val entrees = liste?.entries

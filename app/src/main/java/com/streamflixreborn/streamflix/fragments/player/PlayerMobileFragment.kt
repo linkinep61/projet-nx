@@ -7188,6 +7188,17 @@ class PlayerMobileFragment : Fragment() {
             Log.d("PlayerNetwork", "Emulator detected (${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}), using fallback")
             return if (needsDoH(videoUrl)) createDoHOkHttpDataSourceFactory() else createDefaultHttpDataSourceFactory()
         }
+
+        // 2026-08-27 (VPN global) : Cronet embarque sa PROPRE pile reseau et ignore
+        //   le ProxySelector Java installe par VpnGlobal -> il sortirait en clair,
+        //   hors tunnel, ce qui viderait le VPN de son sens pile sur la video. Quand
+        //   le VPN global est actif on retombe donc sur DefaultHttpDataSource
+        //   (HttpURLConnection), qui respecte le proxy SOCKS5 du tunnel.
+        if (com.streamflixreborn.streamflix.utils.VpnGlobal.actif()) {
+            Log.d("PlayerNetwork", "VPN global actif -> DefaultHttp au lieu de Cronet")
+            return createDefaultHttpDataSourceFactory()
+        }
+
         // Use pre-initialized engine from Play Services, or build one on-demand
         val engine = cronetEngine ?: try {
             Log.d("PlayerNetwork", "Cronet engine not pre-initialized, building on demand...")

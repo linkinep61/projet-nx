@@ -2054,6 +2054,22 @@ object BackupRegistry {
                             if (key.isMovie) item is com.streamflixreborn.streamflix.models.Movie
                             else item is com.streamflixreborn.streamflix.models.TvShow
 
+                        fun titreDe(item: Any): String =
+                            (item as? com.streamflixreborn.streamflix.models.Movie)?.title
+                                ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.title ?: ""
+                        fun idDe(item: Any): String =
+                            (item as? com.streamflixreborn.streamflix.models.Movie)?.id
+                                ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.id ?: ""
+                        // 2026-08-01 : l'année peut être dans le TITRE (« … (2026) ») ou dans
+                        //   l'IDENTIFIANT/slug (« les-specialistes-vf-1985 ») — mesuré : pour
+                        //   « Les Spécialistes », le titre renvoyé est nu (« LES SPECIALISTES »)
+                        //   et SEUL le slug porte l'année. On regarde donc les deux.
+                        fun anneeDe(item: Any): Int? =
+                            Regex("""\b(19|20)\d{2}\b""")
+                                .findAll(titreDe(item) + " " + idDe(item))
+                                .map { it.value.toInt() }
+                                .lastOrNull()
+
                         val t0 = System.currentTimeMillis()
                         val searchResults = try {
                             p.search(key.title, 1)
@@ -2064,6 +2080,16 @@ object BackupRegistry {
                         val searchMs = System.currentTimeMillis() - t0
                         Log.i(TAG, "DIAG [${p.name}] search('${key.title}') → ${searchResults.size} résultats en ${searchMs}ms")
                         if (searchResults.isNotEmpty()) {
+                            // 2026-08-27 : plafond ramene de 30 a 5 (sa valeur d'origine).
+                            //   Le 30 avait ete pose pour diagnostiquer « Ca » (18 resultats
+                            //   FrenchStream dont on ne voyait que les 5 premiers). Utile ce
+                            //   jour-la, nuisible en permanence : 28 sources x 30 lignes x 2
+                            //   passes = plusieurs centaines de lignes par fiche ouverte, en
+                            //   Log.i donc VISIBLE EN PRODUCTION. Ca noie le tampon logcat —
+                            //   mesure sur l'Oppo le meme jour : 45 secondes d'historique
+                            //   seulement, la manip du user etait deja perdue quand j'ai lu.
+                            //   On garde en revanche l'annee et le slug ajoutes ce jour-la :
+                            //   5 candidats bien decrits valent mieux que 30 mal decrits.
                             searchResults.take(5).forEachIndexed { i, item ->
                                 val itemTitle = (item as? com.streamflixreborn.streamflix.models.Movie)?.title
                                     ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.title ?: "?"
@@ -2075,7 +2101,9 @@ object BackupRegistry {
                                 val tok = typeOk(item)
                                 val wm = if (tok) workMatches(itemTitle, knownTitles, effectiveYear, key.isMovie) else false
                                 val st = if (tok && wm) seasonTitleOk(itemTitle, key.isMovie, key.season) else false
-                                Log.i(TAG, "DIAG [${p.name}]   [$i] '$itemTitle' type=$itemType typeOk=$tok workMatch=$wm seasonOk=$st")
+                                Log.i(TAG, "DIAG [${p.name}]   [$i] '$itemTitle' type=$itemType " +
+                                    "annee=${anneeDe(item)} id=${idDe(item)} " +
+                                    "typeOk=$tok workMatch=$wm seasonOk=$st")
                             }
                         }
 
@@ -2099,21 +2127,6 @@ object BackupRegistry {
                                 sousTitreCompatible(t, key.title)
                         }
                         val anneeVoulue = key.year?.takeIf { it > 1800 }
-                        fun titreDe(item: Any): String =
-                            (item as? com.streamflixreborn.streamflix.models.Movie)?.title
-                                ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.title ?: ""
-                        fun idDe(item: Any): String =
-                            (item as? com.streamflixreborn.streamflix.models.Movie)?.id
-                                ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.id ?: ""
-                        // 2026-08-01 : l'année peut être dans le TITRE (« … (2026) ») ou dans
-                        //   l'IDENTIFIANT/slug (« les-specialistes-vf-1985 ») — mesuré : pour
-                        //   « Les Spécialistes », le titre renvoyé est nu (« LES SPECIALISTES »)
-                        //   et SEUL le slug porte l'année. On regarde donc les deux.
-                        fun anneeDe(item: Any): Int? =
-                            Regex("""\b(19|20)\d{2}\b""")
-                                .findAll(titreDe(item) + " " + idDe(item))
-                                .map { it.value.toInt() }
-                                .lastOrNull()
                         // 2026-08-02 (Hajime no Ippo) : le SOUS-TITRE sert à PRÉFÉRER, pas à
                         //   rejeter. Mesuré sur VoirAnime, qui renvoie 10 fiches pour
                         //   « hajime no ippo » : Rising (S3), New Challenger (S2), Champion

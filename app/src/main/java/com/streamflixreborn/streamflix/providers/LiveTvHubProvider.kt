@@ -2808,6 +2808,34 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 Log.w(TAG, "FAST html.bet non reconnu: $channelName → ${src.take(80)}")
             }
 
+            // ── 2026-08-22 (user « si on veut pas faire de mise à jour on peut
+            //   le raccorder à quel dossier ») : PASSERELLE EXTRACTEUR GÉNÉRIQUE.
+            //   Jusqu'ici une entrée m3u devait porter une URL de FLUX : le src
+            //   partait tel quel à ExoPlayer. Une page de lecteur (cartelive.club
+            //   /player/4/<n>, etc.) donnait donc du HTML au player = écran noir.
+            //   Désormais : si le src n'a pas d'extension de flux ET qu'un
+            //   extracteur DÉJÀ déclaré couvre son hôte, on lui passe la main.
+            //   Conséquence voulue : n'importe quel site déjà géré par un
+            //   extracteur peut être ajouté depuis nx-data (data.m3u) SANS
+            //   nouvelle version de l'app — c'est ce qui rend « Multi Live »
+            //   pilotable depuis le web une fois cette version livrée.
+            //   ⚠ Garde-fous : on n'entre ici que pour du http(s) (les schémas
+            //   internes plex://, plutovod://, brightcove:// sont exclus), et
+            //   seulement si identifyServiceName reconnaît l'hôte — sinon on
+            //   retombe exactement sur le comportement direct d'avant.
+            val extensionsFlux = listOf(".m3u8", ".mpd", ".ts", ".mp4", ".mkv", ".webm", ".flv")
+            val cheminSrc = src.substringBefore('?').substringBefore('#').lowercase()
+            val estFluxDirect = extensionsFlux.any { cheminSrc.endsWith(it) }
+            if (src.startsWith("http", ignoreCase = true) && !estFluxDirect) {
+                val service = com.streamflixreborn.streamflix.extractors.Extractor
+                    .identifyServiceName(src)
+                if (service != null) {
+                    Log.w(TAG, "FAST via extracteur '$service': $channelName")
+                    return com.streamflixreborn.streamflix.extractors.Extractor
+                        .extract(src, server)
+                }
+            }
+
             // ── URL directe (pas html.bet) : LG Channels, Sony One, Plex, Rakuten ──
             val isHls = src.contains(".m3u8", ignoreCase = true)
             // 2026-06-27 : Mix FR (data.m3u) → headers spécifiques (UA/Referer/Origin)

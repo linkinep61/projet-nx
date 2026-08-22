@@ -1335,10 +1335,26 @@ object LiveHubFolderDialog {
                 android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
         // 2026-07-13 : séparer les catégories "Live MIX" des autres mix FR
         val liveMixCategories = mixCategories.filter { it.name.equals("Live MIX", ignoreCase = true) }
-        val pureMixCategories = mixCategories.filter { !it.name.equals("Live MIX", ignoreCase = true) }
+        // 2026-08-22 (user « le dossier tu le mets pas dans Mix FR, tu fais un
+        //   dossier un peu avant avec les autres Live MIX WorldWide ») :
+        //   « Multi Live » est un groupe de data.m3u comme les autres, donc il
+        //   tombait dans Mix FR — et pire, displayAggregatedCategories le rangeait
+        //   dans le fourre-tout « Programmes » (pas de " - " dans son nom).
+        //   On l'extrait ici comme "Live MIX" l'est déjà, et on le place EN TÊTE
+        //   de la liste des sous-dossiers. Couvre "Multi Live" et "Multi Live · miroir".
+        val multiLiveCategories = mixCategories.filter {
+            it.name.startsWith("Multi Live", ignoreCase = true)
+        }
+        val pureMixCategories = mixCategories.filter {
+            !it.name.equals("Live MIX", ignoreCase = true) &&
+                !it.name.startsWith("Multi Live", ignoreCase = true)
+        }
         // Sous-dossiers : Replays + Mix FR + Live MIX + WorldWide + Sport,
         //   Rakuten TV, Sony One. Chacun ouvre son sous-dialog.
         val folders = ArrayList<Pair<String, () -> Unit>>()
+        // EN PREMIER (demande user) : le bouquet Multi Live.
+        if (multiLiveCategories.isNotEmpty()) folders.add("📡 Multi Live" to {
+            displayCategories(ctx, "Multi Live", multiLiveCategories, onChannelSelected) })
         if (baseCategories.isNotEmpty()) folders.add("📺 Replays" to {
             displayCategories(ctx, "Replays", baseCategories, onChannelSelected) })
         if (pureMixCategories.isNotEmpty()) folders.add("📁 Mix FR" to {

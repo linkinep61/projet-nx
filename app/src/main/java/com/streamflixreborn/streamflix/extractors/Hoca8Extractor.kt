@@ -42,18 +42,48 @@ open class Hoca8Extractor : Extractor() {
 
     private val context = StreamFlixApp.instance.applicationContext
 
+    /** 2026-08-22 : Referer réellement employé par la WebView pour la requête
+     *  m3u8 interceptée. La même façade (cartelive/bolaloca/embedme) sert
+     *  PLUSIEURS CDN selon le 1er segment de l'URL — /player/2/ passe par
+     *  hoca8, /player/1/ par barecrop, /player/4/ par instreams. Renvoyer un
+     *  Referer hoca8 figé faisait refuser les deux autres. Null = non capté
+     *  (chemin JS bridge) → on retombe sur l'ancien comportement. */
+    @Volatile private var dernierReferer: String? = null
+
+    /** 2026-08-22 : URL de la page d'embed réellement chargée dans l'iframe
+     *  (hoca8/footy.php, barecrop/embed, lockpop/embed, instream/hlsspanich).
+     *  Quand le m3u8 est capté par le PONT JS et non par l'interception réseau,
+     *  aucun en-tête Referer n'est disponible — on retombait alors sur hoca8.com
+     *  et le CDN répondait 403. C'est cette page-là que le navigateur enverrait
+     *  comme Referer, donc c'est elle qu'on rejoue. */
+    @Volatile private var dernierEmbedUrl: String? = null
+
     private val ANDROID_CHROME_UA =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     override suspend fun extract(link: String): Video {
+        dernierReferer = null
+        dernierEmbedUrl = null
         val streamUrl = extractByIntercepting(link)
             ?: throw Exception("Hoca8: Could not capture stream URL from $link")
         val isHls = streamUrl.contains(".m3u8", ignoreCase = true)
+        // 2026-08-22 : Referer/Origin dérivés de la requête réellement
+        //   interceptée (cf. dernierReferer). Repli sur hoca8.com si rien n'a
+        //   été capté, pour garder EXACTEMENT le comportement d'avant.
+        //   Priorité : la page d'embed chargée (valable pour les DEUX chemins de
+        //   capture, pont JS compris) > le Referer de la requête interceptée >
+        //   hoca8 en dernier recours.
+        val referer = dernierEmbedUrl?.takeIf { it.isNotBlank() }
+            ?: dernierReferer?.takeIf { it.isNotBlank() }
+            ?: "https://hoca8.com/"
+        val origine = runCatching {
+            java.net.URL(referer).let { u -> "${u.protocol}://${u.host}" }
+        }.getOrDefault("https://hoca8.com")
         return Video(
             source = streamUrl,
             headers = mapOf(
-                "Referer" to "https://hoca8.com/",
-                "Origin" to "https://hoca8.com",
+                "Referer" to referer,
+                "Origin" to origine,
                 "User-Agent" to ANDROID_CHROME_UA,
             ),
             type = if (isHls) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null,
@@ -152,9 +182,22 @@ open class Hoca8Extractor : Extractor() {
                             //   HLS.js s'initialise dans un contexte où XHR
                             //   et fetch sont déjà hookés → capture du m3u8.
                             //   On évite le re-route v8 qui menait à /sorry.
-                            if (hostLower.contains("hoca8.com") &&
-                                path.contains("/footy.php") &&
-                                request.method?.uppercase() == "GET") {
+                            // 2026-08-22 : MÊME injection pour les autres hébergeurs
+                            //   servis par la MÊME façade cartelive/bolaloca/embedme :
+                            //   /player/1/ → barecrop.net, /player/3/ → lockpop.net,
+                            //   /player/4/ → instream.click. Sans elle, HLS.js y récupère
+                            //   le m3u8 en mémoire et shouldInterceptRequest ne voit
+                            //   jamais passer la playlist → extraction en échec, écran
+                            //   noir. Diagnostic du 22/08 : l'iframe barecrop se chargeait
+                            //   bien, mais aucun "HLS PLAYLIST CAPTURED" ne suivait.
+                            val estPageEmbed =
+                                (hostLower.contains("hoca8.com") && path.contains("/footy.php")) ||
+                                (hostLower.contains("barecrop.net") && path.contains("/embed/")) ||
+                                (hostLower.contains("lockpop.net") && path.contains("/embed/")) ||
+                                (hostLower.contains("instream.click") &&
+                                    (path.contains("hlsspanich.php") || path.contains("player.php")))
+                            if (estPageEmbed) dernierEmbedUrl = reqUrl
+                            if (estPageEmbed && request.method?.uppercase() == "GET") {
                                 try {
                                     val client = okhttp3.OkHttpClient.Builder()
                                         .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
@@ -164,7 +207,14 @@ open class Hoca8Extractor : Extractor() {
                                         .build()
                                     val req = okhttp3.Request.Builder()
                                         .url(reqUrl)
-                                        .header("Referer", "https://bolaloca.my/")
+                                        // hoca8 attend le referer historique ; les
+                                        //   autres hébergeurs attendent la page de
+                                        //   façade réellement chargée (sinon 403).
+                                        .header(
+                                            "Referer",
+                                            if (hostLower.contains("hoca8.com"))
+                                                "https://bolaloca.my/" else url
+                                        )
                                         .header("User-Agent", ANDROID_CHROME_UA)
                                         .header("Accept", "text/html,application/xhtml+xml")
                                         .build()
@@ -207,6 +257,7 @@ open class Hoca8Extractor : Extractor() {
                                 reqUrl.contains(".m3u8", ignoreCase = true)
                             if (hasM3u8) {
                                 android.util.Log.d("Hoca8Extractor", "HLS PLAYLIST CAPTURED: $reqUrl")
+                                dernierReferer = request.requestHeaders?.get("Referer")
                                 resolve(reqUrl)
                                 return WebResourceResponse("text/plain", "utf-8", null)
                             }

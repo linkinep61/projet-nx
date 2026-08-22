@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  2026-08-27 (retours utilisateurs : « le mode jeu s'active sur mon telephone »).
+
+  ONYX se declare `android:appCategory="game"` UNIQUEMENT parce que c'est la seule
+  categorie qu'Android Auto accepte de projeter en video (les apps « projection »
+  sont exclues). Ce n'est pas un jeu, et il ne doit surtout pas etre traite comme
+  tel par le systeme.
+
+  Depuis Android 12, une application categorisee « jeu » peut declarer qu'elle ne
+  prend en charge AUCUN mode jeu : le systeme n'a alors plus le droit de lui
+  appliquer ses interventions (bridage du framerate, mise a l'echelle, profils
+  batterie/performance).
+
+  ATTENTION — portee reelle : ceci gouverne le mode jeu d'Android D'ORIGINE. Les
+  surcouches constructeur (Game Turbo chez Xiaomi, Game Space chez Oppo, Game
+  Launcher chez Samsung) ont leur propre detection et leur propre liste d'apps ;
+  elles ne sont pas tenues d'honorer ce fichier. Si un bandeau « mode turbo »
+  persiste sur ces marques, la seule reponse est de retirer ONYX de la liste des
+  jeux dans les reglages du telephone.
+-->
+<game-mode-config
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsBatteryGameMode="false"
+    android:supportsPerformanceGameMode="false" />
