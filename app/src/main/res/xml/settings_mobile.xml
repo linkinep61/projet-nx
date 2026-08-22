@@ -504,7 +504,7 @@
                 android:key="PROFILE_PICKER_ENABLED"
                 android:title="@string/settings_profile_picker"
                 android:summary="@string/settings_profile_picker_summary"
-                android:defaultValue="true"
+                android:defaultValue="false"
                 app:iconSpaceReserved="false" />
 
             <!-- 2026-06-21 (user "réunir toutes ces préférences en une seule
@@ -575,6 +575,17 @@
                 android:key="p_scan_resolver_qr"
                 android:title="@string/settings_scan_resolver_qr_title"
                 android:summary="@string/settings_scan_resolver_qr_summary"
+                app:iconSpaceReserved="false" />
+
+            <!-- 2026-08-27 (VPN global) : etend le tunnel Shadowsocks VYPN, jusqu'ici
+                 reserve au provider Vavoo, a tout le trafic de l'app (VOD comprises). -->
+            <ListPreference
+                android:key="p_vpn_global"
+                android:title="@string/settings_vpn_global_title"
+                android:dialogTitle="@string/settings_vpn_global_dialog"
+                android:entries="@array/vpn_global_labels"
+                android:entryValues="@array/vpn_global_values"
+                android:defaultValue="OFF"
                 app:iconSpaceReserved="false" />
 
             <ListPreference

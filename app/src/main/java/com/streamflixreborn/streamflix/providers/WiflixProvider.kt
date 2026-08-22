@@ -1703,7 +1703,23 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             //   ⚠ ÉGALITÉ, et pas inclusion ni « mots en trop » : le titre de 2019 contient
             //   celui de 1959 et n'est bâti qu'avec les mots de ses deux titres connus. Les
             //   deux autres tests le laissent passer. Même piège que côté Movix.
-            if (videoType is Video.Type.Episode && titresConnus.isNotEmpty()) {
+            // 2026-08-24 : ETENDU AUX FILMS (user : « Wiflix a fait un mauvais match »).
+            //
+            //   Cas prouve, The Yeti (TMDB 1418657, 2026) :
+            //     D/Wiflix: searchServersByTitle('The Yeti')
+            //       -> slug=5335-yeti-yeti-curse-of-the-snow-demon.html
+            //   soit « Yeti: Curse of the Snow Demon » (2008). Le libelle indexe cote
+            //   flemmix est le seul mot « Yeti » -> titleMatches passe, et le slug ne porte
+            //   AUCUNE annee -> la gate annee ne juge rien. Exactement le trou corrige le
+            //   11/08 pour les series, reste ouvert pour les films.
+            //   Le slug, lui, dit tout : « yeti yeti curse of the snow demon » n'est egal a
+            //   aucun titre officiel de la fiche -> rejet.
+            //
+            //   Comparaison SANS ESPACES : les titres FR a apostrophe donnent « avatar la
+            //   voie de l eau » cote TMDB et « avatarlavoiedeleau » cote slug. Coller les
+            //   caracteres absorbe apostrophes et traits d'union sans rien assouplir : ca
+            //   reste une EGALITE, pas une inclusion.
+            if (titresConnus.isNotEmpty()) {
                 val nomSlug = titreDepuisSlug(a.attr("href"))
                 // 2026-08-16 (user : « les 3 serveurs de Wiflix n'apparaissaient pas ») —
                 //   SUFFIXE D'ÉQUIPE en fin de slug. Wiflix (servi par flemmix) tague ses
@@ -1726,9 +1742,18 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                             dernier.length <= 5 && dernier !in motsTitresConnus
                         ) mots.dropLast(1).joinToString(" ") else nomSlug
                     }
+                // 2026-08-24 : vocabulaire de RELEASE des slugs de films (truefrench,
+                //   bluray, 1080p...). Retire UNIQUEMENT si le mot n'appartient a aucun
+                //   titre officiel de la fiche - sinon « French Connection » perdrait son
+                //   « french » et serait rejete a tort.
+                val nomSlugSansRelease = nomSlug.split(" ")
+                    .filterNot { it in MOTS_RELEASE && it !in motsTitresConnus }
+                    .joinToString(" ")
+                val clesConnues = titresConnus.map { normPourEgalite(it).replace(" ", "") }.toSet()
                 if (nomSlug.isNotBlank() &&
-                    titresConnus.none { normPourEgalite(it) == nomSlug } &&
-                    titresConnus.none { normPourEgalite(it) == nomSlugSansTag }
+                    nomSlug.replace(" ", "") !in clesConnues &&
+                    nomSlugSansTag.replace(" ", "") !in clesConnues &&
+                    nomSlugSansRelease.replace(" ", "") !in clesConnues
                 ) {
                     Log.w(
                         "Wiflix",
@@ -1826,6 +1851,19 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             .filterNot { Regex("^s?\\d{1,2}$").matches(it) }
         return mots.joinToString(" ")
     }
+
+    /**
+     * 2026-08-24 : vocabulaire de RELEASE frequent dans les slugs de FILMS. Separe de
+     * MOTS_SLUG_NEUTRES car il n'est retire que de facon CONDITIONNELLE (uniquement si le
+     * mot n'appartient a aucun titre officiel de la fiche) : « French Connection » garde
+     * son « french ».
+     */
+    private val MOTS_RELEASE = setOf(
+        "truefrench", "french", "vff", "vfq", "vfi", "vfstfr", "bluray", "brrip", "webrip",
+        "webdl", "hdlight", "hdrip", "dvdrip", "x264", "x265", "1080p", "720p", "480p",
+        "4k", "uncut", "remastered", "extended", "directors", "director", "cut", "version",
+        "longue", "redux", "unrated", "imax",
+    )
 
     /** Vocabulaire de slug qui n'identifie aucune œuvre. */
     private val MOTS_SLUG_NEUTRES = setOf(

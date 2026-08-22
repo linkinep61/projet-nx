@@ -113,6 +113,14 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
 
+        <!-- 2026-08-27 : ONYX est categorise « jeu » pour Android Auto video (seule
+             categorie projetee), mais n'est PAS un jeu. On refuse explicitement les
+             interventions du mode jeu d'Android (bridage, mise a l'echelle, profils
+             batterie/performance). Detail et portee : res/xml/game_mode_config.xml -->
+        <meta-data
+            android:name="android.game_mode_config"
+            android:resource="@xml/game_mode_config" />
+
         <!-- 2026-06-18 (user "la face de connexion pour M6 et TF1") :
              activité WebView fullscreen pour login TF1+ ou M6 6play.
              Intercepte les cookies de session après login. -->

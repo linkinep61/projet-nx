@@ -727,18 +727,80 @@ object M6Resolver {
             return null
         }
         var m6Jwt = com.streamflixreborn.streamflix.utils.M6Auth.getM6Jwt(ctx)
+        // 2026-08-27 (Discord — momonatello : « Replay ça fonctionne, mais pas le
+        //   live » ; Indiz : « pour faire fonctionner le live M6 il faut lancer un
+        //   replay peu importe, ensuite tu lances le live et ça passe » ; Nanico
+        //   et Francky0679 reproduisent) :
+        //
+        //   CAUSE. Le pipeline REPLAY (resolveVideo) rafraîchit le JWT avec
+        //   `resolveSync(…, forceWebView = true)`. Le pipeline LIVE, lui,
+        //   appelait `resolveSync(ctx, 30_000L)` SANS forceWebView. Or
+        //   M6UidResolver.resolveSync démarre par :
+        //       if (!forceWebView) { M6Auth.getAccountId(ctx)?.let { return it } }
+        //   Après une reconnexion l'account_id EST en cache (posé au login) →
+        //   resolveSync rendait la main en ~15 ms SANS jamais lancer la WebView,
+        //   donc sans jamais refetch /getJwt → le JWT restait absent ou
+        //   « GIGYA::… » → « still no valid M6 JWT → ABORT ».
+        //   Lancer un replay d'abord exécutait, LUI, la vraie échelle de
+        //   rafraîchissement et posait un JWT valide en cache : d'où le
+        //   contournement trouvé par les testeurs.
+        //
+        //   On aligne donc le live sur le replay : forceWebView, puis échange
+        //   HTTP fetchM6Jwt en secours, puis contrôle d'expiration.
         if (m6Jwt.isNullOrBlank() || m6Jwt.startsWith("GIGYA::")) {
-            Log.d(TAG, "resolveLive: no fresh M6 JWT, trying M6UidResolver")
+            Log.d(TAG, "resolveLive: no fresh M6 JWT → WebView headless (forceWebView)")
             try {
-                com.streamflixreborn.streamflix.utils.M6UidResolver.resolveSync(ctx, 30_000L)
+                com.streamflixreborn.streamflix.utils.M6UidResolver
+                    .resolveSync(ctx, 30_000L, forceWebView = true)
                 m6Jwt = com.streamflixreborn.streamflix.utils.M6Auth.getM6Jwt(ctx)
             } catch (e: Exception) {
                 Log.w(TAG, "resolveLive: M6UidResolver failed: ${e.message}")
             }
         }
+        // La WebView peut ne rendre qu'un id_token Gigya (« GIGYA::… ») : on
+        //   l'échange contre un vrai JWT M6 en HTTP, comme le fait le replay.
+        if (m6Jwt?.startsWith("GIGYA::") == true) {
+            Log.d(TAG, "resolveLive: id_token Gigya → échange HTTP fetchM6Jwt")
+            val nouveauJwt = try {
+                fetchM6Jwt(ctx, accountId)
+            } catch (e: Exception) {
+                Log.w(TAG, "resolveLive: fetchM6Jwt failed: ${e.message}")
+                null
+            }
+            if (!nouveauJwt.isNullOrBlank()) {
+                m6Jwt = nouveauJwt
+                com.streamflixreborn.streamflix.utils.M6Auth.saveM6Jwt(ctx, nouveauJwt)
+            }
+        }
         if (m6Jwt.isNullOrBlank() || m6Jwt.startsWith("GIGYA::")) {
             Log.w(TAG, "resolveLive: still no valid M6 JWT for live $service → ABORT")
             return null
+        }
+        // 2026-08-27 : un JWT présent mais EXPIRÉ passait le garde ci-dessus et
+        //   faisait échouer play_resource / upfront-token en 498. Le replay
+        //   testait déjà l'expiration (isJwtExpired), le live non.
+        if (isJwtExpired(m6Jwt)) {
+            Log.d(TAG, "resolveLive: JWT expiré (claim exp) → refresh WebView forcé")
+            com.streamflixreborn.streamflix.utils.M6Auth.saveM6Jwt(ctx, "")
+            try {
+                com.streamflixreborn.streamflix.utils.M6UidResolver
+                    .resolveSync(ctx, 30_000L, forceWebView = true)
+            } catch (e: Exception) {
+                Log.w(TAG, "resolveLive: refresh WebView failed: ${e.message}")
+            }
+            m6Jwt = com.streamflixreborn.streamflix.utils.M6Auth.getM6Jwt(ctx)
+            if (m6Jwt?.startsWith("GIGYA::") == true) {
+                val rattrapage = try { fetchM6Jwt(ctx, accountId) } catch (_: Exception) { null }
+                if (!rattrapage.isNullOrBlank()) {
+                    m6Jwt = rattrapage
+                    com.streamflixreborn.streamflix.utils.M6Auth.saveM6Jwt(ctx, rattrapage)
+                }
+            }
+            if (m6Jwt?.startsWith("eyJ") != true) {
+                Log.w(TAG, "resolveLive: refresh du JWT expiré échoué → ABORT")
+                return null
+            }
+            Log.d(TAG, "resolveLive: JWT rafraîchi OK (len=${m6Jwt!!.length})")
         }
         // 2026-06-19 v39 (suite) : pipeline LIVE M6+ équivalent à TF1+
         //   mediainfocombo. On appelle l'API play_resource de 6play middleware

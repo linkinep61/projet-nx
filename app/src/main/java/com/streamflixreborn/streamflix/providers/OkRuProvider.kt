@@ -113,6 +113,24 @@ object OkRuProvider {
         RegexOption.IGNORE_CASE,
     )
 
+    /**
+     * 2026-08-25 (user : « OK.RU a mis un mauvais match ») — SIGNATURE D'UPLOADER COLLEE.
+     *
+     *   L'ancienne expression etait `\\b\\S+\\.(org|com|…)\\b`. Or un nom de release n'a
+     *   AUCUNE espace : `\\S+` avalait tout depuis le debut de la chaine jusqu'au domaine
+     *   final. Sur « Nailed.It.S01E02.FRENCH.WEBRip.XviD-WWW.ADDSERIE.COM », le nettoyage
+     *   rendait une chaine VIDE — plus de jetons, donc plus de marqueur SxxExx, donc le
+     *   controle de franchise etait saute et la video passait. C'est comme ca que deux
+     *   episodes de « Nailed It! » ont ete servis pour « Ça » (titre alternatif « It »).
+     *
+     *   Le jeton de domaine ne doit pas traverser les points : on n'avale que
+     *   « ADDSERIE.COM », « SERIE-VOSTFR.ME », « VoirFilms.org ».
+     */
+    private val RE_DOMAINE = Regex(
+        "\\b[A-Za-z0-9-]+\\.(org|com|net|co|io|tv|me|cc|to)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+
     private fun nettoyerTitre(t: String): String =
         // ⚠ On ne vide un crochet QUE s'il contient une signature d'uploader (un domaine, un
         //   « www. », un « [720p] », un « [source] »). Vider tous les crochets était un vrai
@@ -121,7 +139,7 @@ object OkRuProvider {
         //   exactement le mauvais match qu'on cherche à éliminer. Mesuré sur ok.ru.
         Regex("\\[([^\\]]*)\\]").replace(t) { m ->
             if (RE_SIGNATURE.containsMatchIn(m.groupValues[1])) " " else " ${m.groupValues[1]} "
-        }.replace(Regex("\\b\\S+\\.(org|com|net|co|io|tv|me|cc|to)\\b", RegexOption.IGNORE_CASE), " ")
+        }.replace(RE_DOMAINE, " ")
 
     private data class Candidat(
         val id: String,
@@ -237,6 +255,16 @@ object OkRuProvider {
                 val iMarqueur = mots.indexOfFirst { m ->
                     RE_MARQUEUR_POS.matches(m) ||
                         (!estEpisode && annee != null && m == annee.toString())
+                }
+                // 2026-08-25 : FILET — le controle de franchise ne doit jamais etre saute
+                //   en silence. Pour un episode, le marqueur SxxExx a DEJA ete exige plus
+                //   haut sur le titre brut : s'il a disparu des jetons nettoyes, c'est que
+                //   le nettoyage a mange le nom de l'oeuvre. Dans ce cas on ne sait plus
+                //   juger — et « on ne sait pas » doit valoir REFUS, pas acceptation.
+                if (estEpisode && iMarqueur < 0) {
+                    Log.d(TAG, "écarté « ${c.titre} » — nettoyage a effacé le nom " +
+                        "(marqueur S${saison}E${episode} absent après nettoyage)")
+                    return@filter false
                 }
                 if (iMarqueur > 0) {
                     val enTrop = mots.take(iMarqueur).filter { m ->

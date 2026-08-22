@@ -2306,6 +2306,14 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     private const val NATIFS_SEULEMENT = true
 
     /**
+     * 2026-08-25 : en dessous de ce nombre de sources Movix, on considère la récolte MAIGRE
+     * et on ressort les hébergeurs tiers mis de côté par `NATIFS_SEULEMENT` (cf. `repliTiers`
+     * dans `fetchNativeMovixServers`). Réglé à 3 : un titre normalement pourvu dépasse ce
+     * seuil avec ses seuls natifs, un titre orphelin non.
+     */
+    private const val SEUIL_REPLI_TIERS = 3
+
+    /**
      * 2026-08-16, SOIR — le filtre par hébergeur ne s'applique PLUS à `links`.
      *
      * Raisonnement du user, et il est juste : « pour que tu les aies bridés, c'est qu'ils sont
@@ -2448,6 +2456,26 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         onPartial: (suspend (List<Video.Server>) -> Unit)? = null,
     ): List<Video.Server> {
         val servers = mutableListOf<Video.Server>()
+
+        // 2026-08-25 (user : « faut débloquer l'endroit qui match pas ») — REPLI DES TIERS.
+        //
+        //   `NATIFS_SEULEMENT` jette les hébergeurs tiers de l'agrégateur `tmdb` parce que
+        //   nos backups directs (Wiflix, FrenchStream, Coflix…) les servent déjà : c'est lui
+        //   qui évite les lots de 13 serveurs en doublon, et il reste en place.
+        //
+        //   Mais quand AUCUN backup direct n'a le titre, ce filtre ne retire pas un doublon :
+        //   il retire la seule source qui existe. Cas mesuré sur « Ça » (mini-série 1990,
+        //   tmdb 19614, S01E01) — relevé en direct sur l'API :
+        //     api/links/tv/19614?...&episode=2   → 404 « Aucun lien trouvé »
+        //     api/cpasmal, api/fstream, api/wiflix, api/swiftflow, frembed → vides
+        //     api/tmdb/tv/19614?season=1&episode=1 → 12 lecteurs FR (wishonly, lulustream,
+        //       vidoza, vidhideplus, darkibox, dood, filemoon, voe, vidmoly, waaw, veev,
+        //       vidguard) — TOUS écartés par le filtre → l'app affichait 0 serveur.
+        //
+        //   On met donc les tiers de côté au lieu de les détruire, et on ne les ressort que
+        //   si Movix n'a RIEN rendu d'autre. Sur un titre normal, `links` rend ses natifs →
+        //   la liste n'est pas vide → les tiers restent écartés, comportement inchangé.
+        val repliTiers = java.util.concurrent.CopyOnWriteArrayList<Video.Server>()
 
         when (videoType) {
             is Video.Type.Movie -> {
@@ -2664,7 +2692,14 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                 //   Rpmvid…). Les tiers (Filemoon, VOE, Uqload, Streamwish…)
                                 //   sont déjà servis par nos backups directs.
                                 if (NATIFS_SEULEMENT && !estLecteurNatifMovix(url)) {
-                                    Log.d("MovixProvider", "tmdb : tiers écarté ($playerName)")
+                                    // 2026-08-25 : mis de côté, pas détruit — cf. `repliTiers`.
+                                    repliTiers.add(
+                                        Video.Server(
+                                            id = "tmdbmovix-repli-${repliTiers.size}",
+                                            name = "Movix · $playerName - $qualityLabel ($lang)",
+                                            src = url,
+                                        )
+                                    )
                                     return@forEach
                                 }
                                 list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "Movix · $playerName - $qualityLabel ($lang)", src = url))
@@ -3004,7 +3039,14 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                 //   Rpmvid…). Les tiers (Filemoon, VOE, Uqload, Streamwish…)
                                 //   sont déjà servis par nos backups directs.
                                 if (NATIFS_SEULEMENT && !estLecteurNatifMovix(url)) {
-                                    Log.d("MovixProvider", "tmdb : tiers écarté ($playerName)")
+                                    // 2026-08-25 : mis de côté, pas détruit — cf. `repliTiers`.
+                                    repliTiers.add(
+                                        Video.Server(
+                                            id = "tmdbmovix-repli-${repliTiers.size}",
+                                            name = "Movix · $playerName - $qualityLabel ($lang)",
+                                            src = url,
+                                        )
+                                    )
                                     return@forEach
                                 }
                                 list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "Movix · $playerName - $qualityLabel ($lang)", src = url))
@@ -3126,6 +3168,28 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 }
 
                 allResults.forEach { servers.addAll(it) }
+            }
+        }
+        // 2026-08-25, 2e passe (user : « j'ai toujours pas de serveur pour l'épisode 1 »).
+        //   La 1re version conditionnait le repli à `servers.isEmpty()`. Mesuré tout de
+        //   suite après sur « Ça » S01E01 : `api/links` rendait UN lien (embedseek), donc
+        //   la liste n'était pas vide, donc les 12 lecteurs restaient écartés — pour un
+        //   seul serveur, et qui ne suffisait pas. « Vide » est le mauvais critère : ce qui
+        //   compte est que la récolte soit MAIGRE. Sur un titre normal, Movix rend bien
+        //   plus que 3 sources et le repli ne part pas.
+        //   Dédup par URL : si un tiers est déjà arrivé par un autre endpoint Movix, on ne
+        //   le remet pas.
+        if (servers.size < SEUIL_REPLI_TIERS && repliTiers.isNotEmpty()) {
+            val dejaLa = servers.map { it.src }.toSet()
+            val ajout = repliTiers.filter { it.src !in dejaLa }
+            if (ajout.isNotEmpty()) {
+                Log.w(
+                    "MovixProvider",
+                    "REPLI TIERS : récolte Movix maigre pour $id (${servers.size} source(s) " +
+                        "< $SEUIL_REPLI_TIERS) → on ressort ${ajout.size} hébergeur(s) tiers " +
+                        "de l'agrégateur tmdb (${ajout.joinToString(", ") { it.name }})",
+                )
+                servers.addAll(ajout)
             }
         }
         return servers

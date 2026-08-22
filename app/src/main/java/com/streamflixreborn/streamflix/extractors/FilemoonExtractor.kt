@@ -59,6 +59,13 @@ open class FilemoonExtractor : Extractor() {
 
         private val VIDEO_ID_REGEX = Regex("""/(e|d)/([a-zA-Z0-9]+)""")
 
+    /**
+     * 2026-08-25 : sites dont on a la PREUVE MESURÉE qu'ils sont sur la liste blanche
+     * d'intégration de Filemoon (`/embed/details` rend 200 en se présentant comme eux,
+     * 403 sinon). Sert aux deux chemins : l'appel API et le repli WebView.
+     */
+    private val PARENTS_AUTORISES = listOf("https://lecteurvideo.com/")
+
     /** Domaines dont la WebView ne peut pas résoudre le nom (blocage DNS du fournisseur) et
      *  qu'on doit donc servir nous-mêmes via OkHttp + DNS-over-HTTPS. */
     private val DOMAINES_A_SERVIR = listOf(
@@ -325,8 +332,86 @@ open class FilemoonExtractor : Extractor() {
         }
 
         val detailsUrl = "$currentDomain/api/videos/$videoId/embed/details"
+
+        /**
+         * ── 2026-08-25 : LISTE BLANCHE D'INTÉGRATION (user : « Filemoon part direct chez
+         *    eux, pas chez nous ») ─────────────────────────────────────────────────────────
+         *
+         *   La page ouverte dans Chrome le dit en toutes lettres :
+         *     « Intégration bloquée sur ce site — Le propriétaire de la vidéo autorise
+         *       uniquement l'intégration de son lecteur sur des domaines autorisés. »
+         *
+         *   Ce n'est donc NI un blocage réseau, NI nos en-têtes : Filemoon tient une liste
+         *   blanche de sites intégrateurs, et le 403 tombe pour tous les autres. Mesuré en
+         *   direct sur `zhsq321clbwv`, même requête, seul le référent change :
+         *     Referer https://movix.fun/        → 403
+         *     Referer https://api.movix.fun/    → 403
+         *     Referer https://filemoon.sx/      → 403  (leur propre site !)
+         *     Referer https://lecteurvideo.com/ → 200  {"title":"Ca Il est Revenu 1990 …"}
+         *
+         *   `lecteurvideo.com` est le lecteur que Movix intègre — on l'avait vu passer dans
+         *   sa réponse API (`"iframe_src":"https://lecteurvideo.com/embed.php?id=…"`). C'est
+         *   pour ça que CloudStream lit ces liens et pas nous.
+         *
+         *   ⚠ On ne touche PAS au comportement par défaut (même origine, leçon du 06/08) :
+         *     on ne se présente comme intégrateur autorisé QU'APRÈS un 403, et uniquement
+         *     avec des domaines dont on a la preuve qu'ils sont sur la liste.
+         */
+        val parentsAutorises = PARENTS_AUTORISES
+
+        /**
+         * 2026-08-25, 2e passe — CE SONT NOS `X-Embed-*` QUI NOUS DÉNONÇAIENT.
+         *
+         *   La 1re version rejouait avec `HashMap(detailsHeaders)` + un Referer autorisé.
+         *   Refusé quand même. Test différentiel, même requête, un seul groupe change :
+         *     Accept + UA + Referer + Origin (lecteurvideo)        → 200
+         *     … + Sec-Fetch-Site: same-origin                      → 200
+         *     … + Sec-Fetch-Site: cross-site                       → 200
+         *     … + X-Embed-Parent/Origin/Referer                    → 403
+         *     jeu complet de l'app                                 → 403
+         *
+         *   Filemoon lit `X-Embed-Origin` AVANT le Referer pour décider du site
+         *   intégrateur. On y déclarait `https://filemoon.sx`, absent de sa liste blanche :
+         *   le référent autorisé ne servait à rien, on se dénonçait dans l'en-tête d'à côté.
+         *   La tentative de secours part donc avec le strict minimum, et AUCUN `X-Embed-*`.
+         */
+        fun entetesAvecParent(parent: String): MutableMap<String, String> = mutableMapOf(
+            "User-Agent" to Extractor.DEFAULT_USER_AGENT,
+            "Accept" to "application/json",
+            "Referer" to parent,
+            "Origin" to parent.trimEnd('/'),
+            // ⚠ Les `X-Embed-*` doivent DIRE LA MÊME CHOSE que le référent. Mesuré :
+            //     Referer lecteurvideo + X-Embed-Origin filemoon.sx   → 403
+            //     Referer lecteurvideo + X-Embed-Origin lecteurvideo  → 200
+            //   Les retirer marche pour `details`, mais `playback` les EXIGE (405 sans).
+            //   On les garde donc, alignés sur l'intégrateur autorisé.
+            "X-Embed-Parent" to parent,
+            "X-Embed-Origin" to parent.trimEnd('/'),
+            "X-Embed-Referer" to parent,
+        )
+
+        var parentDebloque: String? = null
+
         val details = try {
-            service.getDetails(detailsUrl, detailsHeaders)
+            try {
+                service.getDetails(detailsUrl, detailsHeaders)
+            } catch (e403: retrofit2.HttpException) {
+                if (e403.code() != 403) throw e403
+                var rescape: DetailsResponse? = null
+                for (parent in parentsAutorises) {
+                    rescape = try {
+                        service.getDetails(detailsUrl, entetesAvecParent(parent)).also {
+                            parentDebloque = parent
+                            Log.i(TAG, "[Filemoon] 403 contourné via intégrateur autorisé « $parent »")
+                        }
+                    } catch (_: Exception) {
+                        Log.w(TAG, "[Filemoon] intégrateur « $parent » refusé lui aussi")
+                        null
+                    }
+                    if (rescape != null) break
+                }
+                rescape ?: throw e403
+            }
         } catch (e: retrofit2.HttpException) {
             // 404 + "video not found" body = link rot; surface a clearer message
             // than a generic HTTP exception so the player can fall back fast.
@@ -368,6 +453,19 @@ open class FilemoonExtractor : Extractor() {
         } else {
             playbackDomain = Regex("""(https?://[^/]+)""").find(embedFrameUrl)?.groupValues?.get(1)
                 ?: throw Exception("Could not extract domain from embed_frame_url")
+            // ── 2026-08-25, 6e passe : LES DEUX APPELS NE VONT PAS AU MÊME SERVEUR ──────
+            //   `details` part sur filemoon.sx — c'est LUI qui tient la liste blanche des
+            //   intégrateurs, et se présenter comme lecteurvideo.com l'ouvre (mesuré).
+            //   `playback`, lui, part sur le domaine rendu par `embed_frame_url`
+            //   (ex. dismz4n3wp6xnr3.org) : c'est la page de lecture elle-même, et elle
+            //   attend qu'on vienne de chez elle. Lui servir le déguisement « je viens de
+            //   lecteurvideo » n'avait aucune raison de marcher — les trois variantes
+            //   essayées ont toutes rendu 403 :
+            //     Referer lecteurvideo, sans X-Embed                     → 403
+            //     Referer lecteurvideo, X-Embed alignés lecteurvideo     → 403
+            //     … + jeton de preuve de travail valide                  → 403
+            //   Ce second appel garde donc ses en-têtes d'origine. Le déguisement ne sert
+            //   qu'à `details`, le seul qui contrôle la liste blanche.
             headers["Referer"] = embedFrameUrl
             // Required by current API (April 2026) — server returns 405 without these.
             // Reverse-engineered from the official SPA Vite bundle (Lt + Nt helpers in
@@ -390,7 +488,23 @@ open class FilemoonExtractor : Extractor() {
         //   Le jeton obtenu voyage dans l'en-tête `X-Captcha-Token`.
         //   Si la négociation échoue, on garde l'ancien corps : le repli WebView prendra le
         //   relais comme avant, on ne perd rien.
-        val acces = ByseAcces.obtenir(playbackDomain, videoId, headers.filterKeys { it.startsWith("X-Embed-") })
+        // ── 2026-08-25, 4e passe : LE BUDGET ÉTAIT PLUS COURT QUE LA PREUVE ─────────────
+        //   Une fois l'intégrateur autorisé accepté, `playback` ne rendait plus 403 mais
+        //   428 « captcha_required ». Le journal montre pourquoi — la preuve de travail
+        //   ABOUTIT, mais après qu'on a renoncé :
+        //     20:43:26  ByseAcces: négociation en cours, on rend la main   (budget 8 s)
+        //     20:43:26  playback en attente d'accès : captcha_required     (428)
+        //     20:43:30  ByseAcces: preuve résolue en 10817 ms (difficulté 20)
+        //   Quatre secondes de trop. On aligne donc le budget sur la difficulté réellement
+        //   mesurée sur l'appareil. La négociation continuant de toute façon en tâche de
+        //   fond, ce budget n'est qu'un « combien j'attends au premier passage » : une
+        //   seconde tentative trouve le jeton en cache.
+        val acces = ByseAcces.obtenir(
+            playbackDomain,
+            videoId,
+            headers.filterKeys { it.startsWith("X-Embed-") },
+            attenteMaxMs = 14_000L,
+        )
         val corpsEmpreinte = if (acces != null) {
             headers["X-Captcha-Token"] = acces.jetonCaptcha
             FingerprintBody(
@@ -406,6 +520,42 @@ open class FilemoonExtractor : Extractor() {
         }
 
         val playbackUrl = "$playbackDomain/api/videos/$videoId/embed/playback"
+
+        /**
+         * ── 2026-08-25, 5e passe : ON N'ESSAIE PLUS DE DEVINER LA DURÉE ─────────────────
+         *
+         *   Mesures successives de la preuve de travail sur le MÊME appareil et la MÊME
+         *   vidéo : 3,9 s — 10,8 s — 13,9 s. C'est une recherche par force brute, sa durée
+         *   est aléatoire par nature. Tout budget fixe finit donc par être battu : celui de
+         *   8 s l'a été de 4 s, celui de 14 s l'a été d'UNE seconde (« preuve résolue en
+         *   13931 ms », juste après le renoncement).
+         *
+         *   Plutôt que de rallonger indéfiniment l'attente du premier appel — ce qui ferait
+         *   patienter tout le monde, même quand la preuve tombe en 4 s — on laisse partir
+         *   l'appel, et SI le serveur répond 428 (« il me faut la preuve »), on attend le
+         *   jeton et on rejoue. Le calcul tourne déjà en tâche de fond : on ne recommence
+         *   rien, on récupère juste son résultat.
+         */
+        suspend fun rejouerAvecJeton(): PlaybackResponse? {
+            val acces2 = ByseAcces.obtenir(
+                playbackDomain,
+                videoId,
+                headers.filterKeys { it.startsWith("X-Embed-") },
+                attenteMaxMs = 20_000L,
+            ) ?: return null
+            headers["X-Captcha-Token"] = acces2.jetonCaptcha
+            val corps2 = FingerprintBody(
+                Fingerprint(
+                    token = acces2.token,
+                    viewer_id = acces2.viewerId,
+                    device_id = acces2.deviceId,
+                    confidence = acces2.confiance,
+                )
+            )
+            Log.i(TAG, "[Filemoon] jeton obtenu après le 428 — on rejoue playback")
+            return service.getPlayback(playbackUrl, headers, corps2)
+        }
+
         val playbackResponse = try {
             service.getPlayback(playbackUrl, headers, corpsEmpreinte)
         } catch (e: retrofit2.HttpException) {
@@ -413,11 +563,9 @@ open class FilemoonExtractor : Extractor() {
             if (e.code() == 404 && body?.contains("video not found", ignoreCase = true) == true) {
                 throw Exception("Filemoon: video expired (link rot) — $videoId")
             }
-            // 2026-08-06 : un 428 ici signifie que `ByseAcces` n'a pas encore obtenu son jeton
-            //   (la preuve de travail tourne en arrière-plan). Le passage suivant réussira.
-            //   Une ligne suffit — la sonde de diagnostic complète a été retirée.
-            if (e.code() == 428) Log.w(TAG, "[Filemoon] playback en attente d'accès : ${body?.take(120)}")
-            throw e
+            if (e.code() != 428) throw e
+            Log.w(TAG, "[Filemoon] playback 428 (${body?.take(60)}) — on attend la preuve puis on rejoue")
+            rejouerAvecJeton() ?: throw e
         }
         val playbackData = playbackResponse.playback
             ?: throw Exception("No playback data")
@@ -498,7 +646,11 @@ open class FilemoonExtractor : Extractor() {
         val parentUrl = byseParentUrl(currentDomain)
         val parentOrigin = parentUrl?.trimEnd('/')
 
-        val result = withTimeoutOrNull(30_000L) {
+        // 2026-08-25 : 30 s → 15 s. Quand la page ne démarre pas, l'attente est stérile et
+        //   c'est elle que l'utilisateur ressent (« ça ne part pas ») alors que l'échec est
+        //   déjà joué. 15 s = la valeur du WebViewResolver de référence, et le lecteur peut
+        //   basculer sur un autre hébergeur bien plus tôt.
+        val result = withTimeoutOrNull(15_000L) {
             suspendCancellableCoroutine<Video> { cont ->
                 val context = StreamFlixApp.instance.applicationContext
                 var resolved = false
@@ -756,9 +908,40 @@ open class FilemoonExtractor : Extractor() {
                 if (parentUrl != null) {
                     loadHeaders["Referer"] = parentUrl
                     loadHeaders["Origin"] = parentOrigin!!
+                } else if (PARENTS_AUTORISES.isNotEmpty()) {
+                    // ── 2026-08-25, 7e passe : LA WEBVIEW AUSSI DOIT SE PRÉSENTER ────────────
+                    //   Ouvert dans Chrome, `filemoon.sx/e/<id>` affiche « Intégration
+                    //   bloquée sur ce site — le propriétaire n'autorise que des domaines
+                    //   autorisés ». Notre WebView chargeait la page en disant « je viens de
+                    //   filemoon » : elle tombait donc sur CE message, et n'émettait jamais
+                    //   de flux — d'où les expirations à répétition, sans la moindre erreur.
+                    //   Même principe que pour l'appel API, qui lui est déjà réglé : on se
+                    //   présente comme l'intégrateur autorisé.
+                    loadHeaders["Referer"] = PARENTS_AUTORISES.first()
+                } else {
+                    // ── 2026-08-25 (user : « Filemoon part direct chez eux, pas chez nous ») ──
+                    //   Le repli WebView partait SANS AUCUN Referer :
+                    //     [Filemoon-WV] loading https://filemoon.sx/e/… (referer=null)
+                    //     [Filemoon] WebView fallback also failed: timed out (30s)
+                    //   Or filemoon.sx ne sert plus de page lecteur : c'est une SPA
+                    //   (« <title>Byse Frontend</title> », 1605 octets, ni iframe ni script
+                    //   packé — vérifié en direct), et son API `/embed/details` nous rend 403.
+                    //   Sans référent, la SPA ne démarre jamais la lecture et on attend 30 s
+                    //   pour rien.
+                    //
+                    //   L'extracteur de référence (FilemoonV2, CloudStream) envoie le lien
+                    //   D'EMBED LUI-MÊME comme référent, plus les en-têtes Sec-Fetch d'une
+                    //   iframe. C'est cohérent avec la leçon du 06/08 : on reste en MÊME
+                    //   ORIGINE, comme le navigateur — on n'invente aucun parent étranger,
+                    //   ce qui était la cause du 428.
+                    loadHeaders["Referer"] = link
                 }
+                // Un lecteur intégré est toujours chargé dans une iframe : on le dit.
+                loadHeaders["Sec-Fetch-Dest"] = "iframe"
+                loadHeaders["Sec-Fetch-Mode"] = "navigate"
+                loadHeaders["Sec-Fetch-Site"] = "cross-site"
 
-                Log.d(TAG, "[Filemoon-WV] loading $link (referer=$parentUrl)")
+                Log.d(TAG, "[Filemoon-WV] loading $link (referer=${loadHeaders["Referer"]})")
                 webView.loadUrl(link, loadHeaders)
 
                 // Vrai geste tactile au centre (là où est le bouton de vérif q8y5z, iframe centrée) :

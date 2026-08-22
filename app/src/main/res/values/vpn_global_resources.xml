@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  2026-08-27 (user : « sur le provider Vavoo on a intégré un VPN, j'aimerais
+    utiliser ce VPN pour toute l'application, pour les VOD… dans Paramètres ›
+    Connexion et services une nouvelle option qui fera un VPN entier pour
+    l'application. Je parle bien des 2 variantes de VPN »).
+
+  Fichier de ressources dédié, sur le modèle de doh_resources.xml : évite de
+  polluer les 7 strings.xml traduits pour une option technique.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <string name="settings_vpn_global_title" tools:ignore="MissingTranslation">VPN pour toute l\'application</string>
+    <string name="settings_vpn_global_summary_off" tools:ignore="MissingTranslation">Désactivé — seul le provider Vavoo peut utiliser le tunnel</string>
+    <string name="settings_vpn_global_dialog" tools:ignore="MissingTranslation">VPN pour toute l\'application</string>
+
+    <!-- Avertissements honnêtes affichés en toast à l'activation. -->
+    <string name="settings_vpn_global_avertissement" tools:ignore="MissingTranslation">Tout le trafic passe par un serveur gratuit : le débit peut chuter et certains hébergeurs peuvent refuser la connexion. Repasse sur Désactivé si la lecture devient poussive.</string>
+    <string name="settings_vpn_global_demarrage" tools:ignore="MissingTranslation">Tunnel en cours de connexion…</string>
+    <string name="settings_vpn_global_ok" tools:ignore="MissingTranslation">VPN global actif</string>
+    <string name="settings_vpn_global_echec" tools:ignore="MissingTranslation">Le tunnel n\'a pas démarré — VPN global inactif</string>
+
+    <string-array name="vpn_global_labels" tools:ignore="MissingTranslation">
+        <item>Désactivé</item>
+        <item>VPN 1 — serveur principal</item>
+        <item>VPN 2 — serveur alternatif</item>
+    </string-array>
+
+    <string-array name="vpn_global_values" translatable="false">
+        <item>OFF</item>
+        <item>VYPN</item>
+        <item>PLANETVPN</item>
+    </string-array>
+
+</resources>

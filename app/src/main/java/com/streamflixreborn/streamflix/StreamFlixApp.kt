@@ -207,6 +207,13 @@ class StreamFlixApp : Application() {
         super.onCreate()
         instance = this
 
+        // 2026-08-27 (VPN global) : le ProxySelector doit être posé AVANT que
+        //   le moindre OkHttpClient ne soit construit — OkHttp capture
+        //   ProxySelector.getDefault() à la construction du client, pas à
+        //   chaque requête. Le sélecteur, lui, est dynamique : tant que
+        //   l'option est sur OFF il ne route rien.
+        runCatching { com.streamflixreborn.streamflix.utils.VpnGlobal.installer() }
+
         // 2026-07-25 : applique le mode Android Auto choisi (radio ou vidéo) — ils sont exclusifs,
         // la bascule active/désactive OnyxMediaBrowserService.
         runCatching { com.streamflixreborn.streamflix.car.CarModeSwitcher.applyFromPreferences(this) }
@@ -512,8 +519,12 @@ class StreamFlixApp : Application() {
             //   "VPN 2" (= TUNNEL_MODE_PLANETVPN, désormais = "VYPN serveur
             //   alternatif"). On passe skipBestN au démarrage pour cibler
             //   le bon serveur du pool VYPN.
-            if (UserPreferences.vavooUseTunnel) {
-                val skip = UserPreferences.vavooTunnelSkipBestN()
+            // 2026-08-27 : le tunnel sert maintenant 2 clients — le provider
+            //   Vavoo (réglage historique) ET le VPN global de l'app. On le
+            //   démarre si l'un OU l'autre le demande, sur le serveur choisi
+            //   par le VPN global en priorité.
+            if (UserPreferences.tunnelDoitDemarrer()) {
+                val skip = UserPreferences.tunnelSkipBestNEffectif()
                 CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
                     try {
                         try {

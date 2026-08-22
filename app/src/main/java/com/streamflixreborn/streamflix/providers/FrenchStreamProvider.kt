@@ -1765,6 +1765,18 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     private interface Service {
 
         companion object {
+            /** 2026-08-24 : valeur COURANTE du cookie anti-bot de FrenchStream.
+             *  Elle TOURNE : `1` en juin (page de garde de 842 o), puis
+             *  `k7x2m9q4v3b8` en aout (page de 1940 o). A chaque rotation, le
+             *  serveur cessait de servir le catalogue et renvoyait la page
+             *  "Verification..." → getHome parsait la page de garde → 0
+             *  categorie → home Films/Series VIDE (le domaine, lui, repondait
+             *  parfaitement, d'ou le diagnostic trompeur "l'adresse a change").
+             *  On ne la fige donc plus : l'intercepteur la RELIT dans la page de
+             *  garde et rejoue la requete (cf. plus bas). Valeur de depart =
+             *  celle de juin, remplacee au premier contact si elle a change. */
+            @Volatile private var jetonFsschal: String = "1"
+
             private val client = OkHttpClient.Builder()
                 .readTimeout(60, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
@@ -1788,11 +1800,11 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                     //   endpoints ont déjà dle_skin=VFV1) sans le casser.
                     val existingCookie = origReq.header("Cookie") ?: ""
                     val mergedCookie = if (existingCookie.isBlank()) {
-                        "fsschal=1"
+                        "fsschal=$jetonFsschal"
                     } else if ("fsschal=" in existingCookie) {
                         existingCookie
                     } else {
-                        "$existingCookie; fsschal=1"
+                        "$existingCookie; fsschal=$jetonFsschal"
                     }
                     var request = origReq.newBuilder()
                         .header("User-Agent", ua)
@@ -1809,6 +1821,29 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                         request = request.newBuilder().url(newUrl).build()
                         response = chain.proceed(request)
                         redirects++
+                    }
+                    // 2026-08-24 : AUTO-REPARATION du jeton anti-bot.
+                    //   Si on recoit quand meme la page de garde, c'est que la
+                    //   valeur a tourne : on la relit dans le HTML et on rejoue
+                    //   la requete UNE fois. peekBody ne consomme pas le corps,
+                    //   donc le flux reste exploitable si rien ne change.
+                    if (!response.isRedirect) {
+                        val apercu = try { response.peekBody(4096).string() } catch (_: Throwable) { "" }
+                        if ("fsschal=" in apercu && "Verification" in apercu) {
+                            val nouveau = Regex("fsschal=([A-Za-z0-9_-]{1,64})")
+                                .find(apercu)?.groupValues?.get(1)
+                            if (!nouveau.isNullOrBlank() && nouveau != jetonFsschal) {
+                                Log.w("FrenchStream", "Jeton anti-bot renouvele : $jetonFsschal -> $nouveau")
+                                jetonFsschal = nouveau
+                                response.close()
+                                val rejoue = if (existingCookie.isBlank()) "fsschal=$nouveau"
+                                    else if ("fsschal=" in existingCookie)
+                                        existingCookie.replace(Regex("fsschal=[^;]*"), "fsschal=$nouveau")
+                                    else "$existingCookie; fsschal=$nouveau"
+                                request = request.newBuilder().header("Cookie", rejoue).build()
+                                response = chain.proceed(request)
+                            }
+                        }
                     }
                     response
                 }
