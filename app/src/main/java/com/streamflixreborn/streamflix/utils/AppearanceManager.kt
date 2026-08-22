@@ -147,12 +147,10 @@ object AppearanceManager {
                 //   éviter le crash quand updateMiniPlayerLayout fait ConstraintSet.clone().
                 id = android.view.View.generateViewId()
                 scaleType = ImageView.ScaleType.CENTER_CROP
+                adjustViewBounds = false   // la vue suit l'ÉCRAN, jamais l'image
+                caleSurEcran(this)
             }
-            val lp = android.view.ViewGroup.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            parent.addView(bg, 0, lp)
+            parent.addView(bg, 0, parametresPleinEcran(parent))
         }
 
         try {
@@ -174,15 +172,57 @@ object AppearanceManager {
                     tag = TAG_WALLPAPER_DIM
                     id = android.view.View.generateViewId()
                 }
-                val lp = android.view.ViewGroup.LayoutParams(
-                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
-                )
                 // Insère juste après le bg (index 1).
-                parent.addView(dim, 1, lp)
+                parent.addView(dim, 1, parametresPleinEcran(parent))
             }
             dim.background = ColorDrawable(Color.argb(dimLevel.alpha, 0, 0, 0))
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════
+    // FOND COUPÉ EN COURS D'ÉCRAN — 2026-08-22
+    //
+    // Constaté sur l'Oppo (capture à l'appui) : un fond en 4783×8504 s'arrêtait à
+    // 1 356 pixels sur les 2 400 de l'écran, le bas restait noir. Avec d'autres
+    // images, le fond couvrait tout. Le résultat dépendait donc de l'IMAGE, pas de
+    // l'écran — c'est la signature du bug.
+    //
+    // CAUSE. La vue de fond était ajoutée avec de simples
+    // `ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT)`. Or les écrans de l'appli
+    // ont un ConstraintLayout pour racine, et un enfant de ConstraintLayout SANS
+    // AUCUNE CONTRAINTE ne remplit pas son parent : MATCH_PARENT n'y est pas
+    // supporté de façon fiable (la documentation le déconseille explicitement), et
+    // la hauteur finit par être dictée par le dessin chargé.
+    //
+    // PARADE. Quand le parent est un ConstraintLayout, on pose de vraies contraintes
+    // sur les quatre côtés avec MATCH_CONSTRAINT (0dp) : la vue est alors calée sur
+    // le parent, quelle que soit l'image. Ailleurs, MATCH_PARENT suffit et reste
+    // utilisé. Ceinture et bretelles, on impose aussi une taille minimale égale à
+    // celle de l'écran : même si un parent était plus petit que prévu, le fond ne
+    // laisserait plus de bande noire.
+    // ══════════════════════════════════════════════════════════════════════════════
+    private fun parametresPleinEcran(
+        parent: android.view.ViewGroup,
+    ): android.view.ViewGroup.LayoutParams =
+        if (parent is androidx.constraintlayout.widget.ConstraintLayout) {
+            androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(0, 0).apply {
+                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+            }
+        } else {
+            android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+        }
+
+    /** Filet de sécurité : le fond ne doit jamais être plus petit que l'écran. */
+    private fun caleSurEcran(vue: View) {
+        val dm = vue.resources.displayMetrics
+        vue.minimumWidth = dm.widthPixels
+        vue.minimumHeight = dm.heightPixels
     }
 
     private const val TAG_WALLPAPER_BG = "appearance_wallpaper_bg"

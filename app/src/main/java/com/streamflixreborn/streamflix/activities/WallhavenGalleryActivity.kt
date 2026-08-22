@@ -228,6 +228,35 @@ class WallhavenGalleryActivity : AppCompatActivity() {
         packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
     } catch (_: Throwable) { false }
 
+    /**
+     * 2026-08-22 (user « réparer la taille pour les écrans de télé ») — définition
+     * minimale demandée à Wallhaven, calée sur l'écran RÉEL au lieu d'un 1920×1080
+     * codé en dur. Sur une télé 4K, un fond exactement 1920×1080 est agrandi deux
+     * fois et devient flou ; il y a 46 579 fonds 16:9/16:10 en 4K, autant les
+     * prendre. À l'inverse, une box qui rend son interface en 1080p demande 1080p :
+     * tirer du 4K qu'elle réduira ensuite ne ferait que gonfler le téléchargement.
+     *
+     * Bornes assumées : jamais MOINS qu'avant (on ne dégrade personne), jamais plus
+     * que 4K côté télé ni que 1600×2560 côté téléphone — au-delà le catalogue
+     * devient trop maigre pour être agréable à parcourir. Si malgré tout une
+     * recherche ne renvoie rien, WallhavenService relance sans contrainte.
+     */
+    private fun definitionEcran(): String {
+        val dm = resources.displayMetrics
+        var largeur = dm.widthPixels
+        var hauteur = dm.heightPixels
+        val tv = isTvLayout()
+        // Une télé est toujours en paysage ; un téléphone consulté en paysage ne
+        //   doit pas pour autant demander des fonds paysage.
+        if (tv && largeur < hauteur) { val t = largeur; largeur = hauteur; hauteur = t }
+        if (!tv && largeur > hauteur) { val t = largeur; largeur = hauteur; hauteur = t }
+        return if (tv) {
+            "${largeur.coerceIn(1920, 3840)}x${hauteur.coerceIn(1080, 2160)}"
+        } else {
+            "${largeur.coerceIn(1080, 1600)}x${hauteur.coerceIn(1920, 2560)}"
+        }
+    }
+
     private fun runSearch(query: String) {
         currentQuery = query
         currentPage = 1
@@ -246,8 +275,17 @@ class WallhavenGalleryActivity : AppCompatActivity() {
         pbLoading.visibility = View.VISIBLE
         tvEmpty.visibility = View.GONE
         lifecycleScope.launch {
+            // 2026-08-22 — DÉCISION DU USER : « remettez comme c'était avant avec
+            //   juste la réparation pour avoir la bonne taille sur télé ».
+            //   J'avais ajouté un filtre portrait sur mobile (perte au recadrage
+            //   ramenée de 63 % à 19 %), mais le catalogue tombait à 6 474 fonds
+            //   contre 66 889 sans filtre, et les bibliothèques vraiment conçues
+            //   pour téléphone se sont révélées inutilisables — Backiee ne sert que
+            //   du 608×1080, agrandi 2,2 fois sur un écran de 2 400 de haut.
+            //   Le mobile revient donc SANS filtre, comme avant. Seule la TV garde
+            //   sa correction. Ne pas remettre "mobile" ici sans son accord.
             val ratio = if (isTvLayout()) "16x9" else null
-            val result = WallhavenService.search(currentQuery, page, ratio)
+            val result = WallhavenService.search(currentQuery, page, ratio, definitionEcran())
             loading = false
             pbLoading.visibility = View.GONE
             if (isDestroyed) return@launch

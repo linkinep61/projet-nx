@@ -58,7 +58,9 @@ object WallhavenService {
     suspend fun search(
         query: String,
         page: Int = 1,
-        ratio: String? = null
+        ratio: String? = null,
+        /** Définition minimale demandée, « 3840x2160 ». Null = valeur par défaut du profil. */
+        definition: String? = null,
     ): Result<SearchResult> = withContext(Dispatchers.IO) {
         try {
             // categories : general(1) + anime(1) + people(0) = "110"
@@ -70,17 +72,59 @@ object WallhavenService {
                 .append("&sorting=")
                 .append(if (query.isBlank()) "toplist" else "relevance")
                 .append("&page=").append(page)
-            // 2026-08-04 (bug user : « les thèmes ne renvoient rien ») : `ratios` impose un format
-            //   STRICTEMENT exact. Sur TV, `ratios=16x9` écartait tout le 16:10, le 21:9 et le
-            //   1920x1200 — combiné à une requête déjà étroite, il ne restait plus rien.
-            //   `atleast` est le bon filtre ici : il garantit une définition suffisante pour un
-            //   téléviseur sans exiger une proportion au pixel près. Les autres appels (mobile,
-            //   ratio null) sont inchangés.
-            when (ratio) {
-                null -> {}
-                "16x9" -> urlBuilder.append("&atleast=1920x1080")
-                else -> urlBuilder.append("&ratios=").append(ratio)
+            // ══════════════════════════════════════════════════════════════════════
+            // TRI PAR APPAREIL — 2026-08-22 (user « les fonds d'écran sont tout le
+            //   temps zoomés malgré la taille, même sur TV »)
+            //
+            // MESURE. Le fond est affiché en centerCrop : l'image est agrandie
+            // jusqu'à remplir l'écran, le reste est coupé. J'ai chiffré ce qui est
+            // perdu sur un écran de téléphone 1080×2400 :
+            //     aucun filtre (ce qu'on faisait)  → 63 % de l'image perdue
+            //     ratios=portrait                  → 35 %
+            //     ratios=9x16,9x18,9x20            → 19 %
+            // « portrait » chez Wallhaven ne veut pas dire « fait pour un
+            // téléphone » mais « plus haut que large » : ce sont surtout des
+            // illustrations en 2:3 et 3:4, alors qu'un téléphone est en 9:20.
+            // Seules les vraies proportions de téléphone donnaient un cadrage
+            // propre — mais le catalogue tombait à 6 474 fonds contre 66 889, et le
+            // user a préféré garder le choix large : le filtre mobile a donc été
+            // RETIRÉ. Ce paragraphe reste ici pour que personne ne refasse la
+            // mesure en croyant découvrir quelque chose.
+            //
+            // Côté TV, on ne demandait qu'une DÉFINITION (`atleast`) sans aucune
+            // proportion : les 21:9 et les formats verticaux passaient, et se
+            // faisaient massacrer au recadrage sur un écran 16:9. D'où le « trop
+            // zoomé » alors que la définition était excellente. On remet une
+            // contrainte de forme, mais avec DEUX proportions.
+            //
+            // ⚠ Le piège du 2026-08-04 (« les thèmes ne renvoient rien ») venait de
+            //   `ratios=16x9` SEUL, trop strict. Deux garde-fous ici : deux
+            //   proportions au lieu d'une (243 907 fonds au lieu de 202 593 ;
+            //   « one piece » garde 640 résultats), et le repli automatique plus
+            //   bas — si la recherche filtrée ne renvoie RIEN, on la relance sans
+            //   contrainte plutôt que d'afficher une grille vide.
+            // ══════════════════════════════════════════════════════════════════════
+            //
+            // DÉFINITION SUIVANT L'ÉCRAN — 2026-08-22 (user « ensuite réparer la
+            //   taille pour les écrans de télé »). On demandait 1920×1080 en dur.
+            //   Sur une télé 4K, un fond exactement 1920×1080 est agrandi deux fois
+            //   → flou, alors que le catalogue a de quoi faire :
+            //       16x9/16x10 ≥ 1920×1080 → 243 907 fonds
+            //       16x9/16x10 ≥ 2560×1440 →  84 479
+            //       16x9/16x10 ≥ 3840×2160 →  46 579  (21 784 en animé)
+            //   L'appelant transmet donc la définition RÉELLE de l'écran. Une box
+            //   qui rend son interface en 1080p demandera 1080p — inutile de tirer
+            //   du 4K qui serait de toute façon réduit à l'affichage.
+            //
+            // ⚠ MOBILE : volontairement AUCUNE contrainte (ratio null). Un filtre
+            //   portrait avait été essayé le 22/08 puis retiré à la demande du user
+            //   — voir le commentaire dans WallhavenGalleryActivity.fetchPage.
+            val contrainte = when (ratio) {
+                null -> ""
+                "16x9" -> "&ratios=16x9,16x10&atleast=${definition ?: "1920x1080"}"
+                else -> "&ratios=$ratio"
             }
+            urlBuilder.append(contrainte)
             if (query.isNotBlank()) {
                 urlBuilder.append("&q=").append(java.net.URLEncoder.encode(query, "UTF-8"))
             }
@@ -122,6 +166,14 @@ object WallhavenService {
                         )
                     )
                 }
+                // Repli : une recherche filtrée qui ne renvoie RIEN vaut moins qu'une
+                //   grille un peu mal cadrée. On relance sans contrainte de forme.
+                //   `ratio = null` donne une contrainte vide → pas de seconde récursion.
+                if (list.isEmpty() && contrainte.isNotEmpty()) {
+                    Log.d(TAG, "0 résultat avec $contrainte → nouvelle tentative sans contrainte")
+                    return@withContext search(query, page, null)
+                }
+
                 val meta = json.optJSONObject("meta")
                 Result.success(
                     SearchResult(

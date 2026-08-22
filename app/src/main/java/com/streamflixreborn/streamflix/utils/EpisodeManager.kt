@@ -44,6 +44,11 @@ object EpisodeManager {
     private fun animeSamaLangOf(episodeId: String): String? =
         ANIMESAMA_TAIL.find(episodeId)?.groupValues?.get(1)?.lowercase()
 
+    /** Pseudo-épisode qui désigne en réalité un DOSSIER de sous-saison, pas un épisode. */
+    private fun estMarqueurDeDossier(
+        episode: com.streamflixreborn.streamflix.models.Episode,
+    ): Boolean = episode.id.startsWith("@subfolder:") || episode.overview == "@subfolder"
+
     /**
      * Déplie les enveloppes de langue AnimeSama pour obtenir les VRAIES sous-saisons.
      * `getEpisodesBySeason("slug/@vostfr/…")` retourne des pseudo-épisodes `@subfolder:` dont
@@ -210,8 +215,35 @@ object EpisodeManager {
         val currentSeasonNumber = animeSamaSeasonNumberOf(currentEpisode.id)
             ?: currentEpisode.season.number
 
+        // ══════════════════════════════════════════════════════════════════════════
+        // SAISON 2 FANTÔME — 2026-08-22 (user « arrivé à la fin de la saison il n'y a
+        //   pas de saison 2 mais l'application continue sur une saison 2 imaginaire »)
+        //
+        // Quand un anime existe en VOSTFR ET en VF, AnimeSamaProvider.getTvShow n'émet
+        // pas des saisons : il émet DEUX ENVELOPPES DE LANGUE, numérotées 1 et 2 —
+        //     Season(id = "$slug/@vostfr/…", number = 1, title = "VOSTFR")
+        //     Season(id = "$slug/@vf/…",     number = 2, title = "VF")
+        // Même un anime d'une seule saison se retrouve donc avec « une saison 2 ».
+        // Le filtre `number > currentSeasonNumber` la voyait comme la suite légitime :
+        // à la fin du dernier épisode VOSTFR, l'appli enchaînait sur la VF.
+        //
+        // Pire, cette fausse saison ne contient pas des épisodes : la charger renvoie
+        // des MARQUEURS DE DOSSIER (`@subfolder:`) qu'on empilait tels quels — d'où
+        // des entrées qui ressemblent à des épisodes sans en être.
+        //
+        // Une enveloppe n'est JAMAIS une saison suivante. On l'écarte ici ; le code
+        // tombe alors sur resolveAnimeSamaSubSeasons() (plus bas), qui déplie les
+        // enveloppes et ne garde que les vraies sous-saisons DE LA LANGUE EN COURS.
+        // Cette mécanique existait déjà mais n'était jamais atteinte, les deux
+        // premières sources trouvant toujours la fausse saison 2 avant elle.
+        // ══════════════════════════════════════════════════════════════════════════
+        fun estEnveloppeDeLangue(season: Season): Boolean =
+            Regex("""/@(vostfr|vf|va|vo)(/|$)""", RegexOption.IGNORE_CASE)
+                .containsMatchIn(season.id)
+
         fun nextSeasonFrom(seasons: List<Season>): Season? =
             seasons
+                .filterNot { season -> estEnveloppeDeLangue(season) }
                 .filter { season -> season.number > currentSeasonNumber }
                 .sortedBy { season -> season.number }
                 .firstOrNull()
@@ -247,12 +279,18 @@ object EpisodeManager {
         var nextSeasonEpisodes = withContext(Dispatchers.IO) {
             database.episodeDao()
                 .getByTvShowIdAndSeasonNumber(tvShowId, seasonToLoad.number)
-        }
+        }.filterNot { estMarqueurDeDossier(it) }
 
         if (nextSeasonEpisodes.isEmpty() && seasonToLoad.id.isNotBlank()) {
             nextSeasonEpisodes = runCatching {
                 provider.getEpisodesBySeason(seasonToLoad.id)
-            }.getOrDefault(emptyList()).also { fetchedEpisodes ->
+            }.getOrDefault(emptyList())
+                // 2026-08-22 : un `@subfolder:` est un DOSSIER, pas un épisode. Le
+                //   chargement normal d'une saison les écarte déjà (addEpisodesFromDb,
+                //   test `looksLikeFolders`) ; ici on ne le faisait pas et ils
+                //   finissaient dans la file de lecture.
+                .filterNot { estMarqueurDeDossier(it) }
+                .also { fetchedEpisodes ->
                 if (fetchedEpisodes.isNotEmpty()) {
                     fetchedEpisodes.forEach { episode ->
                         episode.tvShow = episode.tvShow ?: seasonToLoad.tvShow
