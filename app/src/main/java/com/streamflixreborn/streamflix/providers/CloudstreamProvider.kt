@@ -362,6 +362,246 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         return null
     }
 
+    // ── 2026-08-30 — VRAI FILM via l'endpoint WEB + Referer (remplace /play-info = leurre) ─────
+    //   REVERSE-ENGINEERING (Chrome du user + logs OPPO), tout vérifié en direct :
+    //     · `/wefeed-mobile-bff/subject-api/play-info` (mobile signé) ne rend plus qu'un MP4
+    //       LEURRE de 5,3 Mo (macdn.aoneroom.com/…1c7de0bd…), identique pour TOUS les films.
+    //     · L'endpoint WEB `/wefeed-h5api-bff/subject/play` rend LE VRAI FILM (4 MP4 h264
+    //       360/480/720/1080 sur bcdnxw.hakunaymatata.com, signature DANS l'URL, tailles réelles).
+    //     · LE SEUL VERROU = l'en-tête **Referer**. Prouvé : depuis la page d'accueil
+    //       (Referer=/), `hasResource=false` ; depuis la page détail
+    //       (Referer=/movies/<detailPath>), `hasResource=true` + 4 streams. Même IP, mêmes
+    //       cookies, même TLS → ce n'est NI l'IP, NI un gate navigateur : juste le Referer.
+    //       Un slug bidon échoue → il faut le VRAI detailPath.
+    //     · `detailPath` s'obtient sans token : `GET /wefeed-h5api-bff/detail?subjectId=<sid>`
+    //       → `data.subject.detailPath`.
+    //   → 2 GET NUS (aucune signature, aucun Bearer, aucun cookie), et les URLs bcdnxw se lisent
+    //     ensuite direct dans ExoPlayer (206 video/mp4). Pas de WebView.
+    // 2026-08-30 — POOL DE FRONTS WEB. officialmoviebox.com n'est qu'UNE porte vers le backend
+    //   aoneroom ; le meme /wefeed-h5api-bff/... est servi par plusieurs fronts interchangeables.
+    //   Valides VIVANTS depuis la France (hasResource=true, 4 streams) : officialmoviebox.com,
+    //   themoviebox.xyz, movieboxhd.net. (netfilm.world / fmoviesunblocked.net = 403 en FR.)
+    //   Cascade + lastGoodFront : si un front ferme ou se fait bloquer, on bascule tout seul
+    //   -> aucune WebView, aucun crack d'app. Le CDN bcdnxw accepte le Referer de n'importe
+    //   lequel de ces fronts (206, verifie).
+    private val H5_FRONTS = listOf(
+        "https://officialmoviebox.com",
+        "https://themoviebox.xyz",
+        "https://movieboxhd.net",
+    )
+    @Volatile private var lastGoodFront: String = H5_FRONTS.first()
+    /** Racine du front pour le Referer de lecture (CDN bcdnxw). */
+    private val h5PlaybackReferer: String get() = "$lastGoodFront/"
+    private fun orderedFronts(): List<String> {
+        val g = lastGoodFront
+        return if (H5_FRONTS.contains(g)) listOf(g) + H5_FRONTS.filterNot { it == g } else H5_FRONTS
+    }
+
+    /** GET nu (pas de signature/Bearer) sur l'API h5, avec Referer optionnel. */
+    private suspend fun h5Get(front: String, path: String, referer: String? = null): JSONObject? = withContext(Dispatchers.IO) {
+        val url = "$front$path"
+        try {
+            val req = Request.Builder().url(url)
+                .cacheControl(API_NO_CACHE)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json")
+                .apply { if (referer != null) header("Referer", referer) }
+                .build()
+            httpClient.newCall(req).execute().use {
+                if (!it.isSuccessful) { Log.d(TAG, "h5Get $front$path → ${it.code}"); return@withContext null }
+                val body = it.body?.string() ?: return@withContext null
+                return@withContext JSONObject(body)
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "h5Get $front$path erreur: ${e.message}")
+            null
+        }
+    }
+
+    // 2026-08-30 — 4e PASSAGE : BFF TV (tv.aoneroom.com/wefeed-tv-bff). Reverse de l'APK TV
+    //   (com.community.mbox.tv, NON packe) : la video passe par un BFF SEPARE, authentifie
+    //   par X-Client-Info (empreinte client) + Bearer — PAS de HMAC, PAS de Referer. Endpoint
+    //   /subject/play-info/v2. On reutilise notre Bearer + un X-Client-Info aux couleurs TV.
+    //   Sonde diagnostic + fallback ultime si tous les fronts web tombent.
+    private const val TV_HOST = "https://tv.aoneroom.com"
+    private const val TV_PLAY_PATH = "/wefeed-tv-bff/subject/play-info/v2"
+    private val TV_CLIENT_INFO: String by lazy {
+        """
+        {"package_name":"com.community.mbox.tv","version_name":"1.1.9.0820.03","version_code":50040014,
+        "os":"android","os_version":"13","install_ch":"gp","device_id":"$persistedDeviceId",
+        "install_store":"gp","gaid":"00000000-0000-0000-0000-000000000000","brand":"Redmi",
+        "model":"23078RKD5C","system_language":"fr","net":"NETWORK_WIFI","region":"FR",
+        "timezone":"Europe/Paris","sp_code":"40401","X-Play-Mode":"2"}
+        """.trimIndent().replace("\n", "").replace("        ", "")
+    }
+    private const val TV_USER_AGENT =
+        "com.community.mbox.tv/50040014 (Linux; U; Android 13; en_US; MovieBoxTV; Build/TQ2A.230405.003)"
+
+    /** Sonde le BFF TV. Retourne (resolution, url, format). Vide si refus/erreur. */
+    private suspend fun tvBffStreams(subjectId: String, se: Int, ep: Int): List<Triple<Int, String, String>> = withContext(Dispatchers.IO) {
+        val token = try { ensureBearer() } catch (e: Exception) { null }
+        val url = "$TV_HOST$TV_PLAY_PATH?subjectId=$subjectId&se=$se&ep=$ep&vipLevel=0&host=tv.aoneroom.com"
+        try {
+            val req = Request.Builder().url(url)
+                .cacheControl(API_NO_CACHE)
+                .apply {
+                    // Le BFF TV exige la meme signature x-tr que le mobile (477 sans).
+                    signedHeaders("GET", url).forEach { (k, v) -> header(k, v) }
+                    // On repose ensuite l'empreinte TV + le Bearer par-dessus.
+                    header("X-Client-Info", TV_CLIENT_INFO)
+                    if (token != null) header("Authorization", "Bearer $token")
+                }
+                .build()
+            httpClient.newCall(req).execute().use {
+                if (!it.isSuccessful) { Log.d(TAG, "MVBX-TV $url -> ${it.code}"); return@withContext emptyList<Triple<Int, String, String>>() }
+                val body = it.body?.string() ?: return@withContext emptyList<Triple<Int, String, String>>()
+                val root = JSONObject(body)
+                val data = root.optJSONObject("data")
+                // Les MP4 progressifs du BFF TV sont dans `resources[]` (url + resolution +
+                //   linkType), PAS dans `streams[]` (qui ne porte que le DASH). On lit resources[].
+                val resArr = data?.optJSONArray("resources")
+                    ?: return@withContext emptyList<Triple<Int, String, String>>()
+                val byRes = LinkedHashMap<Int, Triple<Int, String, String>>()
+                for (i in 0 until resArr.length()) {
+                    val r = resArr.optJSONObject(i) ?: continue
+                    // Filtre saison/episode pour les series (0/0 = film → tout garder).
+                    if (se > 0 && r.has("se") && !r.isNull("se") && r.optInt("se") != se) continue
+                    if (ep > 0 && r.has("ep") && !r.isNull("ep") && r.optInt("ep") != ep) continue
+                    val u = r.optString("url").takeIf { it.isNotBlank() } ?: continue
+                    // resolution peut valoir "1080", "1080p", "1080,720,480"… → on extrait les chiffres.
+                    val res = Regex("\\d+").find(r.optString("resolution"))?.value?.toIntOrNull() ?: 0
+                    val fmt = if (r.optString("linkType") == "1") "HLS" else "MP4"
+                    byRes.putIfAbsent(res, Triple(res, u, fmt))
+                }
+                byRes.values.sortedByDescending { it.first }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "MVBX-TV erreur: ${e.message}"); emptyList<Triple<Int, String, String>>()
+        }
+    }
+    /** detailPath (slug) d'un subjectId, requis pour le Referer. Caché par sid. */
+    private val detailPathCache = ConcurrentHashMap<String, String>()
+    private suspend fun h5DetailPath(subjectId: String): String? {
+        detailPathCache[subjectId]?.let { return it.ifBlank { null } }
+        for (front in orderedFronts()) {
+            val resp = h5Get(front, "/wefeed-h5api-bff/detail?subjectId=$subjectId") ?: continue
+            val data = resp.optJSONObject("data")
+            val dp = data?.optJSONObject("subject")?.optString("detailPath")?.takeIf { it.isNotBlank() }
+                ?: data?.optString("detailPath")?.takeIf { it.isNotBlank() }
+            // Repli : chercher "detailPath":"…" n'importe où dans la réponse.
+            ?: Regex("\"detailPath\"\\s*:\\s*\"([^\"]+)\"").find(resp.toString())?.groupValues?.get(1)
+            if (!dp.isNullOrBlank()) { detailPathCache[subjectId] = dp; return dp }
+        }
+        return null
+    }
+
+    /** Résultat complet de résolution web MovieBox. */
+    private data class H5PlayResult(
+        val progressive: List<Triple<Int, String, String>>,  // (résolution, url, format) MP4
+        val dashUrl: String?,        // manifeste DASH adaptatif (qualité auto)
+        val dashCookie: String?,     // signCookie éventuel du DASH
+        val frCaptions: List<String>,// URLs sous-titres FR (.srt/.vtt)
+    )
+
+    /** Cache des sous-titres FR récupérés via l'endpoint web (captions[]), par sid. */
+    private val h5CaptionsCache = ConcurrentHashMap<String, List<String>>()
+
+    /**
+     * Résolution web complète (inspirée de CineStream/com.megix) : combine
+     *   `subject/play` (streams + dash) ET `subject/download` (downloads MP4 + captions),
+     *   le tout avec le Referer page-détail obligatoire. Dédup par résolution.
+     */
+    private suspend fun h5ResolvePlay(subjectId: String, se: Int, ep: Int): H5PlayResult {
+        val empty = H5PlayResult(emptyList(), null, null, emptyList())
+        val detailPath = h5DetailPath(subjectId)
+        if (detailPath.isNullOrBlank()) {
+            Log.w(TAG, "h5ResolvePlay : pas de detailPath pour sid=$subjectId → Referer impossible")
+            return empty
+        }
+        val params = "subjectId=$subjectId&se=$se&ep=$ep&detailPath=$detailPath"
+        // Cascade : on essaie chaque front jusqu'a en trouver un qui rend de vrais flux
+        //   (streams/dash ou hasResource). Le Referer DOIT etre celui du front interroge.
+        var play: org.json.JSONObject? = null
+        var download: org.json.JSONObject? = null
+        for (front in orderedFronts()) {
+            val referer = "$front/movies/$detailPath"
+            val p = h5Get(front, "/wefeed-h5api-bff/subject/play?$params", referer)
+            val d = p?.optJSONObject("data")
+            val ok = d != null && (
+                (d.optJSONArray("streams")?.length() ?: 0) > 0 ||
+                (d.optJSONArray("dash")?.length() ?: 0) > 0 ||
+                d.optBoolean("hasResource")
+            )
+            if (ok) {
+                lastGoodFront = front
+                play = p
+                download = h5Get(front, "/wefeed-h5api-bff/subject/download?$params", referer)
+                Log.d(TAG, "h5ResolvePlay sid=$subjectId : front OK = $front")
+                break
+            }
+        }
+
+        // 4e passage — sonde TV-BFF (diagnostic toujours logue ; utilisee en fallback si le web
+        //   n'a rien rendu). tv.aoneroom.com/wefeed-tv-bff : X-Client-Info + Bearer, ni Referer ni HMAC.
+        val tvStreams = try { tvBffStreams(subjectId, se, ep) } catch (e: Exception) { emptyList() }
+        Log.d(TAG, "MVBX-TV sid=$subjectId : ${tvStreams.size} streams via BFF TV")
+
+        // Dédup par résolution ; on garde le premier vu (play prioritaire sur download).
+        val byRes = LinkedHashMap<Int, Triple<Int, String, String>>()
+        fun ajouter(arr: org.json.JSONArray?) {
+            if (arr == null) return
+            for (i in 0 until arr.length()) {
+                val s = arr.optJSONObject(i) ?: continue
+                if (s.optBoolean("vipLocked", false)) continue
+                val u = s.optString("url").takeIf { it.isNotBlank() } ?: continue
+                val fmt = s.optString("format").ifBlank { "MP4" }
+                if (fmt.equals("DASH", ignoreCase = true)) continue  // DASH traité à part
+                val res = s.optString("resolutions").substringBefore(',').trim()
+                    .ifEmpty { s.optString("resolution") }.toIntOrNull() ?: 0
+                byRes.putIfAbsent(res, Triple(res, u, fmt))
+            }
+        }
+        ajouter(play?.optJSONObject("data")?.optJSONArray("streams"))
+        ajouter(download?.optJSONObject("data")?.optJSONArray("downloads"))
+        // Fallback TV : n'ajoute que si le web n'a rien donne (ne double pas les qualites web).
+        if (byRes.isEmpty()) {
+            for (t in tvStreams) byRes.putIfAbsent(t.first, t)
+            if (tvStreams.isNotEmpty()) Log.d(TAG, "h5ResolvePlay sid=$subjectId : fallback TV-BFF utilise (${tvStreams.size})")
+        }
+
+        // DASH adaptatif (manifeste .mpd, souvent sur h5-api) — lisible avec le Referer.
+        var dashUrl: String? = null
+        var dashCookie: String? = null
+        play?.optJSONObject("data")?.optJSONArray("dash")?.let { dashArr ->
+            for (i in 0 until dashArr.length()) {
+                val d = dashArr.optJSONObject(i) ?: continue
+                if (d.optBoolean("vipLocked", false)) continue
+                dashUrl = d.optString("url").takeIf { it.isNotBlank() } ?: continue
+                dashCookie = d.optString("signCookie").takeIf { it.isNotBlank() }
+                break
+            }
+        }
+
+        // Sous-titres FR depuis captions[] (réponse download) — 1 appel, multi-langue.
+        val frCaps = mutableListOf<String>()
+        download?.optJSONObject("data")?.optJSONArray("captions")?.let { caps ->
+            for (i in 0 until caps.length()) {
+                val c = caps.optJSONObject(i) ?: continue
+                if (c.optString("lan").equals("fr", ignoreCase = true) ||
+                    c.optString("lanName").contains("fran", ignoreCase = true)) {
+                    c.optString("url").takeIf { it.isNotBlank() }?.let { frCaps.add(it) }
+                }
+            }
+        }
+
+        val progressive = byRes.values.sortedByDescending { it.first }
+        if (progressive.isEmpty() && dashUrl == null) {
+            Log.w(TAG, "h5ResolvePlay sid=$subjectId : 0 flux (play/download vides)")
+        }
+        return H5PlayResult(progressive, dashUrl, dashCookie, frCaps)
+    }
+
+
     /** Retourne la liste des hosts dans l'ordre à essayer : last-good d'abord,
      *  puis le reste du pool. */
     private fun orderedHosts(): List<String> {
@@ -2013,81 +2253,50 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             }
         }
 
-        // 2026-07-08 : pipeline /resource DÉSACTIVÉ — bcdn.hakunaymatata.com
-        // renvoie 429 systématiquement (rate-limit CDN). Les 4 requêtes /resource
-        // parallèles gaspillaient du temps réseau pour rien. SEUL /play-info
-        // (hcdn3) est utilisé maintenant → lecture immédiate sans 429.
-        // NOTE : /resource peut être réactivé si bcdn remarche un jour.
+        // 2026-08-30 — VRAIS FLUX via endpoint web + Referer (voir h5ResolvePlay).
+        //   Le /play-info mobile ne rend qu'un leurre : on l'abandonne au profit de
+        //   /wefeed-h5api-bff/subject/play + /subject/download appelés avec le Referer de la
+        //   page détail. On combine downloads[]+streams[] (dédup par résolution), on ajoute
+        //   un serveur DASH « Auto », et on récupère les sous-titres FR (captions[]).
         if (!subjectId.isNullOrBlank()) {
             val sid: String = subjectId!!
-            run {
-                val params = mutableMapOf("subjectId" to sid)
-                if (se > 0) params["se"] = "$se"
-                if (ep > 0) params["ep"] = "$ep"
-                val resp = apiGet(PLAY_INFO_PATH, params)
-                val data = resp?.optJSONObject("data")
-                val streamArr = data?.optJSONArray("streams")
-                // ── 2026-08-05 — LE 403 CLOUDFRONT EST RÉSOLU ────────────────────────────
-                //   La sonde a répondu. `streams[]` contient NEUF champs, dont deux que le
-                //   code ignorait totalement — il n'en lisait que `url` et `resolutions` :
-                //
-                //     · **signCookie** = `CloudFront-Policy=…` (+ Signature + Key-Pair-Id)
-                //       → la signature n'est PAS dans l'URL, elle est fournie séparément et
-                //         CloudFront l'attend en **COOKIE**. Sans elle : 403 « MissingKey ».
-                //         C'était toute la cause du « serveur Cloudstream illisible ».
-                //     · **format** = `DASH`, l'URL étant un `index_web.mpd` (codec HEVC).
-                //       Il faut donc déclarer le type MPD à ExoPlayer, pas le laisser devenir.
-                //
-                //   ⚠ FAUSSE PISTE ÉCARTÉE (ne pas y revenir) : l'implémentation de référence
-                //     (dépôt Megix, `CineStreamExtractors.kt`) utilise l'API **web**
-                //     `h5-api.aoneroom.com/wefeed-h5api-bff` avec un `detailPath` et un
-                //     `X-Client-Info` au fuseau kenyan. Vérifié en direct depuis la France :
-                //     cette API répond **403 « invalid region »**, en-tête de fuseau ou non.
-                //     Notre API **mobile** (`api*.aoneroom.com/wefeed-mobile-bff`), elle,
-                //     répond normalement. Il ne faut donc PAS migrer vers la voie web.
-                //
-                //   `resolutions` valait `"1080,720,480"` → `toIntOrNull()` renvoyait null,
-                //   d'où le serveur affiché « Cloudstream [0p] ». On prend la première valeur.
-                if (streamArr != null) {
-                    val existingResolutions = servers.map { s ->
-                        s.name.let { n ->
-                            val m = Regex("(\\d+)p").find(n)
-                            m?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                        }
-                    }.toSet()
-                    val list = (0 until streamArr.length()).mapNotNull { i ->
-                        val s = streamArr.optJSONObject(i) ?: return@mapNotNull null
-                        val u = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                        // `resolutions` est une LISTE (« 1080,720,480 ») : on garde la plus haute,
-                        //   qui vient en premier. `resolution` (singulier) reste géré en repli.
-                        val res = s.optString("resolutions").substringBefore(',').trim()
-                            .ifEmpty { s.optString("resolution") }
-                        Triple(
-                            res.toIntOrNull() ?: 0,
-                            u,
-                            s.optString("signCookie") to s.optString("format"),
-                        )
-                    }.sortedByDescending { it.first }
-                    for ((idx, t) in list.withIndex()) {
-                        val idServeur = "cs_playinfo_${sid}_${se}_${ep}_${t.first}_$idx"
-                        val (cookie, format) = t.third
-                        // La signature CloudFront et le format sont mémorisés ici : `getVideo`
-                        //   ne reçoit que l'identifiant du serveur et son URL, il ne peut pas
-                        //   les redemander à l'API sans un appel réseau supplémentaire.
-                        if (cookie.isNotBlank()) signaturesCloudFront[idServeur] = cookie
-                        if (format.isNotBlank()) formatsFlux[idServeur] = format
-                        servers.add(
-                            Video.Server(
-                                id = idServeur,
-                                name = "Cloudstream [${t.first}p]",
-                                src = t.second,
-                            )
-                        )
-                    }
-                    if (list.isNotEmpty()) {
-                        Log.d(TAG, "getServers $id : +${list.size} streams play-info (hcdn)")
-                    }
-                }
+            val h5 = try {
+                h5ResolvePlay(sid, se, ep)
+            } catch (e: Exception) {
+                Log.w(TAG, "h5ResolvePlay KO: ${e.message}")
+                H5PlayResult(emptyList(), null, null, emptyList())
+            }
+            // Sous-titres FR (web) mémorisés pour getVideo.
+            if (h5.frCaptions.isNotEmpty()) h5CaptionsCache[sid] = h5.frCaptions
+            // MP4 progressifs (downloads + streams fusionnés, dédupés par résolution).
+            for ((idx, t) in h5.progressive.withIndex()) {
+                val idServeur = "cs_h5play_${sid}_${se}_${ep}_${t.first}_$idx"
+                if (t.third.isNotBlank()) formatsFlux[idServeur] = t.third
+                servers.add(
+                    Video.Server(
+                        id = idServeur,
+                        name = "Cloudstream [${t.first}p]",
+                        src = t.second,
+                    )
+                )
+            }
+            // Serveur DASH adaptatif (qualité auto).
+            h5.dashUrl?.let { dashUrl ->
+                val dashId = "cs_h5dash_${sid}_${se}_${ep}"
+                formatsFlux[dashId] = "DASH"
+                if (!h5.dashCookie.isNullOrBlank()) signaturesCloudFront[dashId] = h5.dashCookie!!
+                servers.add(
+                    Video.Server(
+                        id = dashId,
+                        name = "Cloudstream [Auto]",
+                        src = dashUrl,
+                    )
+                )
+            }
+            if (h5.progressive.isNotEmpty() || h5.dashUrl != null) {
+                Log.d(TAG, "getServers $id : +${h5.progressive.size} MP4" +
+                    (if (h5.dashUrl != null) " +1 DASH" else "") +
+                    " web (Referer), ${h5.frCaptions.size} sous-titre(s) FR")
             }
             Log.d(TAG, "getServers $id : MovieBox+ → ${servers.size} streams")
         }
@@ -2764,6 +2973,57 @@ $url
         //   xxx.html et lulustream.com/e/xxx (vus dans les logs).
         if (server.id.startsWith("coflix_")) {
             return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
+        }
+        // 2026-08-30 — cs_h5play_ : URL bcdnxw signée (endpoint web), directement lisible.
+        //   La signature est DANS l'URL → aucun cookie CloudFront ni Bearer. Le Referer FAIT
+        //   rejeter le CDN (comme pour les autres flux hakunaymatata) → on ne met QUE l'UA.
+        if (server.id.startsWith("cs_h5play_")) {
+            val sidH5 = parseSidFromCsId(server.id)
+            val capsH5 = sidH5?.let { h5CaptionsCache[it] ?: frenchCaptionsCache[it] } ?: emptyList()
+            val subsH5 = capsH5.mapIndexed { idx, u ->
+                Video.Subtitle(
+                    label = if (idx == 0) "Français" else "Français (${idx + 1})",
+                    file = u, default = idx == 0, initialDefault = idx == 0,
+                )
+            }
+            // Le CDN web bcdnxw EXIGE un Referer officialmoviebox.com (vérifié : avec →
+            //   206 video/mp4 ; sans → 429/erreur). ⚠ NE PAS confondre avec la vieille note
+            //   « Referer fait rejeter le CDN » : celle-là visait l'ANCIEN CDN mobile bcdn avec
+            //   le Referer moviebox.ph. Le NOUVEAU CDN web veut officialmoviebox.com. UA
+            //   navigateur ; signature déjà dans l'URL (pas de cookie/Bearer).
+            return Video(
+                source = server.src,
+                subtitles = subsH5,
+                headers = mutableMapOf(
+                    "User-Agent" to com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA,
+                    "Referer" to h5PlaybackReferer,
+                ),
+                type = null,  // MP4 progressif — ExoPlayer auto-détecte
+            )
+        }
+        // 2026-08-30 — cs_h5dash_ : manifeste DASH adaptatif (qualité auto). Lisible avec le
+        //   même Referer officialmoviebox.com + UA navigateur ; type MPD déclaré explicitement.
+        //   signCookie éventuel reposé en Cookie (souvent vide — la signature est dans l'URL).
+        if (server.id.startsWith("cs_h5dash_")) {
+            val sidD = parseSidFromCsId(server.id)
+            val capsD = sidD?.let { h5CaptionsCache[it] ?: frenchCaptionsCache[it] } ?: emptyList()
+            val subsD = capsD.mapIndexed { idx, u ->
+                Video.Subtitle(
+                    label = if (idx == 0) "Français" else "Français (${idx + 1})",
+                    file = u, default = idx == 0, initialDefault = idx == 0,
+                )
+            }
+            val hdrsD = mutableMapOf(
+                "User-Agent" to com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA,
+                "Referer" to h5PlaybackReferer,
+            )
+            signaturesCloudFront[server.id]?.takeIf { it.isNotBlank() }?.let { hdrsD["Cookie"] = it }
+            return Video(
+                source = server.src,
+                subtitles = subsD,
+                headers = hdrsD,
+                type = androidx.media3.common.MimeTypes.APPLICATION_MPD,
+            )
         }
         // MovieBox+ direct (MP4 1080p max). Master m3u8 multi-quality testé via
         // data URI imbriqué → ExoPlayer Media3 le rejette. Pour vraie multi-

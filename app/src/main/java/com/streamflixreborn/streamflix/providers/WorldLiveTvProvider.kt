@@ -1757,6 +1757,42 @@ object WorldLiveTvProvider : Provider, IptvProvider {
      * son propre `return Video(...)`.
      */
     override suspend fun getVideo(server: Video.Server): Video {
+        // ⚠ 2026-09-03 (user : « le dossier Multi Live n'est pas compatible avec World Live
+        //   alors qu'il marche dans le TV Hub — les paramètres vidéo n'ont pas été poussés »).
+        //   PASSERELLE EXTRACTEUR, identique à celle du TV Hub (LiveTvHubProvider.getVideo,
+        //   branche FAST). Les chaînes du dossier « Multi Live » (data.m3u) portent une URL de
+        //   PAGE DE LECTEUR — cartelive.club/player/1/N — et non un flux. Seul un extracteur
+        //   déclaré (Hoca8, qui couvre cartelive/bolaloca/embedme) sait intercepter le vrai
+        //   .m3u8 et poser les en-têtes Referer/Origin que le CDN exige.
+        //   On lui passe la main AVANT getVideoInterne (sinon BoxXtemus fait un resolve HTTP
+        //   sur du HTML → écran noir) ET AVANT la réécriture d'en-têtes plus bas : la ligne M3U
+        //   ne déclarant aucun UA/Referer, `enTetesPlaylist` serait vide et effacerait le
+        //   Referer légitime posé par l'extracteur. On rend donc la vidéo de l'extracteur telle
+        //   quelle, exactement comme le TV Hub.
+        //   Garde-fous : uniquement http(s), uniquement si le src N'EST PAS déjà un flux direct
+        //   (pas d'extension .m3u8/.mpd/.ts/…), et seulement si identifyServiceName reconnaît
+        //   l'hôte — sinon on retombe EXACTEMENT sur le pipeline d'avant (getVideoInterne).
+        run {
+            val stripped0 = server.id.removePrefix("wltv-ch::")
+            val backupMatch0 = Regex("""^(.+)::backup(\d+)$""").find(stripped0)
+            val channelId0 = backupMatch0?.groupValues?.get(1) ?: stripped0
+            val backupIdx0 = backupMatch0?.groupValues?.get(2)?.toIntOrNull()
+            val ch0 = channelById(channelId0)
+            val backupTriple0 = backupIdx0?.let { idx -> ch0?.extraServers?.getOrNull(idx - 1) }
+            val rawSrc0 = backupTriple0?.first ?: ch0?.streamUrl ?: server.src
+            val cheminSrc0 = rawSrc0.substringBefore('?').substringBefore('#').lowercase()
+            val estFluxDirect0 = listOf(".m3u8", ".mpd", ".ts", ".mp4", ".mkv", ".webm", ".flv")
+                .any { cheminSrc0.endsWith(it) }
+            if (rawSrc0.startsWith("http", ignoreCase = true) && !estFluxDirect0) {
+                val service = com.streamflixreborn.streamflix.extractors.Extractor
+                    .identifyServiceName(rawSrc0)
+                if (service != null) {
+                    Log.i(TAG, "World Live → extracteur '$service' pour « ${ch0?.name ?: server.name} » : ${rawSrc0.take(80)}")
+                    return com.streamflixreborn.streamflix.extractors.Extractor
+                        .extract(rawSrc0, server)
+                }
+            }
+        }
         val video = getVideoInterne(server)
         val chId = server.id.removePrefix("wltv-ch::").substringBefore("::backup")
         val ch = channelById(chId)

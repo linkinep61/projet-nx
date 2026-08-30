@@ -59,6 +59,10 @@ object PurstreamProvider {
 
     /** Hotes API, dans l'ordre d'essai. Le premier qui repond est memorise. */
     private val API_HOSTS = listOf(
+        // 2026-08-30 : purstream.wiki redirige désormais vers purstream.id → api.purstream.id
+        //   est le domaine COURANT (vérifié en direct : 200 + hôte CDN vivant finepulfe.xyz).
+        //   On le met en tête ; .store/.wiki restent en repli le temps qu'ils vivent.
+        "https://api.purstream.id",
         "https://api.purstream.store",
         "https://api.purstream.wiki",
     )
@@ -200,6 +204,10 @@ object PurstreamProvider {
 
         retenues.mapIndexedNotNull { i, s ->
             val url = s.stream_url?.takeIf { it.startsWith("http") } ?: return@mapIndexedNotNull null
+            // 2026-08-30 : senpai-stream.club = ANCIEN CDN Purstream, ABANDONNÉ (NXDOMAIN).
+            //   Le CDN courant est finepulfe.xyz. Un lien senpai = mort garanti → on l'écarte
+            //   (mieux vaut pas de serveur qu'un serveur rouge).
+            if (url.contains("senpai-stream.club", ignoreCase = true)) return@mapIndexedNotNull null
             // « pulse | 1080p | MULTI » -> « 1080p · MULTI »
             val label = s.source_name
                 ?.split("|")

@@ -319,12 +319,12 @@ object LiveHubFolderDialog {
         //   `activeCtx` garde la fenêtre en vie ; si l'utilisateur a quitté entre-temps,
         //   `isFinishing` évite d'ouvrir un dialogue sur une activité morte.
         if (folderKey == "ma_bibliotheque") {
-            show(ctx, "voedir_", folderName, onChannelSelected)
+            show(ctx, "vidaradir_", folderName, onChannelSelected)
             return
         }
-        if (folderKey.startsWith("voedir_")) {
-            val chemin = folderKey.removePrefix("voedir_")
-            val v = com.streamflixreborn.streamflix.utils.VoeLibrary
+        if (folderKey.startsWith("vidaradir_")) {
+            val chemin = folderKey.removePrefix("vidaradir_")
+            val v = com.streamflixreborn.streamflix.utils.VidaraLibrary
             // Cache complet déjà chargé (préchauffage fini, ou on revient en
             //   arrière) : affichage immédiat, sans toucher au réseau.
             val (sousCache, filmsCache) = v.enfantsDe(chemin)
@@ -1369,6 +1369,47 @@ object LiveHubFolderDialog {
             displayCategories(ctx, "Rakuten TV", rakutenCategories, onChannelSelected) })
         if (sonyCategories.isNotEmpty()) folders.add("📡 Sony One" to {
             displayCategories(ctx, "Sony One", sonyCategories, onChannelSelected) })
+        // 2026-08-28 (user : « le dossier je te l'ai montre, il s'appelle Partage de la
+        //   communaute, et dedans le comportement doit etre comme Film / serie ») :
+        //   entree TOUJOURS presente, meme cache froid — sinon elle disparaitrait a la
+        //   moindre lecture ratee de l'index, exactement le defaut deja corrige le 19/06
+        //   pour les dossiers Replay et le 17/08 pour « Film / serie ».
+        //   Contenu = index public data/voe.json de nx-data, AUCUNE cle API embarquee
+        //   (cf. l'en-tete de VoeCommunaute pour le pourquoi).
+        //   2026-08-28 : entree masquee tant que VoeCommunaute.ACTIVE est a false
+        //   (cf. l'interrupteur documente dans VoeCommunaute). Un seul booleen a
+        //   basculer le jour ou une cle de contributeur entre dans VOE_KEYS.
+        if (com.streamflixreborn.streamflix.utils.VoeCommunaute.disponible)
+        folders.add("\uD83E\uDD1D Partage de la communaute" to {
+            val dejaLa = com.streamflixreborn.streamflix.utils.VoeCommunaute.categoriesSiDejaCharge()
+            if (dejaLa.isNotEmpty()) {
+                displayCategories(ctx, "Partage de la communaute", dejaLa, onChannelSelected)
+            } else {
+                android.widget.Toast.makeText(
+                    ctx, "Chargement du partage de la communaute\u2026",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                val scopeCom = CoroutineScope(Dispatchers.IO + SupervisorJob())
+                scopeCom.launch {
+                    val cats = try {
+                        com.streamflixreborn.streamflix.utils.VoeCommunaute.categories()
+                    } catch (e: Throwable) {
+                        android.util.Log.w("LiveHubFolderDialog", "communaute KO : ${e.message}")
+                        emptyList()
+                    }
+                    withContext(Dispatchers.Main) {
+                        if (cats.isEmpty()) {
+                            android.widget.Toast.makeText(
+                                ctx, "Aucun partage disponible pour l'instant",
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        } else {
+                            displayCategories(ctx, "Partage de la communaute", cats, onChannelSelected)
+                        }
+                    }
+                }
+            }
+        })
 
         // 2026-06-27 (user "mets une recherche à l'ouverture du dossier") :
         //   agrège TOUTES les chaînes des sous-dossiers pour une recherche globale.

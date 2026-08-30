@@ -52,7 +52,23 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     const val USER_AGENT = NetworkClient.USER_AGENT
     // 2026-06-19 (user "l'adresse de redirection a changé") : 1jour1film-officiel.site
     //   est mort, nouveau portail = https://1jour1film2026.site/
-    override val defaultPortalUrl: String = "https://1jour1film2026.site/"
+    // ── 2026-08-28 (user « ca fait tres longtemps que je vois plus ce backup ») ─────────
+    //   La RACINE du portail est morte (page d'erreur dans le navigateur, echec TLS depuis
+    //   le PC). La page vivante est /go/ : titre « 1JOUR1FILM – Page Officielle », avec le
+    //   lien « ACCEDER A L'ADRESSE ACTUELLE » et une redirection auto en 5 s — exactement
+    //   les deux motifs que `onChangeUrl` sait deja lire (cf. commentaire du 19/06).
+    //   Verifie en direct : /go/ retombe sur https://1jour1film0826.online/
+    //
+    //   CONSEQUENCE DE LA PANNE : `onChangeUrl` ne pouvait plus decouvrir l'adresse
+    //   courante, l'app restait donc sur le domaine code en dur de JUIN, qui repond 403.
+    //   Mesure du 28/08 sur « Projet Derniere Chance » :
+    //     DIAG [1Jour1Film] search(...) EXCEPTION en 148ms: HttpException: HTTP 403
+    //     DIAG [1Jour1Film] AUCUN MATCH -> 0 serveurs
+    //   Ce n'etait donc PAS un echec de correspondance de titre (ce que le journal laissait
+    //   croire) mais un refus reseau : la source etait morte sur TOUS les titres.
+    //   Pointer le portail sur /go/ rend l'auto-mise-a-jour fonctionnelle -> la source se
+    //   repare seule a chaque rotation de domaine, sans nouvelle version de l'app.
+    override val defaultPortalUrl: String = "https://1jour1film2026.site/go/"
 
     override val portalUrl: String = defaultPortalUrl
         get() {
@@ -60,7 +76,11 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             return cachePortalURL.ifEmpty { field }
         }
 
-    override val defaultBaseUrl: String = "https://1jour1film0626c.site/"
+    // 2026-08-28 : repli passe de 1jour1film0626c.site (juin, repond 403) a l'adresse
+    //   d'aout, relevee via le portail. Ce n'est qu'un FILET : en marche normale c'est
+    //   `onChangeUrl` qui fixe l'adresse. Mais si le portail tombe a son tour, l'app
+    //   demarrera sur une adresse valide au lieu d'un 403 immediat.
+    override val defaultBaseUrl: String = "https://1jour1film0826.online/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -257,7 +277,15 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             ).map { (name, slug) -> Genre(id = slug, name = name) }
         }
 
-        val document = service.search( query )
+        // La page publique « ?s= » renvoie 403 (WAF) : on passe d'abord par l'API REST.
+        val apiResults = searchViaApi(query)
+        if (apiResults.isNotEmpty()) return apiResults
+
+        val document = try {
+            service.search( query )
+        } catch (_: Exception) {
+            return emptyList()
+        }
 
         // Try old selectors first, then new selectors
         var results = document.select("div.result-item > article")
@@ -1284,7 +1312,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                                 (it.contains("1jour1film", ignoreCase = true) ||
                                  it.contains("/film", ignoreCase = true)) &&
                                 !it.contains("2026.site") &&  // skip self-portal
-                                !it.contains("/go", ignoreCase = true)
+                                // 2026-08-28 : le filtre "/go" visait les liens
+                                //   intermediaires du portail. Maintenant que le portail
+                                //   EST /go/, il ne doit ecarter que les liens qui pointent
+                                //   vers une page /go/ (boucle), pas une adresse de site qui
+                                //   contiendrait "go" ailleurs (ex. un domaine en .gold).
+                                !it.contains("/go/", ignoreCase = true)
                             }
                         if (anchorUrl != null) return@run anchorUrl
                         // 2) <meta http-equiv="refresh" content="N;url=...">
@@ -1378,6 +1411,54 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         } catch (_: Exception) { emptyList() }
     }
 
+    /**
+     * Recherche via l'API REST WordPress.
+     * La page publique « ?s= » est protegee par un WAF qui renvoie 403 ;
+     * « wp-json/wp/v2/{movies,tvshows}?search= » reste accessible.
+     */
+    private suspend fun searchViaApi(query: String): List<AppAdapter.Item> {
+        val results = mutableListOf<AppAdapter.Item>()
+
+        try {
+            val response = service.searchMoviesApi(search = query)
+            val jsonArray = JSONArray(response.string())
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                val slug = obj.optString("slug", "")
+                val title = obj.optJSONObject("title")?.optString("rendered", "") ?: ""
+                val poster = try {
+                    obj.getJSONObject("_embedded")
+                        .getJSONArray("wp:featuredmedia")
+                        .getJSONObject(0)
+                        .optString("source_url", "")
+                } catch (_: Exception) { "" }
+                if (slug.isNotEmpty()) {
+                    results.add(Movie(id = slug, title = decodeHtml(title), poster = poster))
+                }
+            }
+        } catch (_: Exception) { }
+
+        try {
+            val response = service.searchTvShowsApi(search = query)
+            val jsonArray = JSONArray(response.string())
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                val slug = obj.optString("slug", "")
+                val title = obj.optJSONObject("title")?.optString("rendered", "") ?: ""
+                val poster = try {
+                    obj.getJSONObject("_embedded")
+                        .getJSONArray("wp:featuredmedia")
+                        .getJSONObject(0)
+                        .optString("source_url", "")
+                } catch (_: Exception) { "" }
+                if (slug.isNotEmpty()) {
+                    results.add(TvShow(id = slug, title = decodeHtml(title), poster = poster))
+                }
+            }
+        } catch (_: Exception) { }
+
+        return results
+    }
     private suspend fun initializeService() {
         initializationMutex.withLock {
             if (serviceInitialized) return
@@ -1493,6 +1574,23 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             @Header("User-agent") user_agent: String = USER_AGENT
         ): okhttp3.ResponseBody
 
+        @GET("wp-json/wp/v2/movies")
+        suspend fun searchMoviesApi(
+            @Query("search") search: String,
+            @Query("per_page") perPage: Int = 20,
+            @Query("_fields") fields: String = "id,slug,title,featured_media,_links",
+            @Query("_embed") embed: String = "wp:featuredmedia",
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): okhttp3.ResponseBody
+
+        @GET("wp-json/wp/v2/tvshows")
+        suspend fun searchTvShowsApi(
+            @Query("search") search: String,
+            @Query("per_page") perPage: Int = 20,
+            @Query("_fields") fields: String = "id,slug,title,featured_media,_links",
+            @Query("_embed") embed: String = "wp:featuredmedia",
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): okhttp3.ResponseBody
         @GET("genre/{genre}/page/{page}/")
         suspend fun getGenre(
             @Path("genre") genre: String,

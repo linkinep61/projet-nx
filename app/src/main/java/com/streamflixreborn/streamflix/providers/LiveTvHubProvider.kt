@@ -771,7 +771,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   quand le cache est froid, contenu complet quand il est chaud. Le vrai
         //   chargement se fait au clic, dans LiveHubFolderDialog.
         val sectionsAvecVoe = sections + try {
-            com.streamflixreborn.streamflix.utils.VoeLibrary.sectionsSiDejaCharge()
+            com.streamflixreborn.streamflix.utils.VidaraLibrary.sectionsSiDejaCharge()
         } catch (e: Exception) {
             Log.w(TAG, "Ma bibliothèque KO : ${e.message}"); emptyList()
         }
@@ -811,7 +811,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   scope et rend la main tout de suite. L'accueil reste instantané, et quand
         //   l'utilisateur clique sur « Film / série » quelques secondes plus tard, le
         //   cache est déjà chaud → ouverture immédiate, sans le toast d'attente.
-        com.streamflixreborn.streamflix.utils.VoeLibrary.prechauffer()
+        // 2026-09-04 (user « ces dossiers la sont censes charger que a partir du
+        //   moment ou on clique dessus, sinon ca encombre la memoire pour rien ») :
+        //   plus de prechauffage au demarrage du home. L'index Vidara ne se charge
+        //   qu'au clic sur « Film / serie » (LiveHubFolderDialog -> VidaraLibrary.niveau).
         return foldered
     }
 
@@ -1229,7 +1232,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   deja corrigee le 19/06 pour les dossiers Replay (« la moitie
             //   des categories qui etaient dans un dossier ont disparu ») :
             //   la carte reste, le contenu arrive apres. Meme traitement ici.
-            (if (com.streamflixreborn.streamflix.utils.VoeLibrary.actif)
+            (if (com.streamflixreborn.streamflix.utils.VidaraLibrary.disponible)
                 setOf("ma_bibliotheque") else emptySet())
         // 2026-06-20 (user "mettre une petite jaquette sur les dossiers pour faire
         //   joli, correspondant au replay/catégorie") : map folderKey → URL logo.
@@ -1431,19 +1434,19 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   le chargement continue en fond, la frappe suivante en profitera.
         val voeHits = try {
             kotlinx.coroutines.withTimeoutOrNull(5_000) {
-                com.streamflixreborn.streamflix.utils.VoeLibrary.tout()
+                com.streamflixreborn.streamflix.utils.VidaraLibrary.toutNav()
             }.orEmpty()
                 // On cherche dans titreAffiche (sans l'identifiant TMDB) : taper
                 //   « mojave » doit trouver « 237584 - Mojave.avi ». Chercher dans
                 //   `titre` marcherait aussi, mais un utilisateur qui tape un
                 //   nombre tomberait sur des identifiants au lieu de titres.
                 .filter {
-                    val v = com.streamflixreborn.streamflix.utils.VoeLibrary
+                    val v = com.streamflixreborn.streamflix.utils.VidaraLibrary
                     it.titreAffiche.lowercase().contains(q) ||
                         v.titrePour(it).lowercase().contains(q)
                 }
                 .take(100)
-                .map { com.streamflixreborn.streamflix.utils.VoeLibrary.tuileFilm(it) }
+                .map { com.streamflixreborn.streamflix.utils.VidaraLibrary.tuileFilm(it) }
         } catch (e: Exception) {
             Log.w(TAG, "search: bibliothèque KO: ${e.message}"); emptyList()
         }
@@ -1539,6 +1542,40 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
         // 2026-08-17 : film perso hébergé sur VOE → fiche direct-play (1 saison,
         //   1 épisode), même pattern que les clips Rutube ci-dessus.
+        // 2026-08-28 : fiche direct-play d'un fichier du Partage de la communaute.
+        if (id.startsWith("livehub::voecom::")) {
+            val codeCom = id.removePrefix("livehub::voecom::")
+            val titreCom = com.streamflixreborn.streamflix.utils.VoeCommunaute
+                .fichierDe(codeCom)?.titreAffiche ?: "Partage de la communaute"
+            return TvShow(id = id, title = titreCom).copy(
+                seasons = listOf(
+                    Season(
+                        id = id, number = 1, title = "Fichier",
+                        episodes = listOf(Episode(id = id, number = 1, title = "Lire")),
+                    ),
+                ),
+            ).apply { providerName = "TV Hub" }
+        }
+        // 2026-09-04 : fichier perso heberge sur Vidara (index publie) ->
+        //   fiche direct-play (1 saison, 1 episode), meme pattern que voe:: ci-dessous.
+        if (id.startsWith("livehub::vidara::")) {
+            val vcode = id.removePrefix("livehub::vidara::")
+            val vv = com.streamflixreborn.streamflix.utils.VidaraLibrary
+            val vf = try { vv.toutNav().firstOrNull { it.code == vcode } } catch (e: Exception) { null }
+            val vtitre = vf?.let { vv.titrePour(it) } ?: "Ma bibliotheque"
+            val vjaquette = vf?.let { vv.posterPour(it) }
+            return TvShow(id = id, title = vtitre).copy(
+                poster = vjaquette,
+                seasons = listOf(
+                    Season(
+                        id = id, number = 1, title = "Fichier",
+                        episodes = listOf(
+                            Episode(id = id, number = 1, title = "Lire", poster = vjaquette),
+                        ),
+                    ),
+                ),
+            ).apply { providerName = "TV Hub" }
+        }
         if (id.startsWith("livehub::voe::")) {
             val code = id.removePrefix("livehub::voe::")
             val f = try {
@@ -2294,6 +2331,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-08-17 : fichier perso VOE → serveur unique en URL d'embed canonique.
         //   VoeExtractor a « https://voe.sx » dans ses aliasUrls, donc l'extraction
         //   part directement sur le bon extracteur, sans code supplémentaire.
+        // 2026-08-28 : fichier du « Partage de la communaute » → meme embed public,
+        //   mais index different (VoeCommunaute, sans cle API embarquee).
+        if (id.startsWith("livehub::voecom::")) {
+            return listOf(
+                com.streamflixreborn.streamflix.utils.VoeCommunaute
+                    .serveurDe(id.removePrefix("livehub::voecom::")),
+            )
+        }
+        if (id.startsWith("livehub::vidara::")) {
+            return listOf(
+                com.streamflixreborn.streamflix.utils.VidaraLibrary
+                    .serveurDe(id.removePrefix("livehub::vidara::")),
+            )
+        }
         if (id.startsWith("livehub::voe::")) {
             return listOf(
                 com.streamflixreborn.streamflix.utils.VoeLibrary
@@ -2860,6 +2911,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   renvoyait bien le serveur, mais getVideo tombait dans le delegate
             //   IPTV, qui ne connaît pas ce préfixe. Un fichier perso VOE se résout
             //   comme les bonus : on passe l'URL d'embed à l'extracteur.
+            // 2026-08-28 : meme piege pour le Partage de la communaute. Constate en
+            //   direct : « Server [0] Communaute failed: No IPTV provider can handle
+            //   server: livehub::voecom::… ». Meme resolution que ci-dessus.
+            server.id.startsWith("livehub::voecom::") ||
+            server.id.startsWith("livehub::vidara::") ||
             server.id.startsWith("livehub::voe::")) {
             return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
         }

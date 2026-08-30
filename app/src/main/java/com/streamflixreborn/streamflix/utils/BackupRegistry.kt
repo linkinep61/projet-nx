@@ -1262,33 +1262,28 @@ object BackupRegistry {
         }
 
         // ── Sources FEUILLES (pas de sous-backup → aucune récursion) ──────────────
-        // 2026-08-17 (user « le rattachement TMDB, bah tu le fais autrement ») :
-        //   les fichiers du compte VOE perso. Émis en VAGUE 1 — c'est la source la
-        //   plus rapide de toutes (fichier unique, pas de scraping, VoeExtractor
-        //   noté +25 au SPEED_BIAS), et il n'y a aucune raison de faire attendre
-        //   l'utilisateur devant sa propre copie.
-        //   Rattachement : identifiant TMDB en tête du nom si présent, sinon
-        //   comparaison de titre via workMatches — le même comparateur que les
-        //   autres sources. Clé API vide ⇒ aucun appel réseau.
+        // 2026-09-04 (decision user, « supprimer totalement VOE sauf l'extracteur ») :
+        //   l'emission VoeLibrary.serveursPour a ete RETIREE. Le compte VOE est
+        //   inactif (« aucun compte actif ») et la bibliotheque perso a migre sur
+        //   Vidara — l'emission « ONYX » ci-dessous (VidaraLibrary) sert desormais
+        //   les MEMES fichiers. VoeExtractor reste en place pour les liens voe.sx
+        //   que d'autres providers peuvent encore renvoyer.
+        // 2026-09-02 : MÊME bibliothèque perso, servie depuis Vidara (serveur
+        //   SUPPLÉMENTAIRE, migration VOE -> Vidara en cours). Réutilise la
+        //   source « ONYX » : les fichiers apparaissent en « ONYX · Vidara » à
+        //   côté de « ONYX · VOE », sous le même interrupteur. src = vidara.so/e/<code>
+        //   -> résolu par VidaraExtractor (aucun changement de getVideo requis).
+        //   Rattachement identique (VidaraLibrary est le jumeau de VoeLibrary).
+        //   Clé VIDARA_API_KEY vide ⇒ aucun appel réseau.
         launch { emit("ONYX") {
-            VoeLibrary.serveursPour(
+            VidaraLibrary.serveursPour(
                 tmdbId = resolvedTmdbId,
                 titresConnus = knownTitles,
                 annee = key.year,
                 estUnFilm = key.isMovie,
-                // 2026-08-17 : deux discriminants que le comparateur commun ne
-                //   sait pas voir. Le numéro de suite (sigWords jette les mots
-                //   de moins de 3 caractères, donc « Cendrillon 2 » ≡
-                //   « Cendrillon 3 ») et la durée TMDB déjà chargée ci-dessus,
-                //   qui ne coûte aucune requête supplémentaire.
                 titrePrincipal = key.title,
                 dureeMinSec = runtimeSecondes,
                 dureeMaxSec = runtimeMaxSecondes,
-                // 2026-08-19 (user « elle n'a pas trouvé le serveur ONYX avec
-                //   Star Trek ») : on connaissait la saison et l'épisode depuis
-                //   le début sans les transmettre. Sans eux, aucun épisode de
-                //   série ne pouvait être rattaché — voir le commentaire dans
-                //   VoeLibrary.serveursPour.
                 saison = key.season,
                 episode = key.episode,
             )

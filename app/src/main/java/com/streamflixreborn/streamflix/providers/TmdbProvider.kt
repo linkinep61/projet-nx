@@ -1067,6 +1067,7 @@ class TmdbProvider(override val language: String) : Provider, ProgressiveServers
                     ))
                     VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
                 }
+
             }
             "es" -> {
                 // Providers espagnols archivés — fallback sur extracteurs globaux
@@ -1097,6 +1098,7 @@ class TmdbProvider(override val language: String) : Provider, ProgressiveServers
                 servers.addAll(VidrockExtractor().servers(videoType))
                 servers.addAll(VidzeeExtractor().servers(videoType))
                 servers.addAll(PrimeSrcExtractor().servers(videoType))
+
 
                 if (language == "en") {
                     servers.addAll(1, VideasyExtractor().servers(videoType, language))

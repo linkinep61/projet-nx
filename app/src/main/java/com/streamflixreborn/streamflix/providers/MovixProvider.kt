@@ -2802,6 +2802,15 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                             ps.sources?.forEachIndexed { i, s ->
                                 val url = s.url ?: return@forEachIndexed
                                 if (url.isBlank()) return@forEachIndexed
+                                // 2026-08-30 : senpai-stream.club = ANCIEN CDN Purstream abandonné
+                                //   (NXDOMAIN). Le canal purstream de movix.show sert encore de
+                                //   vieux hôtes morts (senpai-stream.club, puis zebi.xalaflix.design).
+                                // 2026-09-02 : on NE GARDE QUE le CDN vivant finepulfe.xyz. Ce canal
+                                //   secondaire est un doublon du provider Purstream direct ; tout hôte
+                                //   autre que finepulfe = mort ou en rotation → serveur ROUGE sur les
+                                //   films absents du catalogue live (ex. One Piece Strong World
+                                //   tmdb 41498 → NXDOMAIN xalaflix.design). Mieux vaut pas de serveur.
+                                if (!url.contains("finepulfe.xyz", ignoreCase = true)) return@forEachIndexed
                                 val nm = s.name?.takeIf { it.isNotBlank() } ?: "Purstream"
                                 list.add(Video.Server(id = "purstream-$i", name = "Purstream · $nm", src = url))
                             }
