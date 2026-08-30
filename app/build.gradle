@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10944
-        versionName "1.7.244"
+        versionCode 10945
+        versionName "1.7.245"
 
         // ABI pilotée par la propriété ABI_TARGET (local.properties, posée par la CI).
         //   APK par défaut = ARM (armeabi-v7a + arm64-v8a).
@@ -72,6 +72,9 @@ android {
         // 2026-08-17 : clé API VOE (bibliothèque perso). Onglet COMPTE du site, section
         //   « Détails de l'API ». Vide = provider inactif, aucun appel réseau.
         buildConfigField "String", "VOE_API_KEY", "\"${properties.getProperty("VOE_API_KEY") ?: ""}\""
+        // 2026-09-02 : clé API Vidara (même bibliothèque perso, serveur supplémentaire).
+        //   api.vidara.so, onglet compte. Vide = source Vidara inactive, aucun appel réseau.
+        buildConfigField "String", "VIDARA_API_KEY", "\"${properties.getProperty("VIDARA_API_KEY") ?: ""}\""
     }
 
     sourceSets {

@@ -41,6 +41,12 @@ import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.Header
 import retrofit2.http.Query
 import kotlin.collections.map
+import com.streamflixreborn.streamflix.utils.NetworkClient
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.withPermit
+import org.json.JSONObject
 
 object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
     override val name = "Frembed"
@@ -262,6 +268,71 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
         val movies: List<FrembedShortCutItem>
     )
 
+    // ─────────────────────────────────────────────────────────────────────
+    // 2026-09-02 : section ANIMÉS. Frembed a ajouté une API versionnée
+    //   api/public/v1/anime (39 films + 104 séries au moment de l'ajout). C'est
+    //   une LISTE curée : chaque item porte un tmdb + un type (movie/tv) qui
+    //   existe deja dans le catalogue principal — donc la fiche et la lecture
+    //   passent par le flux EXISTANT (getMovie / getTvShow / getServers), rien a
+    //   ajouter cote lecture. Seule nouveaute ici : recuperer la liste et, comme
+    //   l'API anime ne renvoie AUCUNE affiche, enrichir les jaquettes via TMDB.
+    // ─────────────────────────────────────────────────────────────────────
+    data class FrembedV1AnimeItem(
+        val type: String?,      // "movie" | "tv"
+        val title: String?,
+        val tmdb: String?
+    )
+
+    data class FrembedV1Result(val items: List<FrembedV1AnimeItem>? = null)
+
+    data class FrembedV1AnimeResponse(
+        val status: Int? = null,
+        val result: FrembedV1Result? = null
+    )
+
+    /** Cache des affiches TMDB (tmdb+type -> url w500) pour ne pas retaper TMDB
+     *  a chaque ouverture d'accueil. */
+    private val animePosters = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun fetchTmdbPoster(tmdb: String, isTv: Boolean): String? {
+        if (BuildConfig.TMDB_API_KEY.isBlank()) return null
+        val cle = (if (isTv) "tv:" else "movie:") + tmdb
+        animePosters[cle]?.let { return it }
+        return try {
+            val kind = if (isTv) "tv" else "movie"
+            val req = Request.Builder()
+                .url("https://api.themoviedb.org/3/$kind/$tmdb" +
+                     "?api_key=${BuildConfig.TMDB_API_KEY}&language=fr-FR")
+                .header("Accept", "application/json")
+                .build()
+            NetworkClient.default.newCall(req).execute().use { r ->
+                val j = JSONObject(r.body?.string().orEmpty())
+                val p = j.optString("poster_path").takeIf { it.isNotBlank() }
+                val url = p?.let { "https://image.tmdb.org/t/p/w500$it" }
+                if (url != null) animePosters[cle] = url
+                url
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Items anime -> Movie/TvShow (id=tmdb) avec affiche TMDB, en parallele. */
+    private suspend fun animeToShows(items: List<FrembedV1AnimeItem>): List<Show> =
+        withContext(Dispatchers.IO) {
+            val jetons = kotlinx.coroutines.sync.Semaphore(8)
+            coroutineScope {
+                items.filter { !it.tmdb.isNullOrBlank() }.map { it ->
+                    async {
+                        val isTv = it.type == "tv"
+                        val poster = jetons.withPermit { fetchTmdbPoster(it.tmdb!!, isTv) }
+                        if (isTv) TvShow(id = it.tmdb!!, title = it.title ?: "Animé", poster = poster) as Show
+                        else Movie(id = it.tmdb!!, title = it.title ?: "Animé", poster = poster) as Show
+                    }
+                }.awaitAll()
+            }
+        }
+
     override suspend fun getHome(): List<Category> {
         initializeService()
 
@@ -283,6 +354,17 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             val mostViewed = service.getApiView("most-viewed")
             categories.add(mostViewed.toCategorie("Meilleurs films"))
 
+            // Animés (nouvelle API v1 ; l'API anime ne renvoie pas d'affiche,
+            //   on les enrichit via TMDB). Isolé : un souci anime ne casse pas
+            //   le reste de l'accueil.
+            try {
+                val anime = service.getApiV1Anime(limit = 24)
+                val items = anime.result?.items.orEmpty()
+                if (items.isNotEmpty()) {
+                    categories.add(Category(name = "Animés", list = animeToShows(items)))
+                }
+            } catch (e: Exception) { }
+
         } catch (e: Exception) { }
 
         // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
@@ -298,8 +380,9 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
                 isRecent && isFilm -> 3
                 isSeries -> 4
                 isFilm -> 5
+                n.contains("anim") -> 6
                 isRecent -> 1
-                else -> 6
+                else -> 7
             }
         })
     }
@@ -827,5 +910,15 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             @Path("id") id: String,
             @Header("user-agent") user_agent: String = "Mozilla"
         ): List<FrembedSeasonResponse>
+
+        // 2026-09-02 : nouvelle API versionnee (section Animes). Enveloppe
+        //   {status, result:{items:[{type,title,tmdb,...}]}}.
+        @GET("api/public/v1/anime")
+        suspend fun getApiV1Anime(
+            @Query("limit") limit: Int = 30,
+            @Query("page") page: Int = 1,
+            @Query("order") order: String = "latest",
+            @Header("user-agent") user_agent: String = "Mozilla"
+        ): FrembedV1AnimeResponse
     }
 }

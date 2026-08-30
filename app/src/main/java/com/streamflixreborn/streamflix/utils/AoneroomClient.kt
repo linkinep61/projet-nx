@@ -11,6 +11,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import javax.crypto.Mac
@@ -373,7 +374,7 @@ object AoneroomClient {
             android.util.Log.i("AoneroomClient", "MVBX-DIAG play-info sid=$subjectId demandé se=$se ep=$ep → streams=$streamsN | resp.se=${d?.opt("se")} resp.ep=${d?.opt("ep")} title='${d?.optString("title")}' epTitle='${d?.optString("episodeTitle")}' resource=${d?.opt("resourceId") ?: d?.opt("resource")}")
         }
         val streamArr = resp.optJSONObject("data")?.optJSONArray("streams") ?: return emptyList()
-        return (0 until streamArr.length()).mapNotNull { i ->
+        val bruts = (0 until streamArr.length()).mapNotNull { i ->
             val s = streamArr.optJSONObject(i) ?: return@mapNotNull null
             val u = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
             // 2026-07-10 : le manifeste/segments sont protégés par CloudFront signed COOKIES,
@@ -398,9 +399,18 @@ object AoneroomClient {
                 )
             }
             if (signCookie != null) cookieCache[cookieKey(u)] = normalizeCookie(signCookie)
-            val res = s.optString("resolutions").ifEmpty { s.optString("resolution") }.toIntOrNull() ?: 0
+            // `resolutions` est une LISTE (« 1080,720,480 ») : `toIntOrNull()` rendait null
+            //   sur ce format, d'où les serveurs affichés « Moviebox MP4 » / [0p]. On prend la
+            //   première valeur, qui est la plus haute. Même correctif que CloudstreamProvider.
+            val res = s.optString("resolutions").substringBefore(',').trim()
+                .ifEmpty { s.optString("resolution") }.toIntOrNull() ?: 0
             res to u
         }.sortedByDescending { it.first }
+        val leurres = urlsLeurres(streamArr)
+        if (leurres.isEmpty()) return bruts
+        val gardes = bruts.filterNot { it.second in leurres }
+        Log.w(TAG, "MVBX-LEURRE ${bruts.size - gardes.size} flux ecartes sur ${bruts.size} (sid=$subjectId)")
+        return gardes
     }
 
     /**
@@ -417,6 +427,117 @@ object AoneroomClient {
      * un de nouveau, les serveurs réapparaissent automatiquement. Les URLs d'autres hôtes
      * (mp4 directs) ne sont pas concernées.
      */
+    // ─── Garde-fou anti-leurre (2026-08-29) ────────────────────────────────────
+    //
+    // Constat mesure ce jour : `/play-info` repond toujours 200 / code=0 / "ok" avec des
+    // metadonnees credibles (size 537 Mo, 648 Mo, 2,44 Go, 4 resolutions, un signCookie de
+    // 642 caracteres) mais l'`url` est LA MEME pour tous les films :
+    //
+    //   The Matrix ........... macdn.aoneroom.com/other/2026/08/11/1c7de0bd...f8d.mp4
+    //   Matrix Revolutions ... la meme
+    //   Asterix & Obelix ..... la meme
+    //
+    // et le fichier reel pese 5 595 350 octets (5,3 Mo, ftypqt) la ou l'API annonce 2,44 Go.
+    // Autrement dit MovieBox a neutralise ses clients mobiles en gardant l'apparence du
+    // succes : rien ne remonte en erreur, et sans ce filtre ONYX proposait des serveurs
+    // VERTS qui lisaient un clip de 5 Mo a la place du film. Un mauvais film qui se lance
+    // est pire qu'un serveur rouge.
+    //
+    // Trois regles, de la moins chere a la plus chere :
+    //   1. empreinte connue        — gratuit, mais contournable s'ils changent de fichier
+    //   2. meme URL sur plusieurs resolutions — gratuit, et structurellement anormal :
+    //      un vrai flux a une URL par resolution
+    //   3. taille reelle vs taille annoncee — un seul HEAD, mis en cache, et c'est la
+    //      regle qui survit a une rotation d'empreinte
+    private val LEURRES_CONNUS = listOf(
+        "1c7de0bd3393702d9191801f15f88f8d",
+    )
+
+    /** Verdict par URL, pour ne sonder le reseau qu'une fois par session. */
+    private val verdictLeurre = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * URLs de `streams[]` a ECARTER parce que ce sont des leurres. Ensemble vide = tout bon.
+     */
+    suspend fun urlsLeurres(streamArr: JSONArray): Set<String> {
+        val n = streamArr.length()
+        if (n == 0) return emptySet()
+
+        data class Flux(val url: String, val taille: Long, val res: String)
+
+        val flux = (0 until n).mapNotNull { i ->
+            val s = streamArr.optJSONObject(i) ?: return@mapNotNull null
+            val u = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            Flux(u, s.optLong("size", 0L), s.optString("resolutions").ifEmpty { s.optString("resolution") })
+        }
+        if (flux.isEmpty()) return emptySet()
+
+        val ecartees = mutableSetOf<String>()
+
+        // Regle 1 — empreinte connue.
+        for (f in flux) {
+            if (LEURRES_CONNUS.any { f.url.contains(it, ignoreCase = true) }) {
+                Log.w(TAG, "MVBX-LEURRE empreinte connue : ...${f.url.takeLast(45)}")
+                ecartees += f.url
+            }
+        }
+
+        // Regle 2 — une meme URL servie pour plusieurs resolutions distinctes.
+        flux.groupBy { it.url }
+            .filter { (_, g) -> g.size >= 2 && g.map { it.res }.distinct().size >= 2 }
+            .forEach { (u, g) ->
+                Log.w(TAG, "MVBX-LEURRE meme URL pour ${g.size} resolutions (${g.joinToString { it.res }})")
+                ecartees += u
+            }
+
+        // Regle 3 — la taille reelle contredit la taille annoncee.
+        for (f in flux.distinctBy { it.url }) {
+            if (f.url in ecartees) continue
+            if (f.taille < 50L * 1024 * 1024) continue  // rien d'annonce de credible : on ne sonde pas
+            val connu = verdictLeurre[f.url]
+            if (connu != null) {
+                if (connu) ecartees += f.url
+                continue
+            }
+            val reelle = tailleReelle(f.url)
+            if (reelle <= 0L) { verdictLeurre[f.url] = false; continue }
+            val leurre = reelle * 4 < f.taille   // moins du quart de ce qui est annonce
+            verdictLeurre[f.url] = leurre
+            if (leurre) {
+                Log.w(TAG, "MVBX-LEURRE taille reelle $reelle o contre ${f.taille} o annonces : ...${f.url.takeLast(45)}")
+                ecartees += f.url
+            }
+        }
+        return ecartees
+    }
+
+    /** Content-Length reel du fichier, -1 si indeterminable. Un seul aller-retour. */
+    private suspend fun tailleReelle(url: String): Long = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder().url(url).head()
+                .header("User-Agent", USER_AGENT)
+                .cacheControl(CacheControl.FORCE_NETWORK)
+                .build()
+            httpClient.newCall(req).execute().use { r ->
+                val cl = r.header("Content-Length")?.toLongOrNull() ?: -1L
+                if (cl > 0) return@withContext cl
+            }
+            // Certains CDN ignorent HEAD : on demande alors un octet et on lit le total.
+            val req2 = Request.Builder().url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Range", "bytes=0-0")
+                .cacheControl(CacheControl.FORCE_NETWORK)
+                .build()
+            httpClient.newCall(req2).execute().use { r ->
+                val cr = r.header("Content-Range") ?: return@withContext -1L
+                cr.substringAfter('/', "").trim().toLongOrNull() ?: -1L
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "tailleReelle KO : ${e.javaClass.simpleName}")
+            -1L
+        }
+    }
+
     fun isPlayable(url: String): Boolean {
         if (!url.contains("hakunaymatata", ignoreCase = true)) return true
         return cookieCache[cookieKey(url)] != null ||

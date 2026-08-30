@@ -581,7 +581,7 @@ class TvShowViewHolder(
         //   correspondaient a rien, et finissaient envoyees au lecteur — d'ou
         //   le « dossier illisible » constate, et l'abandon de l'arborescence
         //   au profit d'un affichage a plat. Ne pas la retirer.
-        if (selected.id.startsWith("livehub::folder::voedir_")) {
+        if (selected.id.startsWith("livehub::folder::vidaradir_")) {
             com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
                 root.context,
                 selected.id.removePrefix("livehub::folder::"),
