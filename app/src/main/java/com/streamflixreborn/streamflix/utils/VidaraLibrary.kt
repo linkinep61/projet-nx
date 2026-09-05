@@ -55,9 +55,12 @@ object VidaraLibrary {
         val titre: String get() = nomBrut.substringBeforeLast('.', nomBrut).trim()
         /** Nom LISIBLE (sans l'identifiant TMDB de tete). Cf. VoeLibrary.titreAffiche. */
         val titreAffiche: String
-            get() = titre.replace(RE_ID_TETE, "").trim().ifBlank { titre }
+            get() = titre.replace(RE_ID_TETE, "").replace(RE_TV_TETE, "").trim().ifBlank { titre }
         val embed: String get() = "$EMBED/e/$code"
     }
+
+    /** Nom sans AUCUN prefixe d'identifiant (film « 12345 - » ou serie « tv12345 - »). */
+    fun sansPrefixe(titre: String): String = titre.replace(RE_ID_TETE, "").replace(RE_TV_TETE, "")
 
     /** « ONYX · Vidara » apres re-etiquetage par BackupRegistry.wrap(). */
     fun serveurDe(code: String): Video.Server =
@@ -212,6 +215,14 @@ object VidaraLibrary {
 
     // ─────────────────────────── rattachement (logique identique a VoeLibrary)
     private val RE_ID_TETE = Regex("""^(\d{2,8})\s*-\s*""")
+    /**
+     * 2026-09-05 (user : « mets un indicatif TMDB aux videos qui n'en ont pas, et que le
+     *   dossier des series affiche une jaquette comme le mien ») : les SERIES portent
+     *   l'identifiant TMDB de la serie sous la forme « tv277439 - Cape Fear - S01E01 - ... ».
+     *   Le « tv » evite toute confusion avec un identifiant de FILM (numerotations
+     *   distinctes chez TMDB). Fiche = /tv/{id} (nom + affiche de la serie).
+     */
+    private val RE_TV_TETE = Regex("""^(?i)tv(\d{2,8})\s*-\s*""")
     private val ROMAINS = mapOf(
         "ii" to 2, "iii" to 3, "iv" to 4, "v" to 5, "vi" to 6,
         "vii" to 7, "viii" to 8, "ix" to 9, "x" to 10,
@@ -282,6 +293,29 @@ object VidaraLibrary {
             return emptyList()
         }
         if (fichiers.isEmpty()) return emptyList()
+        return rattacher(fichiers, tmdbId, titresConnus, annee, estUnFilm, titrePrincipal,
+                         dureeMinSec, dureeMaxSec, saison, episode) { serveurDe(it.code) }
+    }
+
+    /**
+     * 2026-09-05 : coeur du rattachement, SANS lecture reseau, reutilisable sur n'importe
+     * quelle liste (bibliotheque perso ci-dessus, index des amis dans VidaraCommunaute).
+     * `fabrique` construit le serveur a partir du fichier retenu (id/nom selon la source).
+     */
+    fun rattacher(
+        fichiers: List<Fichier>,
+        tmdbId: String?,
+        titresConnus: Collection<String>,
+        annee: Int?,
+        estUnFilm: Boolean,
+        titrePrincipal: String? = null,
+        dureeMinSec: Int? = null,
+        dureeMaxSec: Int? = null,
+        saison: Int = 0,
+        episode: Int = 0,
+        fabrique: (Fichier) -> Video.Server,
+    ): List<Video.Server> {
+        if (fichiers.isEmpty()) return emptyList()
 
         // 1. identifiant TMDB en tete du nom — FILMS uniquement (cf. VoeLibrary :
         //    TMDB numerote films et series separement, les identifiants ecrits
@@ -291,37 +325,48 @@ object VidaraLibrary {
         }.orEmpty()
         if (exacts.isNotEmpty()) {
             Log.d(TAG, "Vidara : rattachement TMDB $tmdbId -> ${exacts.size}")
-            return exacts.map { serveurDe(it.code) }
+            return exacts.map { fabrique(it) }
         }
 
         // 2. episode de serie : SxxExx + mot de tete de la serie.
         if (!estUnFilm && saison > 0 && episode > 0) {
             val marque = Regex("(?i)s0*${saison}[ ._-]?e0*${episode}(?!\\d)")
+            // 2a. identifiant TMDB de SERIE en tete (« tv277439 - ... ») : rattachement sur.
+            val exactsTv = tmdbId?.takeIf { it.isNotBlank() }?.let { id ->
+                fichiers.filter { f ->
+                    RE_TV_TETE.find(f.titre)?.groupValues?.get(1) == id &&
+                        marque.containsMatchIn(sansPrefixe(f.titre))
+                }
+            }.orEmpty()
+            if (exactsTv.isNotEmpty()) {
+                Log.d(TAG, "Vidara : rattachement serie TMDB $tmdbId S${saison}E${episode} -> ${exactsTv.size}")
+                return exactsTv.map { fabrique(it) }
+            }
             val episodes = fichiers.filter { f ->
-                val propre = RE_ID_TETE.replace(f.titre, "")
+                val propre = sansPrefixe(f.titre)
                 marque.containsMatchIn(propre) && motTeteCouvert(propre, titresConnus)
             }
             if (episodes.isNotEmpty()) {
                 Log.d(TAG, "Vidara : rattachement S${saison}E${episode} -> ${episodes.size}")
             }
-            return episodes.map { serveurDe(it.code) }
+            return episodes.map { fabrique(it) }
         }
 
         // 3. titre + garde-fous (mot de tete, n0 de suite, duree).
         if (titresConnus.isEmpty()) return emptyList()
         val parTitre = fichiers.filter { f ->
-            val t = RE_ID_TETE.replace(f.titre, "")
+            val t = sansPrefixe(f.titre)
             BackupRegistry.workMatches(t, titresConnus, annee, estUnFilm)
         }
         val attendu = numeroDeSuite(titrePrincipal ?: titresConnus.first())
         val retenus = parTitre.filter { f ->
-            val propre = RE_ID_TETE.replace(f.titre, "")
+            val propre = sansPrefixe(f.titre)
             motTeteCouvert(propre, titresConnus) &&
                 numeroDeSuite(propre) == attendu &&
                 dureeCompatible(f.dureeSec, dureeMinSec, dureeMaxSec)
         }
         if (retenus.isNotEmpty()) Log.d(TAG, "Vidara : rattachement titre -> ${retenus.size}")
-        return retenus.map { serveurDe(it.code) }
+        return retenus.map { fabrique(it) }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -581,16 +626,29 @@ object VidaraLibrary {
         }
     }
 
-    private fun idTmdbDe(f: Fichier): String? = RE_ID_TETE.find(f.titre)?.groupValues?.get(1)
+    /** Cle de fiche : « 12345 » pour un film, « tv12345 » pour une serie (cf. RE_TV_TETE). */
+    private fun idTmdbDe(f: Fichier): String? =
+        RE_ID_TETE.find(f.titre)?.groupValues?.get(1)
+            ?: RE_TV_TETE.find(f.titre)?.groupValues?.get(1)?.let { "tv$it" }
 
     /** Fiche TMDB d'un fichier, si son nom porte un identifiant déjà téléchargé. */
     fun ficheDe(f: Fichier): Fiche? = idTmdbDe(f)?.let { fiches[it] }
 
-    /** Ce qu'il faut AFFICHER : titre officiel si connu, sinon nom de fichier nettoyé. */
-    fun titrePour(f: Fichier): String = ficheDe(f)?.titre?.takeIf { it.isNotBlank() } ?: f.titreAffiche
+    /** Ce qu'il faut AFFICHER : titre officiel si connu, sinon nom de fichier nettoyé.
+     *  Pour un EPISODE de serie on garde le nom du fichier (il porte SxxExx + titre
+     *  d'episode) : la fiche de la serie ne sert qu'a l'affiche. */
+    fun titrePour(f: Fichier): String =
+        if (RE_TV_TETE.containsMatchIn(f.titre)) f.titreAffiche
+        else ficheDe(f)?.titre?.takeIf { it.isNotBlank() } ?: f.titreAffiche
 
     /** Ce qu'il faut AFFICHER : affiche TMDB si connue, sinon rien (index sans vignette). */
     fun posterPour(f: Fichier): String? = ficheDe(f)?.poster ?: f.poster
+
+    /** Fiches TMDB pour une liste venue d'ailleurs (« Partage de la communaute »). */
+    suspend fun completerFichesPour(fichiers: List<Fichier>) {
+        runCatching { completerFiches(fichiers) }
+            .onFailure { Log.w(TAG, "fiches (partage) KO : ${it.message}") }
+    }
 
     private suspend fun completerFiches(fichiers: List<Fichier>) {
         if (BuildConfig.TMDB_API_KEY.isBlank()) return
@@ -609,12 +667,16 @@ object VidaraLibrary {
                         // Une autre passe (niveau ouvert / fond) l'a peut-être déjà prise.
                         if (fiches.containsKey(id)) return@withPermit
                         runCatching {
+                            // « tv12345 » = serie (/tv, champs name/original_name), sinon film.
+                            val estSerie = id.startsWith("tv")
+                            val chemin = if (estSerie) "tv/${id.removePrefix("tv")}" else "movie/$id"
                             val req = okhttp3.Request.Builder()
-                                .url("https://api.themoviedb.org/3/movie/$id?api_key=${BuildConfig.TMDB_API_KEY}&language=fr-FR")
+                                .url("https://api.themoviedb.org/3/$chemin?api_key=${BuildConfig.TMDB_API_KEY}&language=fr-FR")
                                 .header("Accept", "application/json").build()
                             NetworkClient.default.newCall(req).execute().use { r ->
                                 val j = JSONObject(r.body?.string().orEmpty())
-                                val t = j.optString("title").ifBlank { j.optString("original_title") }
+                                val t = if (estSerie) j.optString("name").ifBlank { j.optString("original_name") }
+                                        else j.optString("title").ifBlank { j.optString("original_title") }
                                 val p = j.optString("poster_path").takeIf { it.isNotBlank() }
                                 if (t.isNotBlank()) {
                                     fiches[id] = Fiche(t, p?.let { "https://image.tmdb.org/t/p/w500$it" })

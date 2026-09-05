@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.providers
 
 import android.content.Context
+import kotlinx.coroutines.launch
 
 /**
  * 2026-06-10 — Dialogs réutilisables pour gérer les sources World TV.
@@ -31,7 +32,44 @@ object WorldLiveSourcesDialog {
             //   - Télécharger URL (= download + stocke en local, offline OK)
             //   - Importer fichier local (= SAF picker, no permission)
             .setNeutralButton("+ Ajouter") { _, _ -> showAddOptionsDialog(context, onChanged) }
+            // 2026-09-05 : guides étrangers optionnels (voir EpgStore.PAYS_OPTIONNELS).
+            .setPositiveButton("📺 Guide TV") { _, _ -> showGuidePays(context) }
             .setNegativeButton("Fermer", null)
+            .show()
+    }
+
+    /**
+     * 2026-09-05 (user : « dans World Live, le programme dans la jaquette comme sur Vavoo ») :
+     * le guide français (TNT + Pluto/Samsung/Plex FR) est toujours chargé. Les guides d'autres
+     * pays pèsent 1,5 à 3,6 Mo chacun : on les laisse au choix, pour ceux qui ont ajouté une
+     * playlist portugaise ou anglaise. Le rechargement part tout de suite en tâche de fond.
+     */
+    private fun showGuidePays(context: Context) {
+        val Epg = com.streamflixreborn.streamflix.utils.EpgStore
+        val pays = Epg.PAYS_OPTIONNELS
+        val actifs = Epg.paysSupplementaires(context).toMutableSet()
+        val labels = pays.map { (g, nom) -> "$nom (${g.code})" }.toTypedArray()
+        val coches = BooleanArray(pays.size) { pays[it].first.code in actifs }
+        android.app.AlertDialog.Builder(context)
+            .setTitle("Guide TV — pays supplémentaires")
+            .setMultiChoiceItems(labels, coches) { _, idx, on ->
+                val code = pays[idx].first.code
+                if (on) actifs.add(code) else actifs.remove(code)
+            }
+            .setPositiveButton("OK") { _, _ ->
+                Epg.definirPaysSupplementaires(context, actifs)
+                android.widget.Toast.makeText(
+                    context,
+                    if (actifs.isEmpty()) "Guide TV : France seulement"
+                    else "Guide TV : chargement de ${actifs.joinToString(", ")}…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                val app = context.applicationContext
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    try { Epg.prechargerSiNecessaire(app) } catch (_: Throwable) {}
+                }
+            }
+            .setNegativeButton("Annuler", null)
             .show()
     }
 

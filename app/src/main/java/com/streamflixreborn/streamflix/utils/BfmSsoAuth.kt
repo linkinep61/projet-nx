@@ -106,7 +106,17 @@ object BfmSsoAuth {
         Log.d(TAG, "Credentials saved (email=${email.take(5)}…) + compteur reset")
     }
 
-    fun hasCredentials(ctx: Context): Boolean {
+    /**
+     * ⚠ 2026-09-05 — TOUJOURS false. RMC BFM Play est devenu RMC+ et le SSO CAS que ce
+     *   fichier interroge (`sso.rmcbfmplay.com`) répond 504 à tout POST : le re-login REST
+     *   silencieux n'existe plus. Renvoyer false ici évite aux appelants (TV Hub, dialogs,
+     *   BfmResolver) de brûler des tentatives sur un serveur mort avant d'ouvrir la WebView
+     *   RMC+ (voir [RmcPlusAuth]). Les identifiants restent stockés pour le pré-remplissage.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun hasCredentials(ctx: Context): Boolean = false
+
+    private fun hasCredentialsStockes(ctx: Context): Boolean {
         val p = ctx.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         return !p.getString(K_EMAIL, null).isNullOrBlank() &&
                !p.getString(K_PASSWORD, null).isNullOrBlank()
@@ -776,6 +786,8 @@ object BfmSsoAuth {
      * Retourne le token BFM ou null si pas de credentials / échec.
      */
     suspend fun reloginFromSaved(ctx: Context): String? {
+        // 2026-09-05 : SSO CAS mort (RMC BFM Play → RMC+). Voir hasCredentials().
+        if (!hasCredentialsStockes(ctx) || true) return null
         // 2026-06-23 (user "BFMTV ban mon mot de passe encore — éviter 5
         //   erreurs sinon password reset obligatoire") : check compteur
         //   AVANT de tenter le relogin. Si bloqué, retourne null direct +

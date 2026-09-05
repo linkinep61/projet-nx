@@ -264,12 +264,50 @@ object LiveHubFolderDialog {
         )
     }
 
+    /**
+     * 2026-09-05 (user « la jaquette Autres Replays est grisée, quand je clique rien ne se
+     *   passe, obligé de quitter et revenir ; pareil Replay TF1, Replay M6, Rutube,
+     *   Stream4FR ») — PREUVE logcat Oppo 17:16:54 : `BadTokenException: Unable to add
+     *   window -- token … is not valid; is your activity running?` en ouvrant un dialogue
+     *   depuis une tuile. Le contexte de la tuile (itemView.context) appartient a une
+     *   fenetre qui n'est plus valide ; `dlg.show()` est alors avale (ligne « catch
+     *   BadTokenException → return ») = clic sans effet. Apres quitter/revenir, les tuiles
+     *   sont re-creees sur l'activite vivante → ca remarche.
+     *   Ici : on remplace SYSTEMATIQUEMENT le contexte par l'activite vivante au premier
+     *   plan (StreamFlixApp.currentActivity) quand celui recu est mort ou n'est pas une
+     *   activite. Un dialogue s'ouvre donc toujours sur la fenetre qui est a l'ecran.
+     */
+    fun ctxVivant(ctx: Context): Context {
+        val act = ctx.activiteOuNull()
+        if (act != null && !act.isFinishing && !act.isDestroyed) return ctx
+        val courante = com.streamflixreborn.streamflix.StreamFlixApp.currentActivity
+        if (courante != null && !courante.isFinishing && !courante.isDestroyed) {
+            android.util.Log.w("LiveHubFolderDialog",
+                "contexte mort (${act?.javaClass?.simpleName ?: ctx.javaClass.simpleName}) → activite courante ${courante.javaClass.simpleName}")
+            return courante
+        }
+        return ctx
+    }
+
+    private fun Context.activiteOuNull(): android.app.Activity? {
+        var c: Context? = this
+        while (c != null) {
+            if (c is android.app.Activity) return c
+            c = (c as? android.content.ContextWrapper)?.baseContext
+        }
+        return null
+    }
+
+    /** Dossiers en cours de chargement : un seul chargement a la fois par dossier. */
+    private val chargementsEnCours = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     fun show(
-        ctx: Context,
+        ctxRecu: Context,
         folderKey: String,
         folderName: String,
         onChannelSelected: (TvShow) -> Unit,
     ) {
+        val ctx = ctxVivant(ctxRecu)
         // 2026-08-13 : DOSSIER RUTUBE — MÊME dialog que les autres dossiers (grille de jaquettes,
         //   mini-lecteur, clic qui ne ferme pas, ★ appui long), mais sa barre de recherche
         //   interroge RUTUBE (réseau) au lieu de filtrer une liste locale. On y trouve n'importe
@@ -320,6 +358,49 @@ object LiveHubFolderDialog {
         //   `isFinishing` évite d'ouvrir un dialogue sur une activité morte.
         if (folderKey == "ma_bibliotheque") {
             show(ctx, "vidaradir_", folderName, onChannelSelected)
+            return
+        }
+        // 2026-09-05 : dossier « Vegeta VOD » (films / séries FR des serveurs Vegeta,
+        //   index publié par nx-data — cf. VegetaVod). Chemins :
+        //   "" → Films / Séries ; "films" → catégories ; "films/<cat>" → jaquettes ;
+        //   "series" → catégories ; "series/<cat>" → jaquettes.
+        if (folderKey.startsWith("vegetavod_")) {
+            val chemin = folderKey.removePrefix("vegetavod_")
+            val vv = com.streamflixreborn.streamflix.utils.VegetaVod
+            fun niveau(): List<TvShow> {
+                val idx = vv.indexSiCharge() ?: return emptyList()
+                return when {
+                    chemin.isBlank() -> listOf(
+                        vv.tuileDossier("films", "Films", idx.films.size),
+                        vv.tuileDossier("series", "Séries", idx.series.size),
+                    )
+                    chemin == "films" -> vv.categoriesFilms().map { (c, n) -> vv.tuileDossier("films/$c", c, n) }
+                    chemin == "series" -> vv.categoriesSeries().map { (c, n) -> vv.tuileDossier("series/$c", c, n) }
+                    chemin.startsWith("films/") -> vv.filmsDe(chemin.removePrefix("films/")).map { vv.tuileFilm(it) }
+                    chemin.startsWith("series/") -> vv.seriesDe(chemin.removePrefix("series/")).map { vv.tuileSerie(it) }
+                    else -> emptyList()
+                }
+            }
+            val immediat = niveau()
+            if (immediat.isNotEmpty()) {
+                afficherNiveau(ctx, folderName, immediat, onChannelSelected)
+                return
+            }
+            val att = android.widget.Toast.makeText(ctx, "Chargement de Vegeta VOD…", android.widget.Toast.LENGTH_SHORT)
+            att.show()
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                runCatching { vv.index() }
+                att.cancel()
+                if ((ctx as? android.app.Activity)?.isFinishing == true) return@launch
+                val items = niveau()
+                if (items.isEmpty()) {
+                    android.widget.Toast.makeText(
+                        ctx, "Vegeta VOD indisponible pour l'instant (index vide)",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                afficherNiveau(ctxVivant(ctx), folderName, items, onChannelSelected)
+            }
             return
         }
         if (folderKey.startsWith("vidaradir_")) {
@@ -467,9 +548,26 @@ object LiveHubFolderDialog {
         // Sinon → fetch on-demand depuis fetchReplayCategories.
         //   On affiche un Toast loading puis le dialog quand prêt.
         if (folderKey in REPLAY_FOLDER_KEYS) {
-            android.widget.Toast.makeText(
-                ctx, "Chargement du dossier $folderName…", android.widget.Toast.LENGTH_SHORT
-            ).show()
+            // 2026-09-05 : UN SEUL chargement a la fois par dossier (avant : chaque
+            //   clic relancait un telechargement complet de l'index replay, 5 Mo, en
+            //   parallele des precedents) + fenetre d'attente visible tant que ca charge
+            //   (avant : un toast de 2 s, puis 10-15 s de silence = « c'est bloque »).
+            if (!chargementsEnCours.add(folderKey)) {
+                android.widget.Toast.makeText(
+                    ctx, "Chargement de $folderName déjà en cours…", android.widget.Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            val attente: android.app.Dialog? = try {
+                androidx.appcompat.app.AlertDialog.Builder(ctx)
+                    .setMessage("Chargement de $folderName…\n(première ouverture : quelques secondes)")
+                    .setCancelable(true)
+                    .create().also { it.show() }
+            } catch (_: Throwable) { null }
+            fun finAttente() {
+                chargementsEnCours.remove(folderKey)
+                try { attente?.dismiss() } catch (_: Throwable) {}
+            }
             val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             scope.launch {
                 try {
@@ -525,22 +623,26 @@ object LiveHubFolderDialog {
                         if (sonyCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_sony"] = sonyCats
                     }
                     withContext(Dispatchers.Main) {
+                        finAttente()
+                        // Le chargement a pu durer : on rouvre sur l'activite VIVANTE.
+                        val ctx2 = ctxVivant(ctx)
                         if (filtered.isEmpty() && !hasExtras) {
                             android.widget.Toast.makeText(
-                                ctx, "Aucune catégorie pour $folderName",
+                                ctx2, "Aucune catégorie pour $folderName",
                                 android.widget.Toast.LENGTH_SHORT
                             ).show()
                         } else if (hasExtras) {
-                            displayCategoriesWithMixFr(ctx, folderName, filtered, mixCats,
+                            displayCategoriesWithMixFr(ctx2, folderName, filtered, mixCats,
                                 onChannelSelected, wwCats, sportCats, rakCats, sonyCats)
                         } else {
-                            displayCategories(ctx, folderName, filtered, onChannelSelected)
+                            displayCategories(ctx2, folderName, filtered, onChannelSelected)
                         }
                     }
                 } catch (t: Throwable) {
                     withContext(Dispatchers.Main) {
+                        finAttente()
                         android.widget.Toast.makeText(
-                            ctx, "Erreur : ${t.message}",
+                            ctxVivant(ctx), "Erreur : ${t.message}",
                             android.widget.Toast.LENGTH_LONG
                         ).show()
                     }
@@ -1379,9 +1481,10 @@ object LiveHubFolderDialog {
         //   2026-08-28 : entree masquee tant que VoeCommunaute.ACTIVE est a false
         //   (cf. l'interrupteur documente dans VoeCommunaute). Un seul booleen a
         //   basculer le jour ou une cle de contributeur entre dans VOE_KEYS.
-        if (com.streamflixreborn.streamflix.utils.VoeCommunaute.disponible)
+        // 2026-09-05 : le partage passe sur VIDARA (VidaraCommunaute, index vidara_amis.json).
+        if (com.streamflixreborn.streamflix.utils.VidaraCommunaute.disponible)
         folders.add("\uD83E\uDD1D Partage de la communaute" to {
-            val dejaLa = com.streamflixreborn.streamflix.utils.VoeCommunaute.categoriesSiDejaCharge()
+            val dejaLa = com.streamflixreborn.streamflix.utils.VidaraCommunaute.categoriesSiDejaCharge()
             if (dejaLa.isNotEmpty()) {
                 displayCategories(ctx, "Partage de la communaute", dejaLa, onChannelSelected)
             } else {
@@ -1392,7 +1495,7 @@ object LiveHubFolderDialog {
                 val scopeCom = CoroutineScope(Dispatchers.IO + SupervisorJob())
                 scopeCom.launch {
                     val cats = try {
-                        com.streamflixreborn.streamflix.utils.VoeCommunaute.categories()
+                        com.streamflixreborn.streamflix.utils.VidaraCommunaute.categories()
                     } catch (e: Throwable) {
                         android.util.Log.w("LiveHubFolderDialog", "communaute KO : ${e.message}")
                         emptyList()
@@ -1410,6 +1513,14 @@ object LiveHubFolderDialog {
                 }
             }
         })
+
+        // 2026-09-05 (user, retour Telegram « Vegeta TV serveur 31 a des films et des
+        //   séries ») : dossier « Vegeta VOD » — films + séries FR des panels Vegeta, index
+        //   nx-data (cf. VegetaVod). Entrée TOUJOURS présente, contenu chargé au clic.
+        folders.add("\uD83C\uDFAC Vegeta VOD" to {
+            show(ctx, "vegetavod_", "Vegeta VOD", onChannelSelected)
+        })
+        com.streamflixreborn.streamflix.utils.VegetaVod.prechauffer()
 
         // 2026-06-27 (user "mets une recherche à l'ouverture du dossier") :
         //   agrège TOUTES les chaînes des sous-dossiers pour une recherche globale.
@@ -2437,7 +2548,11 @@ object LiveHubFolderDialog {
                                 posterW, posterH
                             )
                         }
-                        addView(imgView)
+                        // 2026-09-05 : guide des programmes sur le logo de la chaîne en cours
+                        //   (mobile). Voir EpgJaquette.envelopperLogo — mêmes dimensions.
+                        if (isTV) addView(imgView)
+                        else addView(com.streamflixreborn.streamflix.utils.EpgJaquette
+                            .envelopperLogo(ctx, imgView, posterW, posterH))
                         val tvTitle = android.widget.TextView(ctx).apply {
                             tag = "title"
                             // 2026-06-20 (user "2 lignes [doivent être] assez
@@ -2505,10 +2620,36 @@ object LiveHubFolderDialog {
                 } else {
                     imgView.setImageResource(android.R.drawable.ic_menu_gallery)
                 }
+                // 2026-09-05 : programme en cours sur le logo de la chaîne en lecture.
+                if (!isTV) com.streamflixreborn.streamflix.utils.EpgJaquette
+                    .appliquerGrille(cell, ch.id, decodedTitle, tvTitle)
                 return cell
             }
         }
         gridView.adapter = gridAdapter
+        // 2026-09-05 : le temps restant avance et la chaîne en cours change → on rafraîchit
+        //   les calques déjà à l'écran (30 s + à chaque changement d'état du mini lecteur),
+        //   sans relier la grille. Voir EpgJaquette.rafraichirTout.
+        if (!isTV) {
+            val epgScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+            epgScope.launch {
+                MPC.state.collect {
+                    gridView.post { com.streamflixreborn.streamflix.utils.EpgJaquette.rafraichirTout(gridView) }
+                }
+            }
+            epgScope.launch {
+                while (true) {
+                    kotlinx.coroutines.delay(30_000L)
+                    com.streamflixreborn.streamflix.utils.EpgJaquette.rafraichirTout(gridView)
+                }
+            }
+            gridView.addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: android.view.View) {}
+                override fun onViewDetachedFromWindow(v: android.view.View) {
+                    epgScope.coroutineContext[Job]?.cancel()
+                }
+            })
+        }
 
         // v13 : clics via onItemClickListener (D-pad + touch compatible)
         gridView.onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, pos, _ ->

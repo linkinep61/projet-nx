@@ -1315,12 +1315,12 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         if (findPreference<Preference>(bfmKey) == null) {
             val pref = Preference(requireContext()).apply {
                 key = bfmKey
-                title = "Compte RMC BFM Play"
+                title = "Compte RMC+ (ex-RMC BFM Play)"
                 isIconSpaceReserved = false
                 summary = bfmAccountSummary()
                 setOnPreferenceClickListener {
                     showAccountActionDialog(
-                        serviceLabel = "RMC BFM Play",
+                        serviceLabel = "RMC+",
                         isLoggedIn = com.streamflixreborn.streamflix.utils.BfmAuth.isLoggedIn(requireContext()),
                         onConnect = {
                             com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
@@ -1334,12 +1334,12 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                             clearWebViewAccountCookies(
                                 listOf(
                                     "rmcbfmplay.com", ".rmcbfmplay.com", "www.rmcbfmplay.com",
-                                    "sso.rmcbfmplay.com", ".sfr.net",
+                                    "sso.rmcbfmplay.com", ".sfr.net", "rmcplus.fr", ".rmcplus.fr", "www.rmcplus.fr", "connect.rmcbfm.com", ".rmcbfm.com",
                                 ),
                             )
                             summary = bfmAccountSummary()
                             Toast.makeText(requireContext(),
-                                "RMC BFM Play : déconnecté", Toast.LENGTH_SHORT).show()
+                                "RMC+ : déconnecté", Toast.LENGTH_SHORT).show()
                         },
                     )
                     true
@@ -2359,6 +2359,11 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         applyScreenTitle()
         updateOverviewLabels()
         updateProviderVisibilityState()
+        // 2026-09-05 : au retour de la WebView de connexion (RMC+, TF1+, M6+), le résumé
+        //   « Non connecté » restait figé jusqu'à la prochaine ouverture des réglages.
+        findPreference<Preference>("tvhub_account_tf1")?.summary = tf1AccountSummary()
+        findPreference<Preference>("tvhub_account_m6")?.summary = m6AccountSummary()
+        findPreference<Preference>("tvhub_account_bfm")?.summary = bfmAccountSummary()
 
         findPreference<EditTextPreference>("provider_streamingcommunity_domain")?.apply {
             val currentValue = UserPreferences.streamingcommunityDomain

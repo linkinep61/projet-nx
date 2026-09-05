@@ -993,6 +993,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
             Triple("RMC Découverte",  "rmcdecouverte", "$bfmBase/rmc-decouverte-fr.png"),
             Triple("BFM Business",    "bfmbusiness",   "$bfmBase/bfm-business-fr.png"),
             Triple("RMC Life",        "rmclife",       "$bfmBase/bfm-tv-fr.png"),
+            // 2026-09-05 : RMC BFM Play → RMC+. Les clés ci-dessous sont les ids RMC+
+            //   (page_id `direct`), passés tels quels par BfmResolver. Relevés sur l'accueil
+            //   du site : 16 directs, dont ces chaînes FAST absentes de l'ancien service.
+            Triple("Tech & Co",       "bfm_tech",      "$bfmBase/bfm-tv-fr.png"),
+            Triple("BFM2",            "bfm_2",         "$bfmBase/bfm-tv-fr.png"),
+            Triple("RMC",             "rmc",           "$bfmBase/rmc-story-fr.png"),
+            Triple("Brut",            "brut",          "$bfmBase/bfm-tv-fr.png"),
+            Triple("L'After Foot TV", "after_foot_tv", "$bfmBase/rmc-story-fr.png"),
+            Triple("BFM Grands Reportages", "bfm_grands_reportages", "$bfmBase/bfm-tv-fr.png"),
+            Triple("J'irai dormir chez vous", "j_irai_dormir_chez_vous", "$bfmBase/rmc-decouverte-fr.png"),
+            Triple("RMC Mystère",     "rmc_mystere",   "$bfmBase/rmc-story-fr.png"),
+            Triple("RMC Mécanic",     "rmc_mecanic",   "$bfmBase/rmc-decouverte-fr.png"),
+            Triple("RMC Wow",         "rmc_wow",       "$bfmBase/rmc-decouverte-fr.png"),
+            Triple("RMC Alerte Secours", "rmc_alerte_secours", "$bfmBase/rmc-decouverte-fr.png"),
         )
         val bfmChannels = liveBfm.map { (label, chanKey, logo) ->
             TvShow(
@@ -1021,7 +1035,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 } catch (_: Exception) { false }
             } else false
             if (!bfmAutoRelogged) {
-                bfmList.add(makeLoginCard("bfm", "🔓 Connexion RMC BFM Play"))
+                bfmList.add(makeLoginCard("bfm", "🔓 Connexion RMC+"))
             }
         }
         bfmList.addAll(bfmChannels)
@@ -1543,6 +1557,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-08-17 : film perso hébergé sur VOE → fiche direct-play (1 saison,
         //   1 épisode), même pattern que les clips Rutube ci-dessus.
         // 2026-08-28 : fiche direct-play d'un fichier du Partage de la communaute.
+        // 2026-09-05 : fichier du « Partage de la communaute » VIDARA (index vidara_amis.json).
+        if (id.startsWith("livehub::vidaracom::")) {
+            val codeVc = id.removePrefix("livehub::vidaracom::")
+            val titreVc = com.streamflixreborn.streamflix.utils.VidaraCommunaute
+                .fichierDe(codeVc)?.titreAffiche ?: "Partage de la communaute"
+            return TvShow(id = id, title = titreVc).copy(
+                seasons = listOf(
+                    Season(
+                        id = id, number = 1, title = "Fichier",
+                        episodes = listOf(Episode(id = id, number = 1, title = "Lire")),
+                    ),
+                ),
+            ).apply { providerName = "TV Hub" }
+        }
         if (id.startsWith("livehub::voecom::")) {
             val codeCom = id.removePrefix("livehub::voecom::")
             val titreCom = com.streamflixreborn.streamflix.utils.VoeCommunaute
@@ -1554,6 +1582,59 @@ object LiveTvHubProvider : Provider, IptvProvider {
                         episodes = listOf(Episode(id = id, number = 1, title = "Lire")),
                     ),
                 ),
+            ).apply { providerName = "TV Hub" }
+        }
+        // 2026-09-05 : Vegeta VOD — film (1 saison / 1 épisode « Lire ») ou série (saisons
+        //   depuis le shard d'épisodes publié par nx-data). Cf. VegetaVod.
+        if (id.startsWith(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_FILM)) {
+            val vv = com.streamflixreborn.streamflix.utils.VegetaVod
+            val f = vv.filmDe(id.removePrefix(vv.PREFIX_FILM))
+                ?: run { runCatching { vv.index() }; vv.filmDe(id.removePrefix(vv.PREFIX_FILM)) }
+            val titre = f?.let { vv.titreFilm(it) } ?: "Vegeta VOD"
+            return TvShow(id = id, title = titre).copy(
+                poster = f?.img, banner = f?.img,
+                seasons = listOf(
+                    Season(
+                        id = id, number = 1, title = "Film",
+                        episodes = listOf(Episode(id = id, number = 1, title = "Lire", poster = f?.img)),
+                    ),
+                ),
+            ).apply { providerName = "TV Hub" }
+        }
+        if (id.startsWith(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SERIE)) {
+            val vv = com.streamflixreborn.streamflix.utils.VegetaVod
+            val cle = id.removePrefix(vv.PREFIX_SERIE)
+            val s = vv.serieDe(cle) ?: run { runCatching { vv.index() }; vv.serieDe(cle) }
+                ?: return TvShow(id = id, title = "Vegeta VOD").apply { providerName = "TV Hub" }
+            // Saisons = union des serveurs (le premier qui a la saison gagne, les autres
+            //   servent de secours dans getServers).
+            val saisons = java.util.TreeMap<Int, MutableMap<Int, Pair<Int, com.streamflixreborn.streamflix.utils.VegetaVod.Episode>>>()
+            for ((pos, sid) in s.sources) {
+                val eps = try { vv.episodes(pos, sid) } catch (e: Exception) { null } ?: continue
+                for ((num, liste) in eps) {
+                    val m = saisons.getOrPut(num) { java.util.TreeMap() }
+                    for (e in liste) if (!m.containsKey(e.num)) m[e.num] = pos to e
+                }
+            }
+            val listeSaisons = saisons.map { (num, m) ->
+                Season(
+                    id = "${vv.PREFIX_SAISON}${s.id}::$num",
+                    number = num,
+                    title = "Saison $num",
+                    episodes = m.values.map { (pos, e) ->
+                        Episode(
+                            id = "${vv.PREFIX_SRC}$pos::series::${e.id}::${e.ext}",
+                            number = e.num,
+                            title = "S${"%02d".format(num)}E${"%02d".format(e.num)}" +
+                                (if (e.titre.isNotBlank()) " — ${e.titre}" else ""),
+                            poster = s.img,
+                        )
+                    },
+                )
+            }
+            for (sn in listeSaisons) vegetaSeasonEpisodesCache[sn.id] = sn.episodes
+            return TvShow(id = id, title = if (s.annee > 0) "${s.titre} (${s.annee})" else s.titre).copy(
+                poster = s.img, banner = s.img, seasons = listeSaisons,
             ).apply { providerName = "TV Hub" }
         }
         // 2026-09-04 : fichier perso heberge sur Vidara (index publie) ->
@@ -1809,7 +1890,33 @@ object LiveTvHubProvider : Provider, IptvProvider {
         )
     }
 
+    /** 2026-09-05 : serveurs « Vegeta (secours) » pour un épisode replay TF1+/M6+.
+     *  Titre + S/E depuis [replayEpisodeMeta] (rempli par les build*ReplayShow), sinon
+     *  depuis le slug TF1 « <titre>-s12-e71-… ». Limité à 8 s, jamais d'exception. */
+    private suspend fun secoursVegeta(id: String, slugTf1: String?): List<Video.Server> {
+        val meta = replayEpisodeMeta[id] ?: slugTf1?.let { slug ->
+            val m = Regex("^(.*?)-s(\\d{1,2})-e(\\d{1,3})-").find(slug) ?: return@let null
+            Triple(m.groupValues[1].replace('-', ' '), m.groupValues[2].toInt(), m.groupValues[3].toInt())
+        } ?: return emptyList()
+        return try {
+            withTimeoutOrNull(8_000L) {
+                com.streamflixreborn.streamflix.utils.VegetaVod.secours(meta.first, meta.second, meta.third)
+            } ?: emptyList()
+        } catch (e: Exception) {
+            Log.w(TAG, "secours Vegeta KO (${meta.first} S${meta.second}E${meta.third}) : ${e.message}")
+            emptyList()
+        }
+    }
+
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
+        // 2026-09-05 : série Vegeta VOD → cache rempli par getTvShow (rebuild si vide).
+        if (seasonId.startsWith(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SAISON)) {
+            vegetaSeasonEpisodesCache[seasonId]?.let { return it }
+            val payload = seasonId.removePrefix(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SAISON)
+            val cle = payload.substringBeforeLast("::")
+            runCatching { getTvShow(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SERIE + cle) }
+            return vegetaSeasonEpisodesCache[seasonId] ?: emptyList()
+        }
         // v28 : TF1+ replay → retourne les épisodes depuis le cache buildTf1ReplayShow
         if (seasonId.startsWith("livehub::replay::tf1season::")) {
             return tf1SeasonEpisodesCache[seasonId] ?: run {
@@ -1896,10 +2003,15 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     // v28 : cache pour retrouver les épisodes par seasonId (= rebuild évité)
     private val tf1SeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
+    // 2026-09-05 : (titre série, saison, épisode) de chaque épisode replay TF1+/M6+ vu,
+    //   pour proposer un serveur « Vegeta (secours) » (cf. VegetaVod.secours dans getServers).
+    private val replayEpisodeMeta = java.util.concurrent.ConcurrentHashMap<String, Triple<String, Int, Int>>()
     // 2026-06-19 : cache équivalent pour M6+
     private val m6SeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
     // 2026-06-26 : cache équivalent pour France TV (séries Okoo / replay programmes)
     private val ftvSeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
+    // 2026-09-05 : cache équivalent pour les séries Vegeta VOD
+    private val vegetaSeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
 
     // ====== 2026-06-19 : M6+ replay show parser ======
     private val M6_SERVICES = listOf(
@@ -1967,6 +2079,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                         title = "S${"%02d".format(sNum)}E${"%02d".format(eNum)} — $epTitle",
                         poster = imgUrl,
                     )
+                    replayEpisodeMeta[ep.id] = Triple(showTitle, sNum, eNum)
                     seasonsMap.getOrPut(sNum) { mutableListOf() }.add(ep)
                 } else {
                     flatEpisodes.add(Episode(
@@ -2255,6 +2368,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 title = "S${"%02d".format(season)}E${"%02d".format(episode)} — $titlePart",
                 poster = poster
             )
+            replayEpisodeMeta[ep.id] = Triple(showTitle, season, episode)
             seasonsMap.getOrPut(season) { mutableListOf() }.add(ep)
         }
         // Si aucune saison détectée, fallback : liste plate de vidéos
@@ -2328,6 +2442,29 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  "canalplus", mais le Hub cherchait sous "canal" (witvKey) → fallback
      *  déclenché à tort, l'user voyait toute la liste agrégée. */
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-09-05 : Vegeta VOD — film (tous ses serveurs) ou épisode (serveur direct).
+        run {
+            val vv = com.streamflixreborn.streamflix.utils.VegetaVod
+            if (id.startsWith(vv.PREFIX_FILM)) {
+                val cle = id.removePrefix(vv.PREFIX_FILM)
+                val f = vv.filmDe(cle) ?: run { runCatching { vv.index() }; vv.filmDe(cle) }
+                    ?: return emptyList()
+                return vv.serveursFilm(f)
+            }
+            if (id.startsWith(vv.PREFIX_SRC)) {
+                // id = livehub::vegetavod::src::<pos>::<movie|series>::<id>::<ext>
+                val parts = id.removePrefix(vv.PREFIX_SRC).split("::")
+                if (parts.size >= 4) {
+                    val pos = parts[0].toIntOrNull() ?: return emptyList()
+                    val num = parts[2].toIntOrNull() ?: return emptyList()
+                    if (vv.indexSiCharge() == null) runCatching { vv.index() }
+                    val url = if (parts[1] == "movie") vv.urlFilm(pos, num, parts[3])
+                              else vv.urlEpisode(pos, num, parts[3])
+                    return listOfNotNull(url?.let { Video.Server(id = id, name = "Vegeta · serveur $pos", src = it) })
+                }
+                return emptyList()
+            }
+        }
         // 2026-08-17 : fichier perso VOE → serveur unique en URL d'embed canonique.
         //   VoeExtractor a « https://voe.sx » dans ses aliasUrls, donc l'extraction
         //   part directement sur le bon extracteur, sans code supplémentaire.
@@ -2337,6 +2474,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
             return listOf(
                 com.streamflixreborn.streamflix.utils.VoeCommunaute
                     .serveurDe(id.removePrefix("livehub::voecom::")),
+            )
+        }
+        if (id.startsWith("livehub::vidaracom::")) {
+            return listOf(
+                com.streamflixreborn.streamflix.utils.VidaraCommunaute
+                    .serveurDe(id.removePrefix("livehub::vidaracom::"), "Vidara"),
             )
         }
         if (id.startsWith("livehub::vidara::")) {
@@ -2379,13 +2522,15 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   en passant directement par resolveProgramPath qui détecte le `/videos/`.
             // On ne connaît pas le chan ni le show ici → utilise un format simplifié
             //   tf1plus://VIDEO_SLUG/<slug> qui sera traité.
-            return listOf(
-                Video.Server(
-                    id = id,
-                    name = "TF1+ replay",
-                    src = "tf1plus://VIDEO/$slug",
-                )
+            val officiel = Video.Server(
+                id = id,
+                name = "TF1+ replay",
+                src = "tf1plus://VIDEO/$slug",
             )
+            // 2026-09-05 : + « Vegeta (secours) » si le même épisode existe chez Vegeta VOD
+            //   (titre + SxxExx). Méta mémorisée par buildTf1ReplayShow, sinon lue dans le slug
+            //   « <titre>-s12-e71-… ». Jamais bloquant : index absent = serveur officiel seul.
+            return listOf(officiel) + secoursVegeta(id, slug)
         }
         // 2026-06-19 v38 : chaîne LIVE M6+ (= id "livehub::replay::m6live::<service>")
         //   → résout via M6Resolver en mode LIVE (= renvoie m6live:// pour
@@ -2408,13 +2553,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val videoId = payload.substringAfter("::")
             // M6Resolver gère m6play://<service>/<program_or_video_id> et le détecte
             //   via le préfixe "clip_" pour aller direct à la vidéo (= skip /programs/{id}/videos)
-            return listOf(
-                Video.Server(
-                    id = id,
-                    name = "M6+ replay",
-                    src = "m6play://$service/$videoId",
-                )
+            val officiel = Video.Server(
+                id = id,
+                name = "M6+ replay",
+                src = "m6play://$service/$videoId",
             )
+            // 2026-09-05 : + « Vegeta (secours) » (cf. TF1 ci-dessus ; méta via buildM6ReplayShow).
+            return listOf(officiel) + secoursVegeta(id, null)
         }
         // 2026-07-10 (user "supprime LumiChat partout") : branche LumiChat lumimulti RETIRÉE.
         // 2026-06-24 : FAST channel = id "livehub::fast::<hash>"
@@ -2638,7 +2783,15 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     /** getVideo : délègue au provider d'origine selon le prefix de l'id.
      *  Couvre tous les providers IPTV via IptvCrossDelegate. */
+    /** Multi Live : numéro de chaîne → famille d'hébergeur (« 1 », « 2 », « 4 ») qui a joué
+     *  en dernier. Mémoire de session (cf. la cascade dans getVideo). */
+    private val famillesMultiLiveOk = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-09-05 : Vegeta VOD → URL Xtream directe (mkv/mp4), UA navigateur mobile.
+        if (server.id.startsWith(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SRC)) {
+            return com.streamflixreborn.streamflix.utils.VegetaVod.video(server)
+        }
         // 2026-08-13 : clip Rutube → RutubeProvider (API play/options → master HLS, à la lecture).
         if (server.id.startsWith("rutube::") || server.src.contains("rutube.ru", ignoreCase = true)) {
             return com.streamflixreborn.streamflix.providers.RutubeProvider.getVideo(server)
@@ -2877,6 +3030,38 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val extensionsFlux = listOf(".m3u8", ".mpd", ".ts", ".mp4", ".mkv", ".webm", ".flv")
             val cheminSrc = src.substringBefore('?').substringBefore('#').lowercase()
             val estFluxDirect = extensionsFlux.any { cheminSrc.endsWith(it) }
+            // ── 2026-09-05 (user « faut que ça soit automatique, l'indicatif… pour avoir
+            //   directement les chaînes fonctionnelles ») : MULTI LIVE, FAMILLES EN CASCADE.
+            //   Une chaîne N existe chez PLUSIEURS hébergeurs derrière la même façade :
+            //   /player/1/N, /player/2/N, /player/4/N (la 3 est morte depuis août). Le m3u
+            //   n'en fige qu'une ; quand elle tombe (aujourd'hui : la 1 a changé d'hébergeur,
+            //   barecrop → cuttingfame), la chaîne est noire alors que la 2 ou la 4 joue.
+            //   Désormais : on essaie la famille du m3u, puis les autres, et la première qui
+            //   rend un flux gagne ; on la mémorise par numéro de chaîne pour la prochaine
+            //   fois (mémoire de session — le m3u reste la vérité au redémarrage).
+            val facadeMultiLive = Regex("""^(https?://(?:www\.)?(?:cartelive\.club|bolaloca\.my|embedme\.click))/player/(\d)/(\d+)/?$""", RegexOption.IGNORE_CASE)
+            facadeMultiLive.find(src.substringBefore('?'))?.let { m ->
+                val base = m.groupValues[1]; val familleM3u = m.groupValues[2]; val num = m.groupValues[3]
+                val ordre = LinkedHashSet<String>()
+                famillesMultiLiveOk[num]?.let { ordre += it }           // ce qui a marché la dernière fois
+                ordre += familleM3u                                      // ce que dit le m3u
+                ordre += listOf("2", "1", "4")                           // les autres familles vivantes
+                var derniere: Exception? = null
+                for (fam in ordre) {
+                    val candidat = "$base/player/$fam/$num"
+                    try {
+                        Log.w(TAG, "MULTI LIVE $channelName : essai famille $fam → $candidat")
+                        val v = com.streamflixreborn.streamflix.extractors.Extractor.extract(candidat, server)
+                        famillesMultiLiveOk[num] = fam
+                        if (fam != familleM3u) Log.w(TAG, "MULTI LIVE $channelName : famille $familleM3u KO, famille $fam OK (mémorisée)")
+                        return v
+                    } catch (e: Exception) {
+                        derniere = e
+                        Log.w(TAG, "MULTI LIVE $channelName : famille $fam KO (${e.message?.take(80)})")
+                    }
+                }
+                throw derniere ?: Exception("Multi Live : aucune famille ne joue pour la chaîne $num")
+            }
             if (src.startsWith("http", ignoreCase = true) && !estFluxDirect) {
                 val service = com.streamflixreborn.streamflix.extractors.Extractor
                     .identifyServiceName(src)
@@ -2915,6 +3100,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   direct : « Server [0] Communaute failed: No IPTV provider can handle
             //   server: livehub::voecom::… ». Meme resolution que ci-dessus.
             server.id.startsWith("livehub::voecom::") ||
+            server.id.startsWith("livehub::vidaracom::") ||
             server.id.startsWith("livehub::vidara::") ||
             server.id.startsWith("livehub::voe::")) {
             return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
@@ -3772,7 +3958,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     }
                 } else if (isBfm) {
                     if (!bfmLogged) {
-                        list.add(0, makeLoginCard("bfm", "🔓 Connexion RMC BFM Play"))
+                        list.add(0, makeLoginCard("bfm", "🔓 Connexion RMC+"))
                     } else if (list.isEmpty()) {
                         list.add(0, makeStatusCard("bfm", "✓ BFM Play connecté\n(programmes en attente)"))
                     }

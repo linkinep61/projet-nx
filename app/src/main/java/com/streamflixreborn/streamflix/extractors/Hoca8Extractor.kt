@@ -57,6 +57,9 @@ open class Hoca8Extractor : Extractor() {
      *  et le CDN répondait 403. C'est cette page-là que le navigateur enverrait
      *  comme Referer, donc c'est elle qu'on rejoue. */
     @Volatile private var dernierEmbedUrl: String? = null
+    /** 2026-09-05 : page (location.href) de la frame qui a réellement demandé le m3u8,
+     *  transmise par le pont JS. C'est LE Referer que le CDN attend. */
+    @Volatile private var pageCapture: String? = null
 
     private val ANDROID_CHROME_UA =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -64,6 +67,7 @@ open class Hoca8Extractor : Extractor() {
     override suspend fun extract(link: String): Video {
         dernierReferer = null
         dernierEmbedUrl = null
+        pageCapture = null
         val streamUrl = extractByIntercepting(link)
             ?: throw Exception("Hoca8: Could not capture stream URL from $link")
         val isHls = streamUrl.contains(".m3u8", ignoreCase = true)
@@ -73,8 +77,14 @@ open class Hoca8Extractor : Extractor() {
         //   Priorité : la page d'embed chargée (valable pour les DEUX chemins de
         //   capture, pont JS compris) > le Referer de la requête interceptée >
         //   hoca8 en dernier recours.
-        val referer = dernierEmbedUrl?.takeIf { it.isNotBlank() }
+        // 2026-09-05 : avec la règle générique d'injection (toute iframe), dernierEmbedUrl
+        //   pouvait être la DERNIÈRE iframe injectée — une pub (hmtraff, adsco.re…) — et le
+        //   CDN répondait 403 aux segments. Priorité désormais à la page qui a VRAIMENT
+        //   demandé le m3u8 (pont JS), puis au Referer de la requête interceptée, puis à
+        //   la dernière page d'embed CONNUE, puis hoca8.
+        val referer = pageCapture?.takeIf { it.startsWith("http") }
             ?: dernierReferer?.takeIf { it.isNotBlank() }
+            ?: dernierEmbedUrl?.takeIf { it.isNotBlank() }
             ?: "https://hoca8.com/"
         val origine = runCatching {
             java.net.URL(referer).let { u -> "${u.protocol}://${u.host}" }
@@ -115,6 +125,13 @@ open class Hoca8Extractor : Extractor() {
                     // 2026-05-16 v6 : bridge JS pour capturer l'URL .m3u8 in-page
                     // (HLS.js la fetch en mémoire, jamais visible par shouldInterceptRequest).
                     webView.addJavascriptInterface(object {
+                        @android.webkit.JavascriptInterface
+                        fun onM3u8Found(url: String, page: String) {
+                            if (page.startsWith("http")) pageCapture = page
+                            android.util.Log.d("Hoca8Extractor", "JS captured m3u8 (page $page)")
+                            onM3u8Found(url)
+                        }
+
                         @android.webkit.JavascriptInterface
                         fun onM3u8Found(url: String) {
                             android.util.Log.d("Hoca8Extractor", "JS captured m3u8: $url")
@@ -190,13 +207,34 @@ open class Hoca8Extractor : Extractor() {
                             //   jamais passer la playlist → extraction en échec, écran
                             //   noir. Diagnostic du 22/08 : l'iframe barecrop se chargeait
                             //   bien, mais aucun "HLS PLAYLIST CAPTURED" ne suivait.
+                            // 2026-09-05 (user : « Multi Live ne marche plus ») : la façade
+                            //   /player/1/ ne pointe plus vers barecrop.net mais vers
+                            //   cuttingfame.net/embed/<id> — hôte inconnu de cette liste, donc
+                            //   pas d'injection, HLS.js garde le m3u8 en mémoire, écran noir
+                            //   (le site, lui, joue). La liste blanche par nom d'hôte casse à
+                            //   CHAQUE changement d'hébergeur ; on la garde, mais on y ajoute
+                            //   une règle GÉNÉRIQUE : tout document HTML chargé dans une
+                            //   SOUS-FRAME (Accept text/html, pas la frame principale), hors
+                            //   pubs (BLOCKED_HOSTS, déjà écartées plus haut) et hors façade
+                            //   cartelive/bolaloca/embedme, est une page de lecteur → hook.
+                            //   Le hook ne fait que surveiller XHR/fetch pour repérer un
+                            //   .m3u8 : inoffensif dans une iframe qui n'en charge pas.
+                            val accept = request.requestHeaders?.get("Accept").orEmpty()
+                            val estFacade = hostLower.contains("cartelive") ||
+                                hostLower.contains("bolaloca") || hostLower.contains("embedme")
+                            val estIframeHtml = !request.isForMainFrame &&
+                                accept.contains("text/html") && !estFacade &&
+                                !path.endsWith(".js") && !path.endsWith(".json")
                             val estPageEmbed =
                                 (hostLower.contains("hoca8.com") && path.contains("/footy.php")) ||
                                 (hostLower.contains("barecrop.net") && path.contains("/embed/")) ||
+                                (hostLower.contains("cuttingfame.net") && path.contains("/embed/")) ||
                                 (hostLower.contains("lockpop.net") && path.contains("/embed/")) ||
                                 (hostLower.contains("instream.click") &&
-                                    (path.contains("hlsspanich.php") || path.contains("player.php")))
-                            if (estPageEmbed) dernierEmbedUrl = reqUrl
+                                    (path.contains("hlsspanich.php") || path.contains("player.php"))) ||
+                                estIframeHtml
+                            if (estIframeHtml) android.util.Log.d("Hoca8Extractor", "iframe lecteur (règle générique) : $reqUrl")
+                            if (estPageEmbed && !estIframeHtml) dernierEmbedUrl = reqUrl   // hôtes connus seulement
                             if (estPageEmbed && request.method?.uppercase() == "GET") {
                                 try {
                                     val client = okhttp3.OkHttpClient.Builder()
@@ -369,7 +407,7 @@ open class Hoca8Extractor : Extractor() {
                         if (typeof u === 'string' && u.indexOf('.m3u8') !== -1) {
                             try {
                                 if (typeof Hoca8Bridge !== 'undefined') {
-                                    Hoca8Bridge.onM3u8Found(u);
+                                    Hoca8Bridge.onM3u8Found(u, String(location.href));
                                 }
                             } catch(e) {}
                             return;
@@ -394,7 +432,7 @@ open class Hoca8Extractor : Extractor() {
                     if (u.indexOf('jsdelivr.net') !== -1 || u.indexOf('cdnjs.cloudflare') !== -1) return;
                     try {
                         if (typeof Hoca8Bridge !== 'undefined') {
-                            Hoca8Bridge.onM3u8Found(u);
+                            Hoca8Bridge.onM3u8Found(u, String(location.href));
                         }
                     } catch(e) {}
                 }

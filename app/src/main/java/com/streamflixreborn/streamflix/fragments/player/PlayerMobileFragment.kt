@@ -5043,12 +5043,18 @@ class PlayerMobileFragment : Fragment() {
                     }
                     override fun getMinimumLoadableRetryCount(dataType: Int): Int = 6
                 }
+                // 2026-09-05 (user « l'image joue en hachuré », Vidara) : lecteur H264
+                //   maison = memes flags que la fabrique par defaut (0), mais re-horodate
+                //   les flux dont les PTS sont en ordre de decodage (segments Vidara :
+                //   PES avec PTS seul, +1 image/paquet malgre des B-frames → 1 image sur
+                //   4 jetee par ExoPlayer). Cf. utils/media3/H264ReaderAud.java.
                 val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(teeFactory)
                     .setAllowChunklessPreparation(true)
+                    .setExtractorFactory(com.streamflixreborn.streamflix.utils.media3.HlsExtractorFactoryAud(0, true))
                     .setLoadErrorHandlingPolicy(errorPolicy)
                     .createMediaSource(mediaItem)
                 player.setMediaSource(hlsSource)
-                Log.d("PlayerDebug", "HLS v23: TeeDataSource + retry-403 policy")
+                Log.d("PlayerDebug", "HLS v23: TeeDataSource + retry-403 policy + H264ReaderAud")
             } else if (isDash) {
                 // DASH (.mpd) — utilisé par les flux live français (TF1, France TV, etc.)
                 // via le pipeline 3BoxTV (RSS feed → URL signée vers .mpd).
@@ -7021,6 +7027,32 @@ class PlayerMobileFragment : Fragment() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setLoadControl(loadControl)
             .build()
+            .also { p -> installerDiagDecodeur(p) }
+    }
+
+    // 2026-09-05 DIAG hachure : toutes les 5 s, compteurs du decodeur video
+    //   (frames en entree / rendues / sautees / droppees) pour distinguer un
+    //   probleme de flux d'un probleme de rendu. Log uniquement, sans effet.
+    private fun installerDiagDecodeur(p: ExoPlayer) {
+        val h = android.os.Handler(android.os.Looper.getMainLooper())
+        val r = object : Runnable {
+            override fun run() {
+                try {
+                    if (p.isReleased) return
+                    val c = p.videoDecoderCounters
+                    if (c != null && p.isPlaying) {
+                        Log.d("PlayerMobileFragment", "DIAG decodeur grand: in=${c.queuedInputBufferCount} " +
+                            "rendu=${c.renderedOutputBufferCount} saute=${c.skippedOutputBufferCount} " +
+                            "drop=${c.droppedBufferCount} dropMax=${c.maxConsecutiveDroppedBufferCount} " +
+                            "dropToKeyframe=${c.droppedToKeyframeCount} " +
+                            "offsetMoyUs=${if (c.videoFrameProcessingOffsetCount > 0) c.totalVideoFrameProcessingOffsetUs / c.videoFrameProcessingOffsetCount else 0} " +
+                            "pos=${p.currentPosition / 1000}s format=${p.videoFormat?.width}x${p.videoFormat?.height}@${p.videoFormat?.frameRate} codec=${p.videoFormat?.codecs}")
+                    }
+                } catch (_: Throwable) { return }
+                h.postDelayed(this, 5_000L)
+            }
+        }
+        h.postDelayed(r, 5_000L)
     }
 
     /**

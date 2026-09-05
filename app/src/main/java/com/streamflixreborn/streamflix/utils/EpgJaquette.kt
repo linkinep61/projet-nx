@@ -29,7 +29,101 @@ object EpgJaquette {
     /** Clé de tag : la chaîne à laquelle appartient ce calque (id + titre affiché). */
     private val CLE_TAG = R.id.ll_epg_poster
 
-    private data class Chaine(val id: String, val titre: String)
+    /**
+     * [nomVue]/[nomBase] : uniquement pour les grilles compactes (voir [appliquerGrille]) —
+     * la vue qui porte le nom de la chaîne sous le logo, et ce nom tel que la grille l'a
+     * écrit (avec son « ▶ »), pour y ajouter ou en retirer la ligne « → à suivre ».
+     */
+    private data class Chaine(
+        val id: String,
+        val titre: String,
+        val nomVue: TextView? = null,
+        val nomBase: CharSequence? = null,
+    )
+
+    // ── Grilles des dossiers (logos de 72 dp) ────────────────────────────────────────
+    /**
+     * 2026-09-05 (user : « dans World Live, avoir dans la jaquette le programme qui va
+     * arriver, avant, après, comme sur Vavoo ») : les dossiers World Live et TV Hub montrent
+     * leurs chaînes dans une grille de logos de 72 dp — quatre fois plus petits que les
+     * affiches du home, où le calque complet ne tiendrait pas. Version compacte :
+     *   • SUR le logo : « EN CE MOMENT », le titre, l'heure et le temps restant, la barre ;
+     *   • SOUS le logo : « → 20:35 Titre suivant » ajouté au nom de la chaîne.
+     * Les enfants portent les MÊMES ids que le calque du home, donc [appliquer] et
+     * [rafraichirTout] les servent sans une ligne de plus ; les champs absents (résumé,
+     * séparateur) sont simplement ignorés grâce aux `?.` qui y sont déjà.
+     * TV exclue : là-bas le guide vit dans le panneau à gauche du mini lecteur.
+     */
+    fun envelopperLogo(ctx: android.content.Context, logo: View, largeur: Int, hauteur: Int): View {
+        val dp = ctx.resources.displayMetrics.density
+        val cadre = android.widget.FrameLayout(ctx).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(largeur, hauteur)
+        }
+        logo.layoutParams = android.widget.FrameLayout.LayoutParams(largeur, hauteur)
+        cadre.addView(logo)
+        val calque = android.widget.LinearLayout(ctx).apply {
+            id = R.id.ll_epg_poster
+            orientation = android.widget.LinearLayout.VERTICAL
+            visibility = View.GONE
+            setBackgroundColor(0xF00E141B.toInt())
+            val p = (4 * dp).toInt()
+            setPadding(p, p, p, p)
+            layoutParams = android.widget.FrameLayout.LayoutParams(largeur, hauteur)
+        }
+        fun texte(idVue: Int, taille: Float, couleur: Int, gras: Boolean, lignes: Int) =
+            TextView(ctx).apply {
+                id = idVue
+                textSize = taille
+                setTextColor(couleur)
+                if (gras) setTypeface(typeface, android.graphics.Typeface.BOLD)
+                maxLines = lignes
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                includeFontPadding = false
+            }
+        calque.addView(
+            texte(R.id.tv_epg_poster_label, 6.5f, 0xFF8AB4F8.toInt(), true, 1).apply {
+                text = ctx.getString(R.string.epg_en_ce_moment)
+                letterSpacing = 0.06f
+            },
+        )
+        calque.addView(
+            texte(R.id.tv_epg_poster_title, 9f, 0xFFFFFFFF.toInt(), true, 3).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f,
+                ).also { it.topMargin = (2 * dp).toInt() }
+            },
+        )
+        calque.addView(
+            texte(R.id.tv_epg_poster_time, 7f, 0xFFAAB4BF.toInt(), false, 2).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).also { it.topMargin = (2 * dp).toInt() }
+            },
+        )
+        calque.addView(
+            ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal).apply {
+                id = R.id.pb_epg_poster
+                max = 1000
+                progressTintList = android.content.res.ColorStateList.valueOf(0xFFFFFFFF.toInt())
+                progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0xCC646464.toInt())
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (3 * dp).toInt(),
+                ).also { it.topMargin = (3 * dp).toInt() }
+            },
+        )
+        cadre.addView(calque)
+        return cadre
+    }
+
+    /**
+     * À appeler à chaque liaison d'une cellule de grille, APRÈS que [nomVue] a reçu le nom de
+     * la chaîne. [cellule] est la cellule entière (le calque y est retrouvé par son id).
+     */
+    fun appliquerGrille(cellule: View, idChaine: String, titreChaine: String, nomVue: TextView) {
+        val calque = cellule.findViewById<View>(R.id.ll_epg_poster) ?: return
+        appliquer(calque, idChaine, titreChaine, nomVue, nomVue.text)
+    }
 
     /**
      * Remplit (ou masque) le calque pour cette chaîne.
@@ -42,8 +136,17 @@ object EpgJaquette {
      * Un film ou une série n'ayant jamais de programme en cours, le calque ne s'affiche
      * jamais dessus : aucun test de type de contenu n'est nécessaire.
      */
-    fun appliquer(calque: View, idChaine: String, titreChaine: String) {
-        calque.setTag(CLE_TAG, Chaine(idChaine, titreChaine))
+    fun appliquer(
+        calque: View,
+        idChaine: String,
+        titreChaine: String,
+        nomVue: TextView? = null,
+        nomBase: CharSequence? = null,
+    ) {
+        calque.setTag(CLE_TAG, Chaine(idChaine, titreChaine, nomVue, nomBase))
+        // Grille compacte : le nom sous le logo revient à sa forme d'origine ; la ligne
+        // « → à suivre » n'est rajoutée qu'en fin de fonction, si tout est réuni.
+        if (nomVue != null && nomBase != null && nomVue.text != nomBase) nomVue.text = nomBase
 
         if (idChaine != MiniPlayerController.currentChannelId || !EpgStore.estPret()) {
             calque.isVisible = false
@@ -99,6 +202,17 @@ object EpgJaquette {
                 }
             }
         }
+
+        // Grille compacte : pas de place pour « à suivre » sur un logo de 72 dp, on l'écrit
+        // sous le nom de la chaîne (3 lignes max, coupé sur « … » par la vue elle-même).
+        if (nomVue != null && nomBase != null && aSuivre != null) {
+            val suivant = if (aSuivre.titre.equals(enCours.titre, ignoreCase = true)) {
+                "Épisode suivant"
+            } else {
+                aSuivre.titre
+            }
+            nomVue.text = "$nomBase\n→ ${heure(aSuivre.debutMs)} $suivant"
+        }
     }
 
     /**
@@ -132,7 +246,7 @@ object EpgJaquette {
 
     private fun parcourir(vue: View) {
         if (vue.id == R.id.ll_epg_poster) {
-            (vue.getTag(CLE_TAG) as? Chaine)?.let { appliquer(vue, it.id, it.titre) }
+            (vue.getTag(CLE_TAG) as? Chaine)?.let { appliquer(vue, it.id, it.titre, it.nomVue, it.nomBase) }
             return
         }
         if (vue is ViewGroup) {

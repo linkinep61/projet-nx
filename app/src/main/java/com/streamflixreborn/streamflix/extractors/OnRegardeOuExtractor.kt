@@ -152,14 +152,79 @@ class OnRegardeOuExtractor : Extractor() {
         }
     }
 
+    // ── 2026-09-05 — « Le Dernier Refuge » : Sources VF HD ++ ne se lançait plus ────────
+    //   Vérifié depuis le PC, Chrome et un serveur tiers : `onregardeou.site/video/<slug>`
+    //   répond **403 « Accès refusé »** dès que le Referer n'est pas 1jour1film — y compris
+    //   avec le Referer `onregardeou.site/` que NOUS envoyions (et Movix, qui l'embarque
+    //   avec son propre Referer, est cassé pareil sur son site). SANS Referer : 200, avec
+    //   le `videoData` complet (bysezoxexe, vidara, rpmlive, luluvdo). On n'envoie donc
+    //   plus de Referer sur les pages onregardeou (les miroirs gardent le leur).
+    //
+    //   Et pour ne plus attendre 28 s de WebView + 3 × 10 s de miroirs quand le site est
+    //   VRAIMENT mort (décision user : « détecter vite que la source est morte, mais pas
+    //   de fausse variante ») : une réponse HTTP FRANCHE 403/404/410, sans page de
+    //   challenge (Cloudflare/DDoS-Guard) et sans `videoData`, écarte l'hôte 30 min et
+    //   lève une erreur qui n'est PAS une erreur de domaine → pas de bascule d'alias.
+    //   Une erreur réseau (DNS, timeout, connexion) ne marque JAMAIS l'hôte : c'est
+    //   peut-être le FAI qui bloque, et le repli DoH/alias garde tout son sens.
+    private val hotesRefuses = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val REFUS_MS = 30 * 60 * 1000L
+
+    class SourceMorteException(message: String) : Exception(message)
+
+    private fun hoteDe(url: String): String =
+        try { android.net.Uri.parse(url).host?.lowercase().orEmpty() } catch (_: Exception) { "" }
+
+    private fun estRefusFranc(code: Int, html: String?): Boolean {
+        if (code != 403 && code != 404 && code != 410) return false
+        val h = (html ?: "").lowercase()
+        if (h.length > 40_000) return false                       // une vraie page, pas un refus
+        if (h.contains("videodata")) return false
+        val challenge = listOf("cf-chl", "challenge-platform", "just a moment", "jschl",
+                               "turnstile", "ddos-guard", "__cf_chl", "cf_clearance")
+        return challenge.none { h.contains(it) }
+    }
+
+    /** GET de la page onregardeou (sans Referer). (code, html) ; (-1, null) = erreur réseau. */
+    private suspend fun lirePageOnregardeou(url: String): Pair<Int, String?> = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder().url(url)
+                .header("User-Agent", ANDROID_CHROME_UA)
+                .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+                .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                .build()
+            NetworkClient.default.newCall(req).execute().use { rep ->
+                val code = rep.code
+                val html = rep.body?.string()
+                if (estRefusFranc(code, html)) {
+                    hotesRefuses[hoteDe(url)] = System.currentTimeMillis() + REFUS_MS
+                    android.util.Log.w("OnRegardeOu", "page refusée (HTTP $code) → hôte écarté 30 min : ${hoteDe(url)}")
+                } else if (code == 200 && html?.contains("videoData") == true) {
+                    hotesRefuses.remove(hoteDe(url))
+                }
+                code to html
+            }
+        } catch (e: Exception) {
+            android.util.Log.d("OnRegardeOu", "page onregardeou : erreur réseau (${e.message}) — hôte NON marqué")
+            -1 to null
+        }
+    }
+
+    /** Lève SourceMorteException si l'hôte a été franchement refusé il y a moins de 30 min. */
+    private fun verifierHoteVivant(url: String) {
+        val h = hoteDe(url)
+        val jusqua = hotesRefuses[h] ?: return
+        if (System.currentTimeMillis() < jusqua) {
+            throw SourceMorteException("OnRegardeOu : $h refuse ses pages (403) — source écartée, prochain essai dans ${(jusqua - System.currentTimeMillis()) / 60000 + 1} min")
+        }
+        hotesRefuses.remove(h)
+    }
+
     /** Parse TOUS les mirrors de `videoData.servers` → [(nom, url)]. */
     private suspend fun parseMirrors(onregardeouUrl: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder().url(onregardeouUrl)
-                .header("User-Agent", ANDROID_CHROME_UA)
-                .header("Referer", "$mainUrl/").build()
-            val html = NetworkClient.default.newCall(req).execute().use { it.body?.string() }
-                ?: return@withContext emptyList()
+            val (_, html) = lirePageOnregardeou(onregardeouUrl)
+            if (html == null) return@withContext emptyList()
             val m = Regex("videoData\\s*=\\s*(\\{[\\s\\S]*?\\});").find(html) ?: return@withContext emptyList()
             val servers = JSONObject(m.groupValues[1]).optJSONArray("servers") ?: return@withContext emptyList()
             (0 until servers.length()).mapNotNull { idx ->
@@ -177,10 +242,8 @@ class OnRegardeOuExtractor : Extractor() {
      *  la WebView, ils déclenchent la lecture sans le gate « humain » d'onregardeou. */
     private suspend fun resolveHostUrl(onregardeouUrl: String): String? = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder().url(onregardeouUrl)
-                .header("User-Agent", ANDROID_CHROME_UA)
-                .header("Referer", "$mainUrl/").build()
-            val html = NetworkClient.default.newCall(req).execute().use { it.body?.string() } ?: return@withContext null
+            val (code, html) = lirePageOnregardeou(onregardeouUrl)
+            if (html == null || estRefusFranc(code, html)) return@withContext null
             val m = Regex("const videoData\\s*=\\s*(\\{[\\s\\S]*?\\});").find(html) ?: return@withContext null
             val servers = JSONObject(m.groupValues[1]).optJSONArray("servers") ?: return@withContext null
             if (servers.length() == 0) return@withContext null
@@ -808,8 +871,42 @@ class OnRegardeOuExtractor : Extractor() {
             //     résolveur ne prouve donc rien sur la vitalité du contenu.
             android.util.Log.d("OnRegardeOu", "uns.bio : repli sur le chemin générique")
         }
+        // 2026-09-05 : hôte franchement refusé il y a < 30 min → on ne relance ni WebView
+        //   ni miroirs, on passe tout de suite au serveur suivant.
+        if (hoteDe(link).contains("onregardeou")) verifierHoteVivant(link)
+        // ── 2026-09-05 — « Le Dernier Refuge » : la page rendait bien ses 4 serveurs, mais on
+        //   chargeait le 1er (bysezoxexe) dans la WebView générique, qui ne captait plus rien
+        //   (28 s pour rien). Or bysezoxexe/bysebuho/bysejikuar = famille FILEMOON, dont
+        //   l'extracteur API (déchiffrement AES) marche — c'est lui qui joue « Movix ·
+        //   Filemoon » sur bysebuho pour ce même film. On essaie donc les miroirs DANS
+        //   L'ORDRE DU SITE (Serveur 1 → 4), chacun via son extracteur dédié ; la WebView
+        //   générique ne reste qu'en dernier recours. (User : « sur le site il n'y a que le
+        //   Serveur 1 qui marche pour ce film » → c'est précisément le premier essayé.)
+        if (hoteDe(link).contains("onregardeou")) {
+            val miroirs = parseMirrors(link)
+            for ((nom, url) in miroirs) {
+                val h = hoteDe(url)
+                if (h.isBlank() || DISABLED_MIRROR_HOSTS.any { h.contains(it) }) continue
+                try {
+                    val v = when {
+                        h.contains("bysezoxexe") || h.contains("bysebuho") || h.contains("bysejikuar") ||
+                            h.contains("filemoon") -> FilemoonExtractor().extract(url)
+                        h.contains("onregardeou") || h.contains("upbolt") || h.contains("uns.bio") -> null
+                        else -> Extractor.extract(url)
+                    }
+                    if (v != null) {
+                        android.util.Log.d("OnRegardeOu", "miroir « $nom » ($h) → OK")
+                        return v
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("OnRegardeOu", "miroir « $nom » ($h) KO : ${e.message?.take(120)}")
+                }
+            }
+        }
         // onregardeou → URL de l'HÔTE réel (bysezoxexe = player Filemoon).
         val hostUrl = resolveHostUrl(link) ?: link
+        // (la lecture de la page vient peut-être de marquer l'hôte : on revérifie avant la WebView)
+        if (hoteDe(link).contains("onregardeou")) verifierHoteVivant(link)
         // On charge l'HÔTE directement (bysezoxexe.com/e/<id>). C'EST LUI qui crée
         //   l'iframe du player (q8y5z) avec le bon parent + handshake postMessage :
         //   le player démarre SEUL, résout son propre anti-bot (pow.js), et le m3u8

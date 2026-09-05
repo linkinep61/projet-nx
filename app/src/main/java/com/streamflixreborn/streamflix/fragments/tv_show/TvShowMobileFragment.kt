@@ -151,7 +151,9 @@ class TvShowMobileFragment : Fragment() {
             || tvShow.id.startsWith("livehub::replay::parispremierereplay/")
             || tvShow.id.startsWith("livehub::replay::program/")
             || tvShow.id.startsWith("livehub::replay::plexshow::")
-            || tvShow.id.startsWith("livehub::replay::plutoshow::")) && !tvShow.isMovie) return false
+            || tvShow.id.startsWith("livehub::replay::plutoshow::")
+            // 2026-09-06 : serie Vegeta VOD -> fiche saisons/episodes, pas d'auto-play.
+            || tvShow.id.startsWith("livehub::vegetavod::serie::")) && !tvShow.isMovie) return false
         return tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
             || tvShow.providerName == "Vavoo TV"
