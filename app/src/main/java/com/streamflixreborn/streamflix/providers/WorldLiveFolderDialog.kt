@@ -136,7 +136,11 @@ object WorldLiveFolderDialog {
                             scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
                             layoutParams = android.widget.LinearLayout.LayoutParams(posterW, posterH)
                         }
-                        addView(imgView)
+                        // 2026-09-05 : guide des programmes sur le logo de la chaîne en cours
+                        //   (mobile). Voir EpgJaquette.envelopperLogo — mêmes dimensions.
+                        if (isTV) addView(imgView)
+                        else addView(com.streamflixreborn.streamflix.utils.EpgJaquette
+                            .envelopperLogo(ctx, imgView, posterW, posterH))
                         val tvTitle = android.widget.TextView(ctx).apply {
                             tag = "title"
                             maxLines = 3
@@ -180,10 +184,31 @@ object WorldLiveFolderDialog {
                         else android.R.drawable.ic_menu_view
                     )
                 }
+                // 2026-09-05 : programme en cours sur le logo de la chaîne en lecture
+                //   (l'id de lecture est le leafId de onChannel, voir MiniPlayerController).
+                if (!isTV) com.streamflixreborn.streamflix.utils.EpgJaquette.appliquerGrille(
+                    cell, "livehub::worldlivetv::${ch.id}", ch.name, tvTitle,
+                )
                 return cell
             }
         }
         gridView.adapter = gridAdapter
+        // 2026-09-05 : rafraîchissement des calques guide (30 s + changement d'état du mini
+        //   lecteur), annulé avec le dialog. Voir EpgJaquette.rafraichirTout.
+        val epgScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        if (!isTV) {
+            epgScope.launch {
+                MiniPlayerController.state.collect {
+                    gridView.post { com.streamflixreborn.streamflix.utils.EpgJaquette.rafraichirTout(gridView) }
+                }
+            }
+            epgScope.launch {
+                while (true) {
+                    kotlinx.coroutines.delay(30_000L)
+                    com.streamflixreborn.streamflix.utils.EpgJaquette.rafraichirTout(gridView)
+                }
+            }
+        }
 
         gridView.setOnItemLongClickListener { _, _, idx, _ ->
             val item = items[idx]
@@ -336,6 +361,7 @@ object WorldLiveFolderDialog {
         dlg.setOnDismissListener {
             scope.coroutineContext[Job]?.cancel()
             refreshScope.coroutineContext[Job]?.cancel()
+            epgScope.coroutineContext[Job]?.cancel()
         }
     }
 }

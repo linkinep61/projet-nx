@@ -72,6 +72,134 @@
         app:layout_constraintStart_toStartOf="@id/iv_tv_show_poster"
         tools:progress="80" />
 
+    <!-- ══════════════════════════════════════════════════════════════════════════════
+         GUIDE DES PROGRAMMES — calque posé PAR-DESSUS l'affiche (copie de item_tv_show_mobile.xml).
+
+         2026-09-05 (user : « quand on affiche toutes les chaînes il manque l'EPG dans World
+         Live ») : l'onglet « Toutes les chaînes » utilise CETTE grille, pas la ligne du home.
+         Même calque, mêmes ids → EpgJaquette.appliquer / rafraichirTout sans changement.
+
+         2026-08-11 (user : « tu touches pas à la forme de mes jaquettes ; la chaîne TF1 par
+         exemple n'apparaît plus et tu prends toute la jaquette pour le faire, mais la forme
+         de mes jaquettes ne bouge pas », puis « ça s'affiche que quand on a cliqué sur la
+         chaîne, ça sert à rien de l'afficher avant »).
+
+         ⚠ RÈGLE À TENIR : ce bloc ne définit AUCUNE dimension d'affiche. Il est contraint sur
+           les quatre bords de `iv_tv_show_poster`, qui garde ses 200 dp et son ratio 2:3.
+           Ne jamais transformer ce calque en quelque chose qui pousse ou étire la jaquette.
+
+         Il est `gone` par défaut et n'apparaît QUE sur la chaîne en cours de lecture
+         (`MiniPlayerController.currentChannelId`). Les autres affiches gardent leur logo,
+         donc on continue de reconnaître les chaînes d'un coup d'œil.
+
+         Déclaré APRÈS l'affiche et le badge qualité pour être dessiné au-dessus.
+         ══════════════════════════════════════════════════════════════════════════════ -->
+    <LinearLayout
+        android:id="@+id/ll_epg_poster"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:background="#F00E141B"
+        android:paddingStart="9dp"
+        android:paddingEnd="9dp"
+        android:paddingTop="9dp"
+        android:paddingBottom="8dp"
+        app:layout_constraintStart_toStartOf="@id/iv_tv_show_poster"
+        app:layout_constraintEnd_toEndOf="@id/iv_tv_show_poster"
+        app:layout_constraintTop_toTopOf="@id/iv_tv_show_poster"
+        app:layout_constraintBottom_toBottomOf="@id/iv_tv_show_poster">
+
+        <TextView
+            android:id="@+id/tv_epg_poster_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/epg_en_ce_moment"
+            android:textColor="#8AB4F8"
+            android:textSize="8sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.09" />
+
+        <TextView
+            android:id="@+id/tv_epg_poster_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:maxLines="4"
+            android:ellipsize="end"
+            android:lineSpacingMultiplier="1.05"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            tools:text="Familles nombreuses : la vie en XXL" />
+
+        <TextView
+            android:id="@+id/tv_epg_poster_time"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="5dp"
+            android:maxLines="2"
+            android:textColor="#AAB4BF"
+            android:textSize="10sp"
+            tools:text="17:30 – 18:15 · reste 43 min" />
+
+        <!-- Le résumé occupe TOUT l'espace restant entre l'horaire et la barre — c'est lui
+             qui pousse le bas du bloc vers le bas de l'affiche, à la place de l'ancien
+             Space vide. Sa hauteur varie donc avec la longueur du titre au-dessus, et
+             `maxLines` est recalculé à l'exécution pour couper proprement sur « … »
+             (voir EpgJaquette.ajusterResume). -->
+        <TextView
+            android:id="@+id/tv_epg_poster_desc"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="7dp"
+            android:ellipsize="end"
+            android:lineSpacingMultiplier="1.02"
+            android:textColor="#98A4B0"
+            android:textSize="9.5sp"
+            tools:text="Chaque semaine, le quotidien de familles hors normes qui élèvent huit enfants ou plus." />
+
+        <ProgressBar
+            android:id="@+id/pb_epg_poster"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="4dp"
+            android:max="1000"
+            android:progressTint="#FFFFFF"
+            android:progressBackgroundTint="#CC646464" />
+
+        <View
+            android:id="@+id/v_epg_poster_sep"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="7dp"
+            android:background="#22FFFFFF" />
+
+        <TextView
+            android:id="@+id/tv_epg_poster_next_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:maxLines="1"
+            android:textColor="#7D8B98"
+            android:textSize="8sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.09"
+            tools:text="À SUIVRE 18:15" />
+
+        <TextView
+            android:id="@+id/tv_epg_poster_next"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:textColor="#CCD5DE"
+            android:textSize="10sp"
+            tools:text="Les Feux de l'amour" />
+    </LinearLayout>
+
     <TextView
         android:id="@+id/tv_tv_show_title"
         android:layout_width="0dp"

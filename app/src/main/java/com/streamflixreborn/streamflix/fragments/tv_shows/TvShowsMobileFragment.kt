@@ -131,6 +131,7 @@ class TvShowsMobileFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         // Don't clear onIptvChannelClick — race condition with new fragment's onViewCreated
+        arreterEpg()
         _binding = null
     }
 
@@ -438,6 +439,36 @@ class TvShowsMobileFragment : Fragment() {
         }
     }
 
+    // ── EPG sur les jaquettes (copie de HomeMobileFragment) ─────────────────────────
+    private val epgHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val epgTicker = object : Runnable {
+        override fun run() {
+            rafraichirJaquettesEpg()
+            epgHandler.postDelayed(this, 30_000L)
+        }
+    }
+
+    private fun demarrerEpg() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                com.streamflixreborn.streamflix.utils.EpgStore
+                    .prechargerSiNecessaire(requireContext().applicationContext)
+            } catch (e: Exception) {
+                android.util.Log.w("TvShowsMobile", "EPG : préchargement KO — ${e.message}")
+            }
+            rafraichirJaquettesEpg()
+        }
+        epgHandler.removeCallbacks(epgTicker)
+        epgHandler.postDelayed(epgTicker, 30_000L)
+    }
+
+    private fun arreterEpg() = epgHandler.removeCallbacks(epgTicker)
+
+    private fun rafraichirJaquettesEpg() {
+        val racine = _binding?.root ?: return
+        com.streamflixreborn.streamflix.utils.EpgJaquette.rafraichirTout(racine)
+    }
+
     private fun initializeMiniPlayer() {
         val isIptv = UserPreferences.currentProvider is IptvProvider
         if (!isIptv || !UserPreferences.miniPlayerEnabled) {
@@ -457,11 +488,18 @@ class TvShowsMobileFragment : Fragment() {
             }
         }
 
+        // 2026-09-05 (user : « quand on affiche toutes les chaînes il manque l'EPG dans World
+        //   Live ») : même mécanique que HomeMobileFragment — guide chargé une fois (cache
+        //   disque 12 h), calques rafraîchis toutes les 30 s et au changement de chaîne.
+        demarrerEpg()
+
         viewLifecycleOwner.lifecycleScope.launch {
             MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
                 // 2026-06-22 : animation fluide — la liste se comprime
                 // quand le mini player apparaît (glissement smooth)
                 val wasVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
+                // La chaîne en cours vient peut-être de changer : le calque EPG suit.
+                binding.root.post { rafraichirJaquettesEpg() }
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
                         if (wasVisible) {

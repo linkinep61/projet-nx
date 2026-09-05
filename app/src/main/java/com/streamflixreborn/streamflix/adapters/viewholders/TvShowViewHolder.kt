@@ -173,7 +173,7 @@ class TvShowViewHolder(
                 else -> "🔒 Contrôle parental (verrouiller)"
             }
             val options = listOfNotNull(favOption, lockOption).toTypedArray()
-            androidx.appcompat.app.AlertDialog.Builder(context)
+            androidx.appcompat.app.AlertDialog.Builder(com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.ctxVivant(context))
                 .setTitle(tvShow.title)
                 .setItems(options) { _, which ->
                     val label = options[which]
@@ -246,7 +246,7 @@ class TvShowViewHolder(
             folderLockOption,
         ).toTypedArray()
 
-        androidx.appcompat.app.AlertDialog.Builder(context)
+        androidx.appcompat.app.AlertDialog.Builder(com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.ctxVivant(context))
             .setTitle(tvShow.title)
             .setItems(options) { _, which ->
                 val label = options[which]
@@ -581,7 +581,9 @@ class TvShowViewHolder(
         //   correspondaient a rien, et finissaient envoyees au lecteur — d'ou
         //   le « dossier illisible » constate, et l'abandon de l'arborescence
         //   au profit d'un affichage a plat. Ne pas la retirer.
-        if (selected.id.startsWith("livehub::folder::vidaradir_")) {
+        if (selected.id.startsWith("livehub::folder::vidaradir_") ||
+            // 2026-09-05 : sous-dossiers Vegeta VOD (Films / Séries / catégories), même mécanique.
+            selected.id.startsWith("livehub::folder::vegetavod_")) {
             com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
                 root.context,
                 selected.id.removePrefix("livehub::folder::"),
@@ -616,6 +618,27 @@ class TvShowViewHolder(
         }
         if (navController == null) {
             Log.e("TvShowViewHolder", "navigateFromFolderSelection: NavController introuvable !")
+            return
+        }
+        // 2026-09-05 : série Vegeta VOD → fiche synopsis (saisons / épisodes), exactement
+        //   comme une série TF1+/M6+ (dialogues fermés, mini-lecteur arrêté). Les FILMS
+        //   Vegeta, eux, suivent la voie normale plus bas (mini-lecteur).
+        if (selected.id.startsWith("livehub::vegetavod::serie::")) {
+            val currentProvider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+            if (currentProvider?.name != "TV Hub" && currentProvider?.name != "World Live") {
+                com.streamflixreborn.streamflix.providers.Provider.findByName("TV Hub")?.let {
+                    com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
+                }
+            }
+            try { com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.dismissAllPublic() } catch (_: Throwable) {}
+            try { MiniPlayerController.stop() } catch (_: Throwable) {}
+            val args = Bundle().apply {
+                putString("id", selected.id)
+                putString("poster", selected.poster)
+                putString("banner", selected.banner)
+            }
+            try { navController.navigate(R.id.action_global_tv_show, args) }
+            catch (e: Exception) { Log.e("TvShowViewHolder", "navigateFromFolderSelection Vegeta série FAIL: ${e.message}", e) }
             return
         }
         // 2026-06-24 (user "Samsung TV Plus s'ouvre plein écran sans drag
@@ -1551,6 +1574,11 @@ class TvShowViewHolder(
                 ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
         }
         binding.tvTvShowTitle.text = tvShow.title
+        // 2026-09-05 (user : « quand on affiche toutes les chaînes il manque l'EPG ») : même
+        //   calque que displayMobileItem, la grille « Toutes les chaînes » l'avait oublié.
+        com.streamflixreborn.streamflix.utils.EpgJaquette.appliquer(
+            binding.llEpgPoster, tvShow.id, tvShow.title,
+        )
     }
 
     private fun displayGridTvItem(binding: ItemTvShowGridBinding) {
@@ -1679,7 +1707,7 @@ class TvShowViewHolder(
             else context.getString(R.string.smarttube_beta)
         }.toTypedArray()
 
-        AlertDialog.Builder(context)
+        AlertDialog.Builder(com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.ctxVivant(context))
             .setTitle(context.getString(R.string.choose_smarttube_version))
             .setItems(items) { _, which ->
                 val selectedPackage = packages[which]
@@ -1744,7 +1772,7 @@ class TvShowViewHolder(
             else -> {
                 val stPackages = getInstalledSmartTubePackages()
                 if (stPackages.isNotEmpty()) {
-                    AlertDialog.Builder(context)
+                    AlertDialog.Builder(com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.ctxVivant(context))
                         .setTitle(context.getString(R.string.watch_trailer_with))
                         .setItems(arrayOf(context.getString(R.string.youtube), context.getString(R.string.smarttube))) { _, which ->
                             if (which == 0) {

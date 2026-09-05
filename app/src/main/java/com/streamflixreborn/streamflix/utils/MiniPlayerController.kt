@@ -1780,6 +1780,16 @@ object MiniPlayerController {
                     val ahead = ((buf - pos) / 1000).toInt()
                     if (counter % 5 == 0) {
                         Log.d(TAG, "Live buffer mini: pos=${pos/1000}s buf=${buf/1000}s ahead=${ahead}s")
+                        // 2026-09-05 DIAG hachure : compteurs decodeur video ExoPlayer
+                        try {
+                            val c = p.videoDecoderCounters
+                            if (c != null) Log.d(TAG, "DIAG decodeur mini: in=${c.queuedInputBufferCount} " +
+                                "rendu=${c.renderedOutputBufferCount} saute=${c.skippedOutputBufferCount} " +
+                                "drop=${c.droppedBufferCount} dropMax=${c.maxConsecutiveDroppedBufferCount} " +
+                                "dropToKeyframe=${c.droppedToKeyframeCount} " +
+                                "offsetMoyUs=${if (c.videoFrameProcessingOffsetCount > 0) c.totalVideoFrameProcessingOffsetUs / c.videoFrameProcessingOffsetCount else 0} " +
+                                "format=${p.videoFormat?.width}x${p.videoFormat?.height}@${p.videoFormat?.frameRate} codec=${p.videoFormat?.codecs}")
+                        } catch (_: Throwable) {}
                     }
                     // 2026-06-16 (FIX #1 audit) : PROACTIVE prepare RETIRE.
                     //   Mon ancien fix mais cause exactement le drain : prepare() invalide
@@ -1946,7 +1956,7 @@ object MiniPlayerController {
             //   le mini, du coup quand tu modifies le mini, ce code la est pas modifie") :
             //   INLINE du createIptvHlsMediaSource (= contenait de IptvPlayerSetup.kt
             //   ligne 136-160). Maintenant tout est dans MiniPlayerController.
-            val hlsExtractorFactory = androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory(
+            val hlsExtractorFactory = com.streamflixreborn.streamflix.utils.media3.HlsExtractorFactoryAud(
                 androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
                     androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
                 true,
@@ -3478,7 +3488,7 @@ object MiniPlayerController {
                 //   Sans ces flags, ExoPlayer attend strictement un keyframe IDR
                 //   au début de chaque segment et flushe le décodeur si manquant
                 //   → freeze frame visible à chaque chunk boundary.
-                val hlsExtractorFactory = androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory(
+                val hlsExtractorFactory = com.streamflixreborn.streamflix.utils.media3.HlsExtractorFactoryAud(
                     androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
                         androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
                     true // exposeCea608WhenMissingDeclarations

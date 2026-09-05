@@ -2,69 +2,88 @@ package com.streamflixreborn.streamflix.utils
 
 import android.content.Context
 import android.util.Log
-import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * Résolveur RMC BFM Play — pipeline replay + live basé sur l'API Gaia-core.
+ * Résolveur RMC+ (ex-RMC BFM Play) — directs et replays via le BFF du site.
  *
- * Pipeline (reverse-engineered via Kodi addon Catch-up TV & More) :
- *   1. URL custom `bfmplay://<productId>` depuis le M3U replay
- *   2. GET CDN options → récupère les options de lecture (audio/sous-titres)
- *   3. POST backend /replay/play avec token BFM → récupère entitlementId
- *   4. Construit la customdata DRM et retourne l'URL DASH + Widevine license
+ * ── 2026-09-05 : RÉÉCRITURE COMPLÈTE (user : « il faut réparer la totalité ») ──────────
+ * RMC BFM Play est devenu RMC+ (www.rmcplus.fr). L'ancien pipeline (SSO CAS → token BFM_ →
+ * gaia-core /replay/play → licence asgard + customdata) est mort : le SSO répond 504 à tout
+ * POST, mesuré dans l'app, dans Chrome et depuis un serveur neutre. Sauvegarde de l'ancien
+ * code : `BfmResolver.kt.bak-rmcplus`.
  *
- * Pour le live :
- *   1. URL custom `bfmlive://<channel>` (bfmtv, rmcstory, rmcdecouverte, etc.)
- *   2. POST backend /live/play avec token BFM → récupère stream URL + entitlementId
- *   3. Même pipeline DRM que le replay
+ * Nouveau pipeline, RELEVÉ SUR LE SITE avec une session connectée :
+ *   • direct  : GET /api/bff/v1/page?model=web&page_type=direct&page_id=<chaine>
+ *               → sections[type=player].video.stream.hls (+ .dash pour certaines) ;
+ *   • replay  : GET /api/bff/v1/page?model=web&page_type=player&page_id=<id numérique>
+ *               → sections[type=player].video.stream.{dash,hls} ;
+ *   • DRM     : video.drm.play_token (JWT DRMtoday) + widevine.license_server_url
+ *               (`lic.drmtoday.com/license-proxy-widevine/cenc/`) — même mécanique que M6+ :
+ *               en-tête `x-dt-auth-token`, réponse JSON `{"license": base64}` décodée par
+ *               [M6DrmCallback] (les lecteurs le choisissent dès qu'ils voient cet en-tête).
+ *   • sans session, le BFF répond `authent: true` et ne donne AUCUN flux → on ouvre la
+ *     reconnexion (WebView RMC+, voir [RmcPlusAuth]).
  *
- * ⚠️ Les replays/lives nécessitent un compte RMC BFM Play connecté.
+ * Mesuré :
+ *   BFMTV / BFM2 / Tech&Co / RMC / Brut / chaînes FAST → HLS en clair (pas de drm) ;
+ *   RMC Story / RMC Découverte / RMC Life → HLS SAMPLE-AES + drm. Nos lecteurs ne câblent
+ *   Widevine que sur DASH : on prend alors `manifest.mpd` (même hôte, vérifié : 200 avec
+ *   ContentProtection Widevine) à la place de `master.m3u8`.
+ *   Replays → DASH Widevine (transco.nextradiotv.com, géo-bloqué hors France : 403).
+ *
+ * Les ids du M3U (data-replay-bfm.m3u) sont les ids gaia `NEUF_BFMTV_BFM1021143163386` :
+ * le suffixe numérique EST l'id vidéo RMC+ (vérifié sur deux ids). Le catalogue gaia-core
+ * (ws-cdn.tv.sfr.net) répond toujours, donc [fetchEpisodes] garde son rôle pour les séries.
+ *
+ * ⚠️ Les directs et replays nécessitent un compte RMC+ connecté (gratuit).
  */
 object BfmResolver {
 
     private const val TAG = "BfmResolver"
-    private const val UA =
-        "Mozilla/5.0 (Linux; Android 14; AndroidTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    private val UA get() = RmcPlusAuth.UA
 
-    // API endpoints
+    private const val BFF = "${RmcPlusAuth.SITE}/api/bff/v1"
+    private const val LICENCE_WIDEVINE = "https://lic.drmtoday.com/license-proxy-widevine/cenc/"
+
+    // Catalogue gaia-core (SFR) — encore en service, sert aux épisodes des séries.
     private const val API_CDN = "https://ws-cdn.tv.sfr.net/gaia-core/rest/api"
-    private const val API_BACKEND = "https://ws-backendtv.rmcbfmplay.com/gaia-core/rest/api"
-    private const val LICENSE_URL = "https://ws-backendtv.rmcbfmplay.com/asgard-drm-widevine/public/licence"
 
-    // Endpoint service-list pour les streams live (comme dans l'addon Kodi)
-    private const val SERVICE_LIST_URL = "https://ws-backendtv.rmcbfmplay.com/sekai-service-plan/public/v2/service-list"
-    // Endpoint profils pour récupérer le nexttvId (accountId)
-    private const val PROFILES_URL = "https://ws-backendtv.rmcbfmplay.com/heimdall-core/public/api/v2/userProfiles"
+    /**
+     * Anciens identifiants du M3U (`bfmlive://<clé>`) → id de chaîne RMC+ (page_id).
+     * Les 16 ids RMC+ relevés sur l'accueil : bfmtv, rmc_story, rmc_decouverte, rmc_life,
+     * brut, bfm_business, bfm_tech, after_foot_tv, j_irai_dormir_chez_vous,
+     * bfm_grands_reportages, rmc, bfm_2, rmc_mystere, rmc_mecanic, rmc_wow, rmc_alerte_secours.
+     * Un id inconnu est passé tel quel (permet d'ajouter les nouvelles chaînes au M3U).
+     */
+    private val CHAINES = mapOf(
+        "bfmtv" to "bfmtv",
+        "rmcstory" to "rmc_story",
+        "rmcdecouverte" to "rmc_decouverte",
+        "bfmbusiness" to "bfm_business",
+        "rmclife" to "rmc_life",
+        "techco" to "bfm_tech",
+        "bfm2" to "bfm_2",
+        "rmcradio" to "rmc",
+    )
 
-    // SSO endpoint pour créer un token via REST (alternative au WebView OIDC)
-    private const val SSO_CREATE_TOKEN = "https://sso.rmcbfmplay.com/cas/services/rest/3.2/createToken.json"
-    // Secret app BFM Play Android (base64 de "RMCBFMPlayAndroidv1:moebius1970")
-    private const val APP_SECRET = "Basic Uk1DQkZNUGxheUFuZHJvaWR2MTptb2ViaXVzMTk3MA=="
-
-    // Cache DRM par streamUrl (même pattern que M6Resolver)
+    // Cache DRM par URL de flux (lu par les lecteurs, même patron que M6Resolver)
     private val widevineLicenseCache = ConcurrentHashMap<String, String>()
     private val widevineHeadersCache = ConcurrentHashMap<String, Map<String, String>>()
 
     private var appContext: Context? = null
 
     // 2026-06-23 (user "quand le cookie a expiré l'option reconnexion devrait
-    //   apparaître DIRECTEMENT, sinon on doit aller dans Paramètres") :
-    //   au lieu d'un simple Toast "va dans Paramètres", on ouvre le dialog
-    //   de re-connexion BFM PILE quand la lecture échoue pour cause de token
-    //   expiré/manquant. Cooldown 8s pour éviter de spammer si plusieurs
-    //   chaînes BFM sont sondées en série au démarrage.
+    //   apparaître DIRECTEMENT") : on ouvre le dialog de reconnexion PILE quand la
+    //   lecture échoue faute de session. Cooldown 8 s pour ne pas le spammer.
     private var lastReconnectDialogAt = 0L
     private const val RECONNECT_DIALOG_COOLDOWN_MS = 8_000L
-    private fun triggerReconnectDialog(@Suppress("UNUSED_PARAMETER") ctx: Context) {
+    private fun triggerReconnectDialog() {
         val now = System.currentTimeMillis()
         if (now - lastReconnectDialogAt < RECONNECT_DIALOG_COOLDOWN_MS) return
         lastReconnectDialogAt = now
@@ -74,7 +93,7 @@ object BfmResolver {
                 try {
                     com.streamflixreborn.streamflix.activities.BfmLoginDialog.show(activity)
                 } catch (t: Throwable) {
-                    Log.w(TAG, "Failed to show BFM reconnect dialog: ${t.message}")
+                    Log.w(TAG, "dialog reconnexion RMC+ impossible : ${t.message}")
                 }
             }
         } catch (_: Throwable) {}
@@ -83,7 +102,7 @@ object BfmResolver {
     private val client by lazy {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
             .callTimeout(45, TimeUnit.SECONDS)
             .followRedirects(true)
             .build()
@@ -116,14 +135,10 @@ object BfmResolver {
             return null
         }
         return when {
-            bfmUrl.startsWith("bfmlive://", ignoreCase = true) -> {
-                val channel = bfmUrl.removePrefix("bfmlive://").trim()
-                resolveLive(ctx, channel)
-            }
-            bfmUrl.startsWith("bfmplay://", ignoreCase = true) -> {
-                val productId = bfmUrl.removePrefix("bfmplay://").trim()
-                resolveReplay(ctx, productId)
-            }
+            bfmUrl.startsWith("bfmlive://", ignoreCase = true) ->
+                resolveLive(ctx, bfmUrl.removePrefix("bfmlive://").trim())
+            bfmUrl.startsWith("bfmplay://", ignoreCase = true) ->
+                resolveReplay(ctx, bfmUrl.removePrefix("bfmplay://").trim())
             else -> null
         }
     }
@@ -136,323 +151,153 @@ object BfmResolver {
     fun getWidevineLicenseUrl(streamUrl: String): String? = widevineLicenseCache[streamUrl]
     fun getWidevineHeaders(streamUrl: String): Map<String, String>? = widevineHeadersCache[streamUrl]
 
-    // ── Helpers préfixe Product:: ──
+    // ── BFF RMC+ ──
+
+    /** Le bloc `player` d'une page BFF (direct ou replay), ou null. */
+    private class Lecteur(val titre: String?, val hls: String?, val dash: String?, val playToken: String?, val authent: Boolean)
 
     /**
-     * L'API Gaia-core exige le préfixe "Product::" dans certains endpoints
-     * (notamment /episodes), mais le M3U stocke les IDs bruts (sans préfixe).
-     * Ce helper garantit que le préfixe est toujours présent.
+     * GET d'une page BFF avec la session. Retourne le bloc lecteur, ou null si la page
+     * n'existe pas / n'a pas de lecteur. Marque `sessionMorte` si le BFF réclame une
+     * authentification alors qu'on a envoyé des cookies (= session expirée côté site).
      */
-    private fun withProductPrefix(contentId: String): String =
-        if (contentId.startsWith("Product::")) contentId else "Product::$contentId"
-
-    // ── Résolution REPLAY ──
-
-    /**
-     * Pipeline replay corrigé 2026-06-21 d'après le code Kodi rmcbfmplay.py :
-     *  1. GET $API_CDN/web/v2/content/{contentId}/options
-     *     → JSON array, [0]["offers"][0] contient "offerId" + "streams" array
-     *  2. Si vide (= ID de série/saison) → fallback /episodes pour récupérer
-     *     le 1er épisode, puis re-tenter /options sur cet épisode-là.
-     *     C'est exactement ce que fait le Kodi addon :
-     *       contentType "Movie"|"Episode" → /options direct
-     *       contentType autre (Series/Season) → /episodes d'abord
-     *  3. POST $API_BACKEND/web/v1/replay/play → entitlementId
-     *  4. customdata + headers DRM (Origin, Content-Type vide)
-     */
-    private suspend fun resolveReplay(ctx: Context, productId: String): Resolved? {
-        var token = BfmAuth.getToken(ctx)
-        if (token == null) {
-            // Tenter le re-login automatique si on a des credentials sauvegardés
-            if (BfmSsoAuth.hasCredentials(ctx)) {
-                Log.d(TAG, "BFM token null — attempting auto-relogin…")
-                token = BfmSsoAuth.reloginFromSaved(ctx)
-            }
-            if (token == null) {
-                Log.w(TAG, "BFM not logged in — cannot resolve replay $productId")
-                // 2026-06-23 (user "quand le cookie a expiré l'option reconnexion
-                //   devrait apparaître DIRECTEMENT") : ouvre AUTOMATIQUEMENT le
-                //   dialog BfmLoginDialog (avec son éventuel warning "connexion
-                //   bloquée" si 3 fails) au lieu de juste un Toast. L'user
-                //   tape son nouveau mot de passe sur place, plus besoin
-                //   d'aller dans Paramètres.
-                triggerReconnectDialog(ctx)
-                return null
-            }
-        }
-
-        // 1ère tentative directe (Movie/Episode)
-        var resolved = resolveReplayDirect(token, productId, ctx)
-        if (resolved != null) return resolved
-
-        // Token peut-être expiré (403 GAIA_EXPIRED_TOKEN) → refresh et réessayer
-        if (BfmSsoAuth.hasCredentials(ctx)) {
-            Log.d(TAG, "First attempt failed for $productId — refreshing BFM token…")
-            val freshToken = BfmSsoAuth.reloginFromSaved(ctx)
-            if (freshToken != null && freshToken != token) {
-                token = freshToken
-                resolved = resolveReplayDirect(token, productId, ctx)
-                if (resolved != null) return resolved
-            } else if (freshToken == null) {
-                // 2026-06-23 : le re-login auto a échoué (= probablement le
-                //   password a changé côté BFM). Ouvre le dialog reconnexion
-                //   pour que l'user retape ses nouveaux credentials sur place.
-                Log.w(TAG, "Auto-relogin failed — credentials may have changed")
-                triggerReconnectDialog(ctx)
-            }
-        }
-
-        // Fallback : c'est peut-être un ID de série/saison → fetch episodes (avec token)
-        Log.d(TAG, "Direct options empty for $productId — trying /episodes fallback…")
-        val episodes = try { fetchEpisodes(productId, token) } catch (_: Exception) { null }
-        if (episodes.isNullOrEmpty()) {
-            Log.w(TAG, "No episodes found either for $productId — resolution failed")
+    private fun pageLecteur(ctx: Context, pageType: String, pageId: String): Lecteur? {
+        val entetes = RmcPlusAuth.entetes(ctx) ?: run {
+            Log.w(TAG, "RMC+ : pas de session — $pageType/$pageId")
+            triggerReconnectDialog()
             return null
         }
-        Log.d(TAG, "Found ${episodes.size} episodes, resolving first: ${episodes[0].contentId}")
-
-        // Résoudre le premier épisode avec le token frais
-        return resolveReplayDirect(token, episodes[0].contentId, ctx)
+        val url = "$BFF/page".toHttpUrlOrNull()?.newBuilder()
+            ?.addQueryParameter("model", "web")
+            ?.addQueryParameter("page_type", pageType)
+            ?.addQueryParameter("page_id", pageId)
+            ?.build()?.toString() ?: return null
+        val rb = Request.Builder().url(url)
+        entetes.forEach { (k, v) -> rb.header(k, v) }
+        val json = try {
+            client.newCall(rb.build()).execute().use { r ->
+                val corps = r.body?.string().orEmpty()
+                if (!r.isSuccessful) {
+                    Log.w(TAG, "BFF HTTP ${r.code} $pageType/$pageId — ${corps.take(160)}")
+                    return null
+                }
+                JSONObject(corps)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "BFF KO $pageType/$pageId : ${e.message}")
+            return null
+        }
+        if (json.has("message") && !json.has("sections")) {
+            Log.w(TAG, "BFF $pageType/$pageId : ${json.optString("message")}")
+            return null
+        }
+        val sections = json.optJSONArray("sections")
+        var lecteur: JSONObject? = null
+        if (sections != null) {
+            for (i in 0 until sections.length()) {
+                val s = sections.optJSONObject(i) ?: continue
+                if (s.optString("type") == "player") { lecteur = s; break }
+            }
+        }
+        if (lecteur == null) {
+            Log.w(TAG, "BFF $pageType/$pageId : pas de section player")
+            return null
+        }
+        val video = lecteur.optJSONObject("video")
+        val stream = video?.optJSONObject("stream")
+        val drm = video?.optJSONObject("drm")
+        val authent = lecteur.optBoolean("authent", false)
+        val res = Lecteur(
+            titre = lecteur.optString("titre", null),
+            hls = stream?.optString("hls", null)?.takeIf { it.startsWith("http") },
+            dash = stream?.optString("dash", null)?.takeIf { it.startsWith("http") },
+            playToken = drm?.optString("play_token", null)?.takeIf { it.isNotBlank() },
+            authent = authent,
+        )
+        if (res.hls == null && res.dash == null) {
+            // Cookies envoyés mais le site ne donne pas le flux : session périmée (ou
+            // contenu payant). On vérifie la session ; si elle est morte, on la jette et on
+            // propose la reconnexion — sinon c'est le contenu qui est indisponible.
+            val cookies = RmcPlusAuth.cookies(ctx)
+            val encoreValide = cookies != null && RmcPlusAuth.verifierSession(cookies) != null
+            Log.w(TAG, "BFF $pageType/$pageId : aucun flux (authent=$authent, session valide=$encoreValide)")
+            if (!encoreValide) {
+                RmcPlusAuth.deconnecter(ctx)
+                triggerReconnectDialog()
+            }
+            return null
+        }
+        return res
     }
 
-    /**
-     * Résolution directe d'un contentId via /options + /replay/play.
-     * Retourne null si /options est vide (= pas un Movie/Episode).
-     */
-    private fun resolveReplayDirect(token: String, contentId: String, ctx: Context): Resolved? {
-        // Étape 1 : GET les options de lecture via CDN
-        val fullId = withProductPrefix(contentId)
-        val optionsUrl = "$API_CDN/web/v2/content/$fullId/options".toHttpUrlOrNull()
-            ?.newBuilder()
-            ?.addQueryParameter("app", "bfmrmc")
-            ?.addQueryParameter("device", "browser")
-            ?.addQueryParameter("token", token)
-            ?.addQueryParameter("universe", "provider")
-            ?.build()?.toString() ?: run {
-            Log.e(TAG, "Failed to build options URL for $contentId")
-            return null
-        }
-
-        Log.d(TAG, "Step 1 (options) GET $optionsUrl")
-        val optionsResp = try {
-            httpGetJsonArray(optionsUrl)
-        } catch (e: Exception) {
-            Log.e(TAG, "Step 1 (options) failed for $contentId: ${e.message}")
-            return null
-        }
-
-        if (optionsResp == null || optionsResp.length() == 0) {
-            Log.d(TAG, "No options returned for $contentId (may be series/season)")
-            return null
-        }
-
-        // Parse: resp[0]["offers"][0]["streams"] pour WIDEVINE + offerId
-        val firstContent = optionsResp.optJSONObject(0)
-        val firstOffer = firstContent?.optJSONArray("offers")?.optJSONObject(0)
-        val offerId = firstOffer?.optString("offerId", "") ?: ""
-        val streams = firstOffer?.optJSONArray("streams")
-
-        var streamUrl: String? = null
-        if (streams != null) {
-            for (j in 0 until streams.length()) {
-                val s = streams.optJSONObject(j) ?: continue
-                val drm = s.optString("drm", "")
-                if (drm.equals("WIDEVINE", ignoreCase = true)) {
-                    streamUrl = s.optString("url", null)
-                    break
-                }
-            }
-        }
-
-        if (streamUrl.isNullOrEmpty()) {
-            Log.w(TAG, "No WIDEVINE stream for $contentId (offers=${firstContent?.optJSONArray("offers")?.length()}, streams=${streams?.length()})")
-            return null
-        }
-        Log.d(TAG, "Step 1 OK: offerId=$offerId, streamUrl=${streamUrl.take(80)}...")
-
-        // Étape 2 : POST /v1/replay/play pour obtenir l'entitlementId
-        val playUrl = "$API_BACKEND/web/v1/replay/play".toHttpUrlOrNull()
-            ?.newBuilder()
-            ?.addQueryParameter("app", "bfmrmc")
-            ?.addQueryParameter("device", "browser")
-            ?.addQueryParameter("token", token)
-            ?.build()?.toString() ?: run {
-            Log.e(TAG, "Failed to build replay/play URL")
-            return null
-        }
-
-        val playBody = JSONObject()
-            .put("app", "bfmrmc")
-            .put("device", "browser")
-            .put("macAddress", "PC")
-            .put("offerId", offerId)
-            .put("token", token)
-            .toString()
-
-        Log.d(TAG, "Step 2 (replay/play) POST $playUrl body=$playBody")
-        val playResp = try {
-            httpPostJson(playUrl, playBody)
-        } catch (e: Exception) {
-            Log.e(TAG, "Step 2 (replay/play) failed for $contentId: ${e.message}")
-            return null
-        } ?: return null
-
-        val entitlementId = playResp.optString("entitlementId", "")
-        Log.d(TAG, "Step 2 OK: entitlementId=$entitlementId")
-
-        // Étape 3 : construire la customdata pour Widevine
-        val accountId = BfmAuth.getAccountId(ctx) ?: ""
-        val customdata = buildCustomdata(token, accountId, "REPLAY", entitlementId)
-
-        // Cache DRM — headers alignés avec Kodi (Origin + Content-Type vide)
-        widevineLicenseCache[streamUrl] = LICENSE_URL
-        widevineHeadersCache[streamUrl] = mapOf(
-            "customdata" to customdata,
-            "Origin" to "https://www.rmcbfmplay.com",
-            "Content-Type" to "",
-            "User-Agent" to UA
-        )
-
-        Log.d(TAG, "Resolved replay $contentId → ${streamUrl.take(80)}...")
-        return Resolved(
-            url = streamUrl,
-            mimeType = "application/dash+xml",
-            widevineLicenseUrl = LICENSE_URL,
-            widevineHeaders = widevineHeadersCache[streamUrl]
+    /** Pose la licence Widevine (DRMtoday, en-tête x-dt-auth-token) en cache pour cette URL. */
+    private fun armerDrm(url: String, playToken: String) {
+        widevineLicenseCache[url] = LICENCE_WIDEVINE
+        widevineHeadersCache[url] = mapOf(
+            "x-dt-auth-token" to playToken,
+            "User-Agent" to UA,
         )
     }
 
     // ── Résolution LIVE ──
 
-    /**
-     * Mapping channel slug (bfmlive://xxx) → noms possibles dans la réponse service-list.
-     * L'API retourne des noms variables ("BFM TV" ou "BFMTV"), on teste plusieurs variantes.
-     */
-    private val LIVE_CHANNELS = mapOf(
-        "bfmtv"          to listOf("BFM TV", "BFMTV", "BFM"),
-        "rmcstory"       to listOf("RMC Story", "RMC STORY"),
-        "rmcdecouverte"  to listOf("RMC Découverte", "RMC DECOUVERTE", "RMC Decouverte"),
-        "rmclife"        to listOf("RMC Life", "RMC LIFE"),
-        "bfmbusiness"    to listOf("BFM Business", "BFM BUSINESS"),
-        "techco"         to listOf("Tech & Co", "Tech&Co", "TECH & CO")
-    )
-
-    /**
-     * Résout un live BFM via l'endpoint service-list (comme l'addon Kodi).
-     * Le service-list retourne directement les URLs MPD + infos DRM sans passer par /live/play.
-     */
     private suspend fun resolveLive(ctx: Context, channel: String): Resolved? {
-        var token = BfmAuth.getToken(ctx)
-        if (token == null) {
-            if (BfmSsoAuth.hasCredentials(ctx)) {
-                Log.d(TAG, "BFM token expired — attempting auto-relogin for live…")
-                token = BfmSsoAuth.reloginFromSaved(ctx)
-            }
-            if (token == null) {
-                Log.w(TAG, "BFM not logged in — cannot resolve live $channel")
-                // 2026-06-23 : ouvre AUTO le dialog reconnexion (= mêmes
-                //   rationale que resolveReplay).
-                triggerReconnectDialog(ctx)
-                return null
-            }
+        val id = CHAINES[channel.lowercase()] ?: channel
+        val l = pageLecteur(ctx, "direct", id) ?: return null
+        // Chaîne chiffrée : DASH obligatoire (nos lecteurs ne font Widevine que sur DASH).
+        if (l.playToken != null) {
+            val dash = l.dash ?: l.hls?.replace(Regex("""/[^/]*\.m3u8(\?.*)?$"""), "/manifest.mpd")
+            if (dash == null) { Log.w(TAG, "live $id : DRM sans DASH"); return null }
+            armerDrm(dash, l.playToken)
+            Log.d(TAG, "live $id → DASH Widevine ${dash.take(90)}")
+            return Resolved(dash, "application/dash+xml", LICENCE_WIDEVINE, widevineHeadersCache[dash])
         }
-
-        // GET service-list avec le token en query param (URL-encodé proprement)
-        val serviceListUrl = SERVICE_LIST_URL.toHttpUrlOrNull()?.newBuilder()
-            ?.addQueryParameter("app", "bfmrmc")
-            ?.addQueryParameter("device", "browser")
-            ?.addQueryParameter("token", token)
-            ?.build()
-            ?.toString() ?: run {
-            Log.e(TAG, "Failed to build service-list URL")
-            return null
-        }
-
-        Log.d(TAG, "Fetching service-list for live $channel...")
-
-        val serviceList = try {
-            httpGetJsonArray(serviceListUrl)
-        } catch (e: Exception) {
-            Log.e(TAG, "service-list failed: ${e.message}")
-            return null
-        }
-
-        if (serviceList == null || serviceList.length() == 0) {
-            Log.w(TAG, "service-list returned empty or null")
-            return null
-        }
-
-        Log.d(TAG, "service-list returned ${serviceList.length()} services")
-
-        // Chercher le service correspondant au channel demandé
-        val possibleNames = LIVE_CHANNELS[channel] ?: listOf(channel)
-        var streamUrl: String? = null
-
-        for (i in 0 until serviceList.length()) {
-            val service = serviceList.optJSONObject(i) ?: continue
-            val serviceName = service.optString("name", "")
-
-            // Log tous les noms pour debug
-            if (i < 10) Log.d(TAG, "  service[$i] name='$serviceName'")
-
-            // Match insensible à la casse
-            val matches = possibleNames.any { it.equals(serviceName, ignoreCase = true) }
-            if (!matches) continue
-
-            Log.d(TAG, "Found matching service: '$serviceName'")
-
-            // Chercher le stream WIDEVINE
-            val streams = service.optJSONArray("streams") ?: continue
-            for (j in 0 until streams.length()) {
-                val stream = streams.optJSONObject(j) ?: continue
-                val drm = stream.optString("drm", "")
-                val url = stream.optString("url", "")
-
-                Log.d(TAG, "  stream[$j] drm='$drm' url=${url.take(60)}...")
-
-                if (drm.equals("WIDEVINE", ignoreCase = true) && url.isNotEmpty()) {
-                    streamUrl = url
-                    break
-                }
-            }
-
-            if (streamUrl != null) break
-        }
-
-        if (streamUrl == null) {
-            // Log tous les noms pour aider au debug
-            val allNames = (0 until serviceList.length()).mapNotNull {
-                serviceList.optJSONObject(it)?.optString("name")
-            }
-            Log.w(TAG, "No matching service for '$channel'. Available: $allNames")
-            return null
-        }
-
-        // Customdata pour live — accountId = "undefined" (comme Kodi)
-        val customdata = buildCustomdata(token, "undefined", "LIVEOTT", null)
-
-        widevineLicenseCache[streamUrl] = LICENSE_URL
-        widevineHeadersCache[streamUrl] = mapOf(
-            "customdata" to customdata,
-            "Origin" to "https://www.rmcbfmplay.com",
-            "Content-Type" to "",
-            "User-Agent" to UA
-        )
-
-        Log.d(TAG, "Resolved live $channel → ${streamUrl.take(80)}...")
-        return Resolved(
-            url = streamUrl,
-            mimeType = "application/dash+xml",
-            widevineLicenseUrl = LICENSE_URL,
-            widevineHeaders = widevineHeadersCache[streamUrl]
-        )
+        val hls = l.hls ?: l.dash ?: return null
+        Log.d(TAG, "live $id → ${if (l.hls != null) "HLS" else "DASH"} ${hls.take(90)}")
+        return Resolved(hls, if (l.hls != null) "application/x-mpegURL" else "application/dash+xml")
     }
 
-    // ── Listing épisodes pour séries BFM ──
+    // ── Résolution REPLAY ──
 
-    /**
-     * Représente un épisode/item BFM retourné par l'API content/{id}/episodes.
-     */
+    /** `NEUF_BFMTV_BFM1021143163386` → `1021143163386` ; `955010561527` → lui-même. */
+    private fun idVideo(productId: String): String? =
+        Regex("""(\d{6,})$""").find(productId.removePrefix("Product::"))?.groupValues?.get(1)
+
+    private suspend fun resolveReplay(ctx: Context, productId: String): Resolved? {
+        val direct = idVideo(productId)?.let { resolveReplayId(ctx, it) }
+        if (direct != null) return direct
+        if (RmcPlusAuth.cookies(ctx) == null) return null   // reconnexion déjà proposée
+
+        // Id de série/saison ? Le catalogue gaia donne les épisodes, dont le 1er est jouable.
+        Log.d(TAG, "replay $productId : pas de lecteur direct, épisodes gaia…")
+        val episodes = try { fetchEpisodes(productId) } catch (_: Exception) { null }
+        if (episodes.isNullOrEmpty()) {
+            Log.w(TAG, "replay $productId : aucun épisode — échec")
+            return null
+        }
+        for (ep in episodes.take(3)) {
+            val id = idVideo(ep.contentId) ?: continue
+            val r = resolveReplayId(ctx, id)
+            if (r != null) return r
+        }
+        return null
+    }
+
+    private fun resolveReplayId(ctx: Context, id: String): Resolved? {
+        val l = pageLecteur(ctx, "player", id) ?: return null
+        val url = l.dash ?: l.hls ?: return null
+        val mime = if (l.dash != null) "application/dash+xml" else "application/x-mpegURL"
+        if (l.playToken != null) {
+            armerDrm(url, l.playToken)
+            Log.d(TAG, "replay $id → ${l.titre} (Widevine) ${url.take(90)}")
+            return Resolved(url, mime, LICENCE_WIDEVINE, widevineHeadersCache[url])
+        }
+        Log.d(TAG, "replay $id → ${l.titre} (clair) ${url.take(90)}")
+        return Resolved(url, mime)
+    }
+
+    // ── Épisodes (catalogue gaia-core, toujours en service) ──
+
     data class BfmEpisode(
         val contentId: String,
         val title: String,
@@ -462,16 +307,18 @@ object BfmResolver {
     )
 
     /**
-     * 2026-06-21 : fetch la liste d'épisodes d'un contenu BFM (série, émission).
-     * Utilise l'endpoint CDN comme le fait Kodi :
+     * 2026-06-21 : fetch la liste d'épisodes d'un contenu BFM (série, émission) :
      *   GET $API_CDN/web/v1/content/{contentId}/episodes
      *   params: universe=PROVIDER, accountTypes=NEXTTV, operators=NEXTTV, page=0, size=1000
+     * 2026-09-05 : le paramètre `token` n'est PLUS envoyé (il n'existe plus ; c'est ce
+     *   qu'utilise déjà refresh_bfm.py côté nx-data, sans token, et ça répond).
      *
      * @return liste d'épisodes, ou null si pas d'épisodes (= film/single).
      */
+    @Suppress("UNUSED_PARAMETER")
     fun fetchEpisodes(contentId: String, token: String? = null): List<BfmEpisode>? {
-        val fullId = withProductPrefix(contentId)
-        val builder = "$API_CDN/web/v1/content/$fullId/episodes".toHttpUrlOrNull()
+        val fullId = if (contentId.startsWith("Product::")) contentId else "Product::$contentId"
+        val url = "$API_CDN/web/v1/content/$fullId/episodes".toHttpUrlOrNull()
             ?.newBuilder()
             ?.addQueryParameter("universe", "PROVIDER")
             ?.addQueryParameter("accountTypes", "NEXTTV")
@@ -479,15 +326,7 @@ object BfmResolver {
             ?.addQueryParameter("noTracking", "false")
             ?.addQueryParameter("page", "0")
             ?.addQueryParameter("size", "1000")
-        // Ajouter le token BFM — obligatoire pour les contenus non-FranceTV
-        // (BFMTV, Ciné+ OCS, L'Equipe TV, Virgin17, etc.)
-        // Sans token, le serveur retourne HTTP 500 au lieu de 403.
-        if (!token.isNullOrBlank()) {
-            builder?.addQueryParameter("app", "bfmrmc")
-            builder?.addQueryParameter("device", "browser")
-            builder?.addQueryParameter("token", token)
-        }
-        val url = builder?.build()?.toString() ?: return null
+            ?.build()?.toString() ?: return null
 
         Log.d(TAG, "fetchEpisodes GET $url")
         val resp = try {
@@ -497,7 +336,6 @@ object BfmResolver {
             return null
         } ?: return null
 
-        // Kodi cherche dans : items, spots, content, tiles
         val items = resp.optJSONArray("items")
             ?: resp.optJSONArray("content")
             ?: resp.optJSONArray("tiles")
@@ -510,12 +348,11 @@ object BfmResolver {
         val episodes = mutableListOf<BfmEpisode>()
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
-            // contentId de l'épisode = dans action.actionIds.contentId
+            if (item.has("svodId") && !item.isNull("svodId") && item.optString("svodId").isNotBlank()) continue
             val epContentId = item.optJSONObject("action")
                 ?.optJSONObject("actionIds")
                 ?.optString("contentId", "")
                 ?: ""
-            // Fallback sur l'id direct de l'item si pas d'action
             val finalId = epContentId.ifEmpty { item.optString("id", "") }
             if (finalId.isEmpty()) continue
 
@@ -523,7 +360,6 @@ object BfmResolver {
             val description = item.optString("description", null)
             val contentType = item.optString("contentType", null)
 
-            // Poster : préférer 2/3, sinon 16/9, sinon 1/1
             var poster: String? = null
             val images = item.optJSONArray("images")
             if (images != null) {
@@ -537,7 +373,6 @@ object BfmResolver {
                     if (format == "1/1" && poster == null) poster = imgUrl
                 }
             }
-
             episodes.add(BfmEpisode(finalId, title, description, poster, contentType))
         }
 
@@ -546,49 +381,6 @@ object BfmResolver {
     }
 
     // ── Helpers ──
-
-    /**
-     * Construit la chaîne customdata pour le header de licence DRM.
-     * Format inversé du Kodi addon rmcbfmplay.py (CUSTOMDATALIVE/CUSTOMDATAREPLAY).
-     */
-    private fun buildCustomdata(
-        token: String,
-        accountId: String,
-        type: String,
-        entitlementId: String?
-    ): String {
-        val sb = StringBuilder()
-        sb.append("description=$UA&deviceId=byPassARTHIUS")
-        sb.append("&deviceName=AndroidTV----ONYX")
-        sb.append("&deviceType=AndroidTV")
-        sb.append("&osName=Android&osVersion=14")
-        sb.append("&persistent=false&resolution=1920x1080")
-        sb.append("&tokenType=castoken")
-        sb.append("&tokenSSO=$token")
-        sb.append("&type=$type")
-        sb.append("&accountId=$accountId")
-        if (!entitlementId.isNullOrEmpty()) {
-            sb.append("&entitlementId=$entitlementId")
-        }
-        return sb.toString()
-    }
-
-    /** Extrait la première URL DASH depuis la réponse /options. */
-    private fun extractDashUrl(json: JSONObject): String? {
-        // La réponse contient options[] → chaque option a streams[]
-        val options = json.optJSONArray("options") ?: return null
-        for (i in 0 until options.length()) {
-            val opt = options.optJSONObject(i) ?: continue
-            val streams = opt.optJSONArray("streams") ?: continue
-            for (j in 0 until streams.length()) {
-                val s = streams.optJSONObject(j) ?: continue
-                if (s.optString("format", "").equals("dash", ignoreCase = true)) {
-                    return s.optString("url", null)
-                }
-            }
-        }
-        return null
-    }
 
     private fun httpGetJson(url: String): JSONObject? {
         val req = Request.Builder()
@@ -600,73 +392,13 @@ object BfmResolver {
             if (!resp.isSuccessful) {
                 val errBody = resp.body?.string().orEmpty()
                 Log.w(TAG, "HTTP ${resp.code} for $url — ${errBody.take(200)}")
-                return null  // Ne PAS parser le body d'erreur comme du contenu valide
+                return null
             }
             val body = resp.body?.string().orEmpty()
             if (body.isBlank()) return null
             return try { JSONObject(body) } catch (_: Exception) {
                 Log.w(TAG, "Invalid JSON: ${body.take(120)}")
                 null
-            }
-        }
-    }
-
-    private fun httpPostJson(url: String, jsonBody: String): JSONObject? {
-        val mediaType = "application/json".toMediaType()
-        val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", UA)
-            .header("Accept", "application/json")
-            .post(jsonBody.toRequestBody(mediaType))
-            .build()
-        client.newCall(req).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                Log.w(TAG, "HTTP ${resp.code} POST $url → ${body.take(200)}")
-            }
-            if (body.isBlank()) return null
-            return try { JSONObject(body) } catch (_: Exception) {
-                Log.w(TAG, "Invalid JSON: ${body.take(120)}")
-                null
-            }
-        }
-    }
-
-    /** GET qui parse une réponse JSON Array (pour service-list). */
-    private fun httpGetJsonArray(url: String): JSONArray? {
-        val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", UA)
-            .header("Content-type", "application/json")
-            .header("Accept", "application/json, text/plain, */*")
-            .build()
-        client.newCall(req).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            Log.d(TAG, "httpGetJsonArray HTTP ${resp.code}, body length=${body.length}")
-            if (!resp.isSuccessful) {
-                Log.w(TAG, "HTTP ${resp.code} GET → ${body.take(500)}")
-                return null
-            }
-            if (body.isBlank()) {
-                Log.w(TAG, "Empty body from service-list")
-                return null
-            }
-            // Log le début de la réponse pour debug
-            Log.d(TAG, "Response preview: ${body.take(300)}")
-            return try { JSONArray(body) } catch (_: Exception) {
-                // Peut-être un JSONObject qui wrap un array
-                try {
-                    val obj = JSONObject(body)
-                    val arr = obj.optJSONArray("services") ?: obj.optJSONArray("items")
-                        ?: obj.optJSONArray("data")
-                    if (arr == null) {
-                        Log.w(TAG, "JSONObject keys: ${obj.keys().asSequence().toList()}")
-                    }
-                    arr
-                } catch (_: Exception) {
-                    Log.w(TAG, "Invalid JSON array: ${body.take(300)}")
-                    null
-                }
             }
         }
     }

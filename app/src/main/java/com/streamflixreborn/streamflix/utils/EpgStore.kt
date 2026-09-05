@@ -59,17 +59,78 @@ import java.util.zip.GZIPInputStream
  *
  * ── PORTÉE ────────────────────────────────────────────────────────────────────────────
  * Ce service est INDÉPENDANT du provider : il expose « quel programme sur telle chaîne, à
- * telle heure », rien de plus. Il n'est câblé que sur Vavoo pour l'instant (décision user :
- * « si c'était un trop gros chantier pour les autres, tu t'arrêtes juste Vavoo »), mais
- * l'étendre à Mon IPTV ou World Live sera un branchement, pas une réécriture.
+ * telle heure », rien de plus. Câblé d'abord sur Vavoo (décision user : « si c'était un trop
+ * gros chantier pour les autres, tu t'arrêtes juste Vavoo »), puis étendu le 2026-09-05 à
+ * World Live et aux grilles des dossiers TV Hub : plusieurs guides fusionnés (voir
+ * [GUIDES_DE_BASE] / [PAYS_OPTIONNELS]) et nettoyage des noms de playlist (voir [cle]).
  */
 object EpgStore {
 
     private const val TAG = "EpgStore"
-    private const val URL_GUIDE = "https://epg.pw/xmltv/epg_FR.xml.gz"
 
-    /** Nom du cache disque. Le guide couvre plusieurs jours ; 12 h de fraîcheur suffisent. */
-    private const val FICHIER_CACHE = "epg_fr.bin"
+    /**
+     * Un guide = une source XMLTV, son cache disque, et le DÉCALAGE propre à la source (voir
+     * [DECALAGE_EPG_PW] : epg.pw estampille l'heure de Shanghai en `+0000`, les autres non).
+     */
+    data class Guide(val code: String, val url: String, val fichier: String, val decalageMs: Long)
+
+    /**
+     * ── PLUSIEURS GUIDES, FUSIONNÉS ──────────────────────────────────────────────────
+     * 2026-09-05 (user : « dans World Live, avoir dans la jaquette le programme, comme sur
+     * Vavoo ») : les playlists de World Live sont surtout françaises (Mix FR, FAST FR,
+     * paradis, iptv-org FR), mais epg.pw FR ne connaît PAS les chaînes FAST. Mesuré avec
+     * `epg_couverture.py`, par nom normalisé, avant → après ajout des trois guides FAST :
+     *   Mix FR       7 % → 55 %   (le reste = Multi Live, Zone 18@… : rien à guider)
+     *   FAST FR      2 % → 51 %   (Samsung TV+ 303, Plex 306, Pluto 234 reconnues)
+     *   paradis      0 % → 70 %   (grâce aussi au nettoyage des noms, voir [cle])
+     *   iptv-org FR  5 % → 66 %
+     * Les guides i.mjh.nz sont minuscules (0,2 à 0,6 Mo) et en VRAI UTC — pas de −8 h.
+     */
+    private val GUIDES_DE_BASE: List<Guide> = listOf(
+        Guide("FR", "https://epg.pw/xmltv/epg_FR.xml.gz", "epg_fr.bin", DECALAGE_EPG_PW),
+        Guide("PLUTO_FR", "https://i.mjh.nz/PlutoTV/fr.xml.gz", "epg_pluto_fr.bin", 0L),
+        Guide("SAMSUNG_FR", "https://i.mjh.nz/SamsungTVPlus/fr.xml.gz", "epg_samsung_fr.bin", 0L),
+        Guide("PLEX_FR", "https://i.mjh.nz/Plex/fr.xml.gz", "epg_plex_fr.bin", 0L),
+    )
+
+    /**
+     * Guides étrangers OPTIONNELS (World Live a des playlists portugaises, anglaises…).
+     * Désactivés par défaut : chacun pèse 1,5 à 3,6 Mo à télécharger, la Chromecast n'a pas
+     * à les payer pour des chaînes que la plupart des gens ne regardent pas. Activables dans
+     * « Mes sources World TV » → « Guide TV ». epgshare01 écrit de vrais décalages horaires
+     * (`+0100`), donc décalage 0.
+     */
+    val PAYS_OPTIONNELS: List<Pair<Guide, String>> = listOf(
+        Guide("PT", "https://epgshare01.online/epgshare01/epg_ripper_PT1.xml.gz", "epg_pt.bin", 0L) to "Portugal",
+        Guide("GB", "https://epgshare01.online/epgshare01/epg_ripper_UK1.xml.gz", "epg_gb.bin", 0L) to "Royaume-Uni",
+        Guide("ES", "https://epgshare01.online/epgshare01/epg_ripper_ES1.xml.gz", "epg_es.bin", 0L) to "Espagne",
+        Guide("IT", "https://epgshare01.online/epgshare01/epg_ripper_IT1.xml.gz", "epg_it.bin", 0L) to "Italie",
+        Guide("DE", "https://epgshare01.online/epgshare01/epg_ripper_DE1.xml.gz", "epg_de.bin", 0L) to "Allemagne",
+        Guide("BR", "https://epgshare01.online/epgshare01/epg_ripper_BR1.xml.gz", "epg_br.bin", 0L) to "Brésil",
+        Guide("CA", "https://epg.pw/xmltv/epg_CA.xml.gz", "epg_ca.bin", DECALAGE_EPG_PW) to "Canada",
+    )
+
+    private const val PREF_PAYS = "epg_pays_supplementaires"
+
+    /** Codes des guides optionnels activés par l'utilisateur (ex. « PT,GB »). */
+    fun paysSupplementaires(context: Context): Set<String> =
+        androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+            .getString(PREF_PAYS, null).orEmpty()
+            .split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+
+    /** Enregistre le choix et force un rechargement au prochain [prechargerSiNecessaire]. */
+    fun definirPaysSupplementaires(context: Context, codes: Set<String>) {
+        androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+            .edit().putString(PREF_PAYS, codes.joinToString(",")).apply()
+        chargeA = 0L
+    }
+
+    private fun guidesActifs(context: Context): List<Guide> {
+        val codes = paysSupplementaires(context)
+        return GUIDES_DE_BASE + PAYS_OPTIONNELS.map { it.first }.filter { it.code in codes }
+    }
+
+    /** Le guide couvre plusieurs jours ; 12 h de fraîcheur suffisent. */
     private const val FRAICHEUR_MS = 12L * 60 * 60 * 1000
 
     /**
@@ -96,9 +157,26 @@ object EpgStore {
      * Même esprit que `VavooProvider.normalizeKey` : on veut que « Canal+ Sport »,
      * « CANAL+ SPORT » et « canal plus sport » donnent la même clé.
      */
+    /**
+     * 2026-09-05 — NETTOYAGE DES DÉCORATIONS DE PLAYLIST, mesuré sur les sources World Live :
+     *   « 48. France 2 [SSAI][1080p-france.tv] »  (paradis)   → « france2 »
+     *   « 6ter (1080p) », « TF1 [Not 24/7] »       (iptv-org)  → « 6ter », « tf1 »
+     *   « RTP Noticias_ 🇵🇹 », « RTP Mundo ᴸᴼᵂ »   (FreeTV)    → « rtpnoticias », « rtpmundo »
+     * Sans ça, paradis était reconnue à 0 % ; avec, 70 %. On ne retire ENTRE PARENTHÈSES que
+     * ce qui parle de qualité ou de disponibilité : « Canal+ (Sport) » doit rester distinct.
+     */
+    private val RE_NUMERO_TETE = Regex("""^\s*\d{1,4}\s*[.\-:)]\s*""")
+    private val RE_CROCHETS = Regex("""\[[^\]]*]""")
+    private val RE_PARENTHESES_QUALITE =
+        Regex("""\((?:[^)]*(?:\d{3,4}[pi]|4k|uhd|hd|sd|24/7|geo)[^)]*)\)""", RegexOption.IGNORE_CASE)
+
     fun cle(nom: String?): String {
         if (nom.isNullOrBlank()) return ""
-        val sansAccents = Normalizer.normalize(nom, Normalizer.Form.NFD)
+        val nettoye = nom
+            .replace(RE_NUMERO_TETE, "")
+            .replace(RE_CROCHETS, " ")
+            .replace(RE_PARENTHESES_QUALITE, " ")
+        val sansAccents = Normalizer.normalize(nettoye, Normalizer.Form.NFD)
             .replace(Regex("\\p{Mn}+"), "")
         return sansAccents.lowercase()
             .replace("+", "plus")
@@ -158,27 +236,40 @@ object EpgStore {
         if (parChaine.isNotEmpty() && System.currentTimeMillis() - chargeA < FRAICHEUR_MS) return@withContext
         verrou.withLock {
             if (parChaine.isNotEmpty() && System.currentTimeMillis() - chargeA < FRAICHEUR_MS) return@withLock
-            val cache = File(context.cacheDir, FICHIER_CACHE)
-            val fraisSurDisque = cache.exists() &&
-                System.currentTimeMillis() - cache.lastModified() < FRAICHEUR_MS
-            val octets = if (fraisSurDisque) {
-                runCatching { cache.readBytes() }.getOrNull()
-            } else {
-                telecharger()?.also { runCatching { cache.writeBytes(it) } }
-                    ?: runCatching { cache.takeIf { c -> c.exists() }?.readBytes() }.getOrNull()
-            } ?: run { Log.w(TAG, "guide indisponible (réseau et cache vides)"); return@withLock }
-
             val t0 = System.currentTimeMillis()
-            val table = analyser(octets)
-            if (table.isEmpty()) { Log.w(TAG, "guide analysé mais vide"); return@withLock }
-            parChaine = table
+            // Chaque guide est téléchargé, mis en cache et analysé SÉPARÉMENT (son propre
+            // décalage horaire), puis les tables sont fusionnées : en cas de doublon de nom
+            // entre deux guides, la grille la plus fournie l'emporte — même règle qu'à
+            // l'intérieur d'un guide (voir la fin d'[analyser]).
+            val fusion = HashMap<String, List<Programme>>(1200)
+            val bilan = StringBuilder()
+            for (guide in guidesActifs(context)) {
+                val cache = File(context.cacheDir, guide.fichier)
+                val fraisSurDisque = cache.exists() &&
+                    System.currentTimeMillis() - cache.lastModified() < FRAICHEUR_MS
+                val octets = if (fraisSurDisque) {
+                    runCatching { cache.readBytes() }.getOrNull()
+                } else {
+                    telecharger(guide.url)?.also { runCatching { cache.writeBytes(it) } }
+                        ?: runCatching { cache.takeIf { c -> c.exists() }?.readBytes() }.getOrNull()
+                }
+                if (octets == null) { Log.w(TAG, "guide ${guide.code} indisponible (réseau et cache vides)"); continue }
+                val table = analyser(octets, guide.decalageMs)
+                for ((k, liste) in table) {
+                    val actuelle = fusion[k]
+                    if (actuelle == null || liste.size > actuelle.size) fusion[k] = liste
+                }
+                bilan.append(guide.code).append('=').append(table.size)
+                    .append(if (fraisSurDisque) "(disque) " else "(web) ")
+            }
+            if (fusion.isEmpty()) { Log.w(TAG, "aucun guide exploitable"); return@withLock }
+            parChaine = fusion
             chargeA = System.currentTimeMillis()
             Log.i(
                 TAG,
-                "guide prêt : ${table.size} chaînes, " +
-                    "${table.values.sumOf { it.size }} programmes retenus, " +
-                    "analysé en ${System.currentTimeMillis() - t0} ms" +
-                    if (fraisSurDisque) " (cache disque)" else " (téléchargé)",
+                "guide prêt : ${fusion.size} chaînes, " +
+                    "${fusion.values.sumOf { it.size }} programmes retenus, " +
+                    "en ${System.currentTimeMillis() - t0} ms — $bilan",
             )
         }
     }
@@ -193,8 +284,8 @@ object EpgStore {
             .build()
     }
 
-    private fun telecharger(): ByteArray? = try {
-        val req = Request.Builder().url(URL_GUIDE)
+    private fun telecharger(url: String): ByteArray? = try {
+        val req = Request.Builder().url(url)
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             .build()
@@ -243,8 +334,13 @@ object EpgStore {
      *
      * Shanghai n'applique pas d'heure d'été : la correction est constante toute l'année.
      * Sans elle, le guide annonçait « Télématin » à 16 h 30 — vu à l'écran avant correction.
+     *
+     * ⚠ 2026-09-05 : cette correction ne vaut QUE pour epg.pw. Les guides i.mjh.nz et
+     *   epgshare01 sont en vrai UTC / avec de vrais décalages (vérifié : « Catfish » Pluto
+     *   annoncé `124400 +0000` pour 14 h 44 à Paris). D'où un décalage PAR GUIDE, porté par
+     *   [Guide.decalageMs] et passé à [analyser].
      */
-    private const val DECALAGE_SOURCE_MS = -8L * 60 * 60 * 1000
+    private const val DECALAGE_EPG_PW = -8L * 60 * 60 * 1000
 
     /**
      * `20260811203000 +0000` → millisecondes epoch, correction de source comprise.
@@ -252,7 +348,7 @@ object EpgStore {
      * 42 000 programmes × 2 bornes : pas de SimpleDateFormat ni de Calendar ici,
      * on calcule à la main, sans allocation.
      */
-    private fun horodatage(brut: String?): Long {
+    private fun horodatage(brut: String?, decalageSourceMs: Long): Long {
         if (brut == null || brut.length < 14) return 0L
         for (i in 0 until 14) if (brut[i] !in '0'..'9') return 0L
         val an = brut.substring(0, 4).toInt()
@@ -273,7 +369,7 @@ object EpgStore {
             val decalage = (hh * 3_600L + mm * 60L) * 1_000L
             ms += if (reste[0] == '+') -decalage else decalage
         }
-        return ms + DECALAGE_SOURCE_MS
+        return ms + decalageSourceMs
     }
 
     /** « days from civil » (Howard Hinnant) — exact, y compris années bissextiles séculaires. */
@@ -296,7 +392,7 @@ object EpgStore {
      * Les `<channel>` et les `<programme>` sont collectés séparément puis rapprochés à la
      * fin, pour ne dépendre d'aucun ordre d'apparition dans le fichier.
      */
-    private fun analyser(octets: ByteArray): Map<String, List<Programme>> {
+    private fun analyser(octets: ByteArray, decalageSourceMs: Long): Map<String, List<Programme>> {
         val maintenant = System.currentTimeMillis()
         val borneBasse = maintenant - AVANT_MS
         val borneHaute = maintenant + APRES_MS
@@ -334,8 +430,8 @@ object EpgStore {
                             }
                             "programme" -> {
                                 idProg = p.getAttributeValue(null, "channel")
-                                debut = horodatage(p.getAttributeValue(null, "start"))
-                                fin = horodatage(p.getAttributeValue(null, "stop"))
+                                debut = horodatage(p.getAttributeValue(null, "start"), decalageSourceMs)
+                                fin = horodatage(p.getAttributeValue(null, "stop"), decalageSourceMs)
                                 titre = null; description = null
                             }
                             "title" -> if (idProg != null && titre == null) {

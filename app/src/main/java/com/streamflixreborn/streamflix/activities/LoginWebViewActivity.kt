@@ -203,7 +203,7 @@ class LoginWebViewActivity : AppCompatActivity() {
             text = when (service) {
                 SERVICE_TF1 -> "✓ Terminer connexion TF1+"
                 SERVICE_M6 -> "✓ Terminer connexion 6play"
-                SERVICE_BFM -> "✓ Terminer connexion BFM Play"
+                SERVICE_BFM -> "✓ Terminer connexion RMC+"
                 else -> "✓ Terminer connexion"
             }
             setBackgroundColor(0xCC1E88E5.toInt())
@@ -253,11 +253,10 @@ class LoginWebViewActivity : AppCompatActivity() {
 
         val loginUrl = when (service) {
             SERVICE_TF1 -> "https://www.tf1.fr/compte/connexion"
-            SERVICE_BFM -> "https://sso.rmcbfmplay.com/cas/oidc/authorize?" +
-                "client_id=uMgFIVzSfbUsjxGCHSALcyZJbdjSfMqasY" +
-                "&response_type=token" +
-                "&redirect_uri=https://www.rmcbfmplay.com" +
-                "&scope=openid"
+            // 2026-09-05 : RMC BFM Play → RMC+. L'ancien SSO CAS (sso.rmcbfmplay.com) répond
+            //   504 à tout POST ; le site se connecte via connect.rmcbfm.com et pose une
+            //   session sur www.rmcplus.fr, qu'on récupère par les cookies (RmcPlusAuth).
+            SERVICE_BFM -> com.streamflixreborn.streamflix.utils.RmcPlusAuth.URL_CONNEXION
             // 2026-08-02 (user : « quand on ouvre la page de reconnexion M6 on tombe sur un
             //   500 ; en passant par Accueil puis Paramètres ça marche ») : REPRODUIT et
             //   confirmé en direct —
@@ -276,7 +275,7 @@ class LoginWebViewActivity : AppCompatActivity() {
         }
         title = when (service) {
             SERVICE_TF1 -> "Connexion TF1+"
-            SERVICE_BFM -> "Connexion RMC BFM Play"
+            SERVICE_BFM -> "Connexion RMC+ (ex-BFM Play)"
             else -> "Connexion M6 6play"
         }
         Log.d(TAG, "Loading login URL: $loginUrl")
@@ -804,6 +803,11 @@ class LoginWebViewActivity : AppCompatActivity() {
         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
             super.onPageStarted(view, url, favicon)
             progress.visibility = View.VISIBLE
+            // 2026-09-05 (user : « quand on clique sur Se connecter ça fait rien » sur BFM) :
+            //   on ne journalisait AUCUNE URL, impossible de savoir où le formulaire envoie.
+            //   Le token est masqué : seule la présence d'un access_token est notée.
+            Log.d(TAG, "page démarrée [$service] : ${url?.substringBefore("access_token=")?.take(200)}" +
+                if (url?.contains("access_token=") == true) " (+access_token)" else "")
             // 2026-06-19 v42 (user "Impossible de vous connecter / Ce navigateur
             //   ou cette application ne sont peut-être pas sécurisés") :
             //   Google détecte la WebView via JS (navigator.webdriver, plugins,
@@ -817,6 +821,16 @@ class LoginWebViewActivity : AppCompatActivity() {
         override fun onPageFinished(view: WebView?, url: String?) {
             super.onPageFinished(view, url)
             progress.visibility = View.GONE
+            Log.d(TAG, "page finie [$service] : ${url?.substringBefore("access_token=")?.take(200)}" +
+                if (url?.contains("access_token=") == true) " (+access_token)" else "")
+            // 2026-09-05 : RMC+ — dès qu'une page du site (hors parcours /auth/) est chargée,
+            //   on regarde si la session est posée. Si oui : enregistrée, activité fermée.
+            if (service == SERVICE_BFM && url != null &&
+                url.startsWith(com.streamflixreborn.streamflix.utils.RmcPlusAuth.SITE) &&
+                !url.contains("/auth/")
+            ) {
+                capturerSessionRmcPlus(depuisBouton = false)
+            }
             checkCookiesForToken(url)
             // 2026-06-21 (user "sur BFM le mail et mdp ne se sauvegardent
             //   pas, TF1 et M6 le font") : la page SSO BFM (sso.rmcbfmplay.com)
@@ -1169,7 +1183,55 @@ class LoginWebViewActivity : AppCompatActivity() {
      * n'a pas fonctionné. Tente d'abord l'URL courante (query+fragment),
      * puis injecte du JS pour chercher le JWT dans localStorage/sessionStorage.
      */
+    /**
+     * 2026-09-05 — RMC+ : la « connexion » n'est plus un token dans l'URL mais une SESSION
+     * posée en cookies sur www.rmcplus.fr par le retour OAuth (connect.rmcbfm.com). On lit
+     * les cookies de la WebView, on les vérifie avec `/api/auth/get-session`, et on les
+     * garde dans [com.streamflixreborn.streamflix.utils.RmcPlusAuth]. Appelée à chaque page
+     * finie sur www.rmcplus.fr (hors /auth/…) ET par le bouton « Terminer connexion ».
+     */
+    @Volatile private var verifRmcPlusEnCours = false
+    private fun capturerSessionRmcPlus(depuisBouton: Boolean) {
+        if (captured || verifRmcPlusEnCours) return
+        verifRmcPlusEnCours = true
+        val app = applicationContext
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            val ok = try {
+                com.streamflixreborn.streamflix.utils.RmcPlusAuth.capturerDepuisWebView(app)
+            } catch (e: Throwable) {
+                Log.w(TAG, "RMC+ : vérification session KO : ${e.message}"); false
+            }
+            verifRmcPlusEnCours = false
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (ok) {
+                    if (captured) return@runOnUiThread
+                    captured = true
+                    Log.i(TAG, "RMC+ : session capturée")
+                    Toast.makeText(this@LoginWebViewActivity, "✓ Connecté à RMC+", Toast.LENGTH_SHORT).show()
+                    try {
+                        com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.let { p ->
+                            com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(app, p)
+                        }
+                        com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    } catch (_: Throwable) {}
+                    setResult(RESULT_OK)
+                    finish()
+                } else if (depuisBouton) {
+                    Toast.makeText(
+                        this@LoginWebViewActivity,
+                        "⚠ Pas encore connecté à RMC+ — connecte-toi sur la page, puis réessaie",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+
     private fun forceSaveBfmToken() {
+        // 2026-09-05 : RMC+ → la session vit dans les cookies, plus dans l'URL/localStorage.
+        capturerSessionRmcPlus(depuisBouton = true)
+        if (true) return
         // D'abord tenter de récupérer le token depuis l'URL actuelle (query ou fragment)
         val currentUrl = webView.url ?: ""
         if (currentUrl.contains("access_token=")) {

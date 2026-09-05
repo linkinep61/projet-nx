@@ -127,7 +127,38 @@ class IptvFavoritesMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        arreterEpg()
         _binding = null
+    }
+
+    // ── EPG sur les jaquettes (copie de HomeMobileFragment) ─────────────────────────
+    private val epgHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val epgTicker = object : Runnable {
+        override fun run() {
+            rafraichirJaquettesEpg()
+            epgHandler.postDelayed(this, 30_000L)
+        }
+    }
+
+    private fun demarrerEpg() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                com.streamflixreborn.streamflix.utils.EpgStore
+                    .prechargerSiNecessaire(requireContext().applicationContext)
+            } catch (e: Exception) {
+                android.util.Log.w("IptvFavoritesMobile", "EPG : préchargement KO — ${e.message}")
+            }
+            rafraichirJaquettesEpg()
+        }
+        epgHandler.removeCallbacks(epgTicker)
+        epgHandler.postDelayed(epgTicker, 30_000L)
+    }
+
+    private fun arreterEpg() = epgHandler.removeCallbacks(epgTicker)
+
+    private fun rafraichirJaquettesEpg() {
+        val racine = _binding?.root ?: return
+        com.streamflixreborn.streamflix.utils.EpgJaquette.rafraichirTout(racine)
     }
 
     private fun initializeMiniPlayer() {
@@ -148,11 +179,16 @@ class IptvFavoritesMobileFragment : Fragment() {
             }
         }
 
+        // 2026-09-05 : guide des programmes sur la jaquette de la chaîne en cours (même
+        //   mécanique que TvShowsMobileFragment / HomeMobileFragment).
+        demarrerEpg()
+
         viewLifecycleOwner.lifecycleScope.launch {
             MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
                 if (_binding == null) return@collect
                 // 2026-06-22 : animation fluide — la liste se comprime
                 val wasVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
+                binding.root.post { rafraichirJaquettesEpg() }
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
                         if (wasVisible) {

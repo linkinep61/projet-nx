@@ -5183,7 +5183,7 @@ class PlayerTvFragment : Fragment() {
                         if (video.source.contains("/tt/master.m3u8", ignoreCase = true) || video.source.contains("/hlsmod/", ignoreCase = true))
                             com.streamflixreborn.streamflix.utils.SeekStreamPngDataSource.Factory(dataSourceFactory)
                         else dataSourceFactory
-                    val hlsExtractorFactory = androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory(
+                    val hlsExtractorFactory = com.streamflixreborn.streamflix.utils.media3.HlsExtractorFactoryAud(
                         androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
                             androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
                         true

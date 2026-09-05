@@ -73,6 +73,7 @@ object BackupRegistry {
     //   réglage utilisateur sans que personne ne s'en aperçoive.
     val BACKUP_SOURCES: List<Pair<String, String>> = listOf(
         "ONYX" to "ONYX (mes fichiers hébergés)",
+        "Partage" to "Partage de la communauté (fichiers des amis)",
         "Cloudstream" to "Cloudstream",
         "ok.ru" to "ok.ru (VF/VOSTFR)",
         "archive.org" to "archive.org (vieux films/séries)",
@@ -160,7 +161,7 @@ object BackupRegistry {
     //   VAGUE 2 : tout le reste (5 à 10 s), léger décalage.
     private val SOURCES_VAGUE_1 = setOf(
         // 2026-08-17 : mes propres fichiers passent devant tout le reste.
-        "ONYX",
+        "ONYX", "Partage",
         "NetMirror", "Vidzy", "Frembed", "Movix", "Embed", "Yablom",
         "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios", "Rutube",
     )
@@ -1277,6 +1278,22 @@ object BackupRegistry {
         //   Clé VIDARA_API_KEY vide ⇒ aucun appel réseau.
         launch { emit("ONYX") {
             VidaraLibrary.serveursPour(
+                tmdbId = resolvedTmdbId,
+                titresConnus = knownTitles,
+                annee = key.year,
+                estUnFilm = key.isMovie,
+                titrePrincipal = key.title,
+                dureeMinSec = runtimeSecondes,
+                dureeMaxSec = runtimeMaxSecondes,
+                saison = key.season,
+                episode = key.episode,
+            )
+        } }
+        // 2026-09-05 : « Partage de la communaute » (index public des amis, Vidara) —
+        //   memes fichiers que le dossier du TV Hub, proposes ici comme serveurs
+        //   « Partage · <prenom> ». Aucune cle : l'index est un GET public.
+        launch { emit("Partage") {
+            VidaraCommunaute.serveursPour(
                 tmdbId = resolvedTmdbId,
                 titresConnus = knownTitles,
                 annee = key.year,
