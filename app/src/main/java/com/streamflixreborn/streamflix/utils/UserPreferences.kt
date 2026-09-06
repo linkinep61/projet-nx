@@ -180,7 +180,13 @@ object UserPreferences {
     /** Sources décochées VOLONTAIREMENT — jamais réactivées par la migration. */
     private const val KEY_BACKUP_REFUSEES = "BACKUP_SOURCES_REFUSEES"
     private const val KEY_BACKUP_MIGRATION_V = "BACKUP_MIGRATION_V"
-    private const val CUR_BACKUP_MIGRATION = 16 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime ; v13 : ok.ru + archive.org ; v14 : Rutube ; v15 : Purstream ; v16 : ONYX)
+    // ⚠ 2026-09-06 (user : « sur mon Honor, pas de serveur Vegeta sur Les Anges alors que sur
+    //   l'Oppo il y en avait ») : j'avais ajouté « Vegeta VOD » à BACKUP_SOURCES SANS bumper
+    //   cette constante. Sur un appareil où l'utilisateur a déjà enregistré ses sources
+    //   (set « actives » non nul, migration déjà à 16), la nouvelle source n'y est pas →
+    //   isBackupSourceEnabled renvoie false → aucun serveur. L'Oppo (prefs vierges) passait
+    //   par le « set nul → true ». TOUJOURS bumper ici quand on ajoute une source.
+    private const val CUR_BACKUP_MIGRATION = 17 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime ; v13 : ok.ru + archive.org ; v14 : Rutube ; v15 : Purstream ; v16 : ONYX ; v17 : Partage + Vegeta VOD)
 
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :
