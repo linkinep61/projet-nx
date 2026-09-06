@@ -366,10 +366,12 @@ object VegetaVod {
         }
     }
 
+    // 2026-09-06 (user : « on décrit pas quel serveur on pioche, tu mets serveur 1, serveur 2,
+    //   etc. ») : libellés numérotés dans l'ordre de la liste, jamais le numéro du panel.
     fun serveursFilm(f: Film): List<Video.Server> =
-        f.sources.mapNotNull { (pos, id, ext) -> serveur(pos, "movie", id, ext, "Vegeta · serveur $pos") }
+        f.sources.mapIndexedNotNull { i, (pos, id, ext) -> serveur(pos, "movie", id, ext, "Vegeta · serveur ${i + 1}") }
 
-    fun serveurEpisode(pos: Int, ep: Episode, nom: String = "Vegeta · serveur $pos"): Video.Server? =
+    fun serveurEpisode(pos: Int, ep: Episode, nom: String = "Vegeta · serveur 1"): Video.Server? =
         serveur(pos, "series", ep.id, ep.ext, nom)
 
     fun mimeDe(ext: String): String = when (ext.lowercase()) {
@@ -457,7 +459,7 @@ object VegetaVod {
                 if (out.size >= 4) break
                 val eps = try { episodes(pos, sid) } catch (e: Exception) { null } ?: continue
                 val ep = eps[saison]?.firstOrNull { it.num == episode } ?: continue
-                serveurEpisode(pos, ep)?.let { out += it }
+                serveurEpisode(pos, ep, "Vegeta · serveur ${out.size + 1}")?.let { out += it }
             }
         }
         if (out.isNotEmpty()) Log.i(TAG, "backup série « ${titresConnus.firstOrNull()} » S${saison}E$episode : ${out.size} serveur(s)")
@@ -480,7 +482,7 @@ object VegetaVod {
                 if (out.size >= 3) return out
                 val eps = try { episodes(pos, sid) } catch (e: Exception) { null } ?: continue
                 val ep = eps[saison]?.firstOrNull { it.num == episode } ?: continue
-                serveurEpisode(pos, ep, "Vegeta (secours) · $pos")?.let { out += it }
+                serveurEpisode(pos, ep, "Vegeta (secours) · serveur ${out.size + 1}")?.let { out += it }
             }
         }
         if (out.isNotEmpty()) Log.i(TAG, "secours « $titre » S${saison}E$episode : ${out.size} serveur(s)")

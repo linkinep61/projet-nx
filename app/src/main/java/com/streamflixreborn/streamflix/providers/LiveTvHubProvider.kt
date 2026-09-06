@@ -2460,7 +2460,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     if (vv.indexSiCharge() == null) runCatching { vv.index() }
                     val url = if (parts[1] == "movie") vv.urlFilm(pos, num, parts[3])
                               else vv.urlEpisode(pos, num, parts[3])
-                    return listOfNotNull(url?.let { Video.Server(id = id, name = "Vegeta · serveur $pos", src = it) })
+                    // 2026-09-06 : libellé neutre (le numéro du panel n'est pas affiché, cf. VegetaVod.serveursFilm).
+                    return listOfNotNull(url?.let { Video.Server(id = id, name = "Vegeta · serveur 1", src = it) })
                 }
                 return emptyList()
             }
