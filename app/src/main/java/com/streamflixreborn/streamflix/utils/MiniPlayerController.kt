@@ -372,6 +372,9 @@ object MiniPlayerController {
     private const val HOST_FAIL_THRESHOLD = 2
 
     private fun extractHost(url: String): String {
+        // 2026-09-06 : RénéVéo — ses sources partagent un seul hôte, chaque proxy compte à part
+        //   (sinon une source morte faisait sauter la bonne, cf. ReneveoTv.cleHoteSiReneveo).
+        ReneveoTv.cleHoteSiReneveo(url)?.let { return it }
         return try { java.net.URI(url).host ?: "" } catch (_: Exception) { "" }
     }
 

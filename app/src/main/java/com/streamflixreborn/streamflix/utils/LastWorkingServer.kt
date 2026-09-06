@@ -64,7 +64,9 @@ object HotesEnEchec {
     private const val OUBLI_MS = 15 * 60 * 1000L
     private val echecs = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
 
-    private fun hote(url: String): String? = try {
+    // 2026-09-06 : RénéVéo — un seul hôte pour toutes ses sources, chaque proxy compte à part
+    //   (cf. ReneveoTv.cleHoteSiReneveo).
+    private fun hote(url: String): String? = ReneveoTv.cleHoteSiReneveo(url) ?: try {
         java.net.URI(url).host?.lowercase()
     } catch (_: Throwable) { null }
 
