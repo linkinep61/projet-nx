@@ -411,6 +411,60 @@ object VegetaVod {
     }
 
     /**
+     * 2026-09-06 (user : « sur Movix, Les Anges de la téléréalité, les serveurs Vegeta ne
+     * s'affichent pas sur les saisons ») — SOURCE DE BACKUP GÉNÉRALE (BackupRegistry, emit
+     * « Vegeta VOD ») : pour n'importe quel provider, on propose le film / l'épisode s'il existe
+     * chez Vegeta. Rattachement : identifiant TMDB d'abord (les panels le fournissent), sinon
+     * titre normalisé exact parmi les titres connus (+ année ±1 pour un film), sinon préfixe
+     * de titre ≥ 6 caractères pour une série (« Les Anges » ⊂ « Les Anges de la téléréalité »).
+     */
+    suspend fun serveursPour(
+        tmdbId: String?,
+        titresConnus: Collection<String>,
+        annee: Int?,
+        estUnFilm: Boolean,
+        saison: Int = 0,
+        episode: Int = 0,
+    ): List<Video.Server> {
+        val idx = try { index() } catch (e: Exception) { null } ?: return emptyList()
+        val id = tmdbId?.trim()?.toIntOrNull() ?: 0
+        val cles = titresConnus.map { normaliser(it) }.filter { it.length >= 3 }.toSet()
+        if (estUnFilm) {
+            var films = if (id > 0) idx.films.filter { it.tmdb == id } else emptyList()
+            if (films.isEmpty() && cles.isNotEmpty()) {
+                films = idx.films.filter { f ->
+                    normaliser(f.titre) in cles &&
+                        (annee == null || annee <= 0 || f.annee <= 0 || kotlin.math.abs(f.annee - annee) <= 1)
+                }
+            }
+            val out = films.take(2).flatMap { serveursFilm(it) }
+            if (out.isNotEmpty()) Log.i(TAG, "backup film « ${titresConnus.firstOrNull()} » (tmdb $tmdbId) : ${out.size} serveur(s)")
+            return out
+        }
+        if (saison <= 0 || episode <= 0) return emptyList()
+        var series = if (id > 0) idx.series.filter { it.tmdb == id } else emptyList()
+        if (series.isEmpty() && cles.isNotEmpty()) series = idx.series.filter { it.cle in cles }
+        if (series.isEmpty()) {
+            series = cles.filter { it.length >= 6 }
+                .flatMap { k -> idx.series.filter { s -> s.cle.length >= 6 && (k.startsWith(s.cle) || s.cle.startsWith(k)) } }
+                .distinctBy { it.id }
+                .sortedByDescending { it.cle.length }
+                .take(3)
+        }
+        val out = ArrayList<Video.Server>()
+        for (s in series) {
+            for ((pos, sid) in s.sources) {
+                if (out.size >= 4) break
+                val eps = try { episodes(pos, sid) } catch (e: Exception) { null } ?: continue
+                val ep = eps[saison]?.firstOrNull { it.num == episode } ?: continue
+                serveurEpisode(pos, ep)?.let { out += it }
+            }
+        }
+        if (out.isNotEmpty()) Log.i(TAG, "backup série « ${titresConnus.firstOrNull()} » S${saison}E$episode : ${out.size} serveur(s)")
+        return out
+    }
+
+    /**
      * SECOURS d'un épisode replay (TF1+/M6+) : mêmes titre, saison, épisode chez Vegeta.
      * Rend jusqu'à 3 serveurs, vide si rien (l'appelant garde alors ses serveurs officiels).
      */
