@@ -794,6 +794,39 @@ object LiveHubFolderDialog {
             }
             return
         }
+        // 2026-09-06 (user : « un nouveau dossier à côté de Stream4Free », reneveo.store) :
+        //   liste chargée au clic (Supabase du site, clé lue dans la page), affichage immédiat
+        //   si déjà en cache. Aucune pub à passer : le blocage du site est côté navigateur
+        //   seulement (cf. l'en-tête de ReneveoTv).
+        if (folderKey == com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY) {
+            val rv = com.streamflixreborn.streamflix.utils.ReneveoTv
+            // Liste embarquée (assets) ou déjà en cache → affichage immédiat ; les nouveautés
+            //   arrivent en fond (Supabase) pour la prochaine ouverture.
+            val deja = rv.categories(rv.chainesSiDejaChargees())
+            rv.rafraichirEnFond()
+            if (deja.isNotEmpty()) {
+                displayCategories(ctx, folderName, deja, onChannelSelected)
+                return
+            }
+            android.widget.Toast.makeText(ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT).show()
+            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            scope.launch {
+                val cats = try {
+                    rv.categories(rv.chaines())
+                } catch (t: Throwable) {
+                    android.util.Log.w("LiveHubFolderDialog", "RénéVéo KO : ${t.message}")
+                    emptyList()
+                }
+                withContext(Dispatchers.Main) {
+                    if (cats.isEmpty()) {
+                        android.widget.Toast.makeText(ctx, "$folderName indisponible — réessaie", android.widget.Toast.LENGTH_LONG).show()
+                    } else {
+                        displayCategories(ctx, folderName, cats, onChannelSelected)
+                    }
+                }
+            }
+            return
+        }
         // 2026-07-10 (user "supprime la version de base") : ancienne branche Stream4Free `stream4`
         //   (résolveur OkHttp + git) RETIRÉE. Stream4Free = maintenant la clé `stream4cf` (version CF).
         // 2026-07-10 (user "supprime LumiChat partout") : branche lazy-fetch LumiChat RETIRÉE.

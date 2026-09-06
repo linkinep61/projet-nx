@@ -1119,6 +1119,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   LE dossier Stream4Free. L'ancienne version de base (résolveur OkHttp + git) est retirée.
             //   Clé interne `stream4cf`/prefix `stream4cf://` conservés (invisibles), affichage = « Stream4Free ».
             FolderDef("stream4cf", "Stream4Free", Regex("^Stream4Free - .*")),
+            // 2026-09-06 (user : « un nouveau dossier à côté de Stream4Free », site reneveo.store) :
+            //   ~40 chaînes FR, liste Supabase + lecture avec Referer, cf. ReneveoTv. Contenu
+            //   chargé au clic (LiveHubFolderDialog, clé `reneveo`), carte toujours affichée.
+            FolderDef(com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "RénéVéo", Regex("^RénéVéo - .*")),
             // 2026-07-08 : dossier NetMirror TV hub MIS DE CÔTÉ (archivé C:\Users\guill\Desktop\ONYX).
             //   Lecture WebView pas finalisée (CORS/hls.js). Provider natif NetMirror = OK par ailleurs.
             FolderDef("documentaire", "Documentaire", Regex("^Documentaire$")),
@@ -1232,7 +1236,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf") +
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY) +
             // ⚠ 2026-08-17 — CORRIGÉ (user « le dossier série/film n'est pas
             //   stable, regarde pourquoi il disparaît »).
             //   « Film / série » était VOLONTAIREMENT exclu d'ici, au motif
@@ -1270,6 +1274,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             // 2026-06-27 : logo dossier Musique (note de musique).
             "musique"        to "https://cdn-icons-png.flaticon.com/512/727/727218.png",
             "stream4cf"      to "https://www.stream4free.tv/images/logos4f.png",
+            // 2026-09-06 : dossier RénéVéo (favicon du site).
+            com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.ReneveoTv.LOGO,
             // 2026-08-17 : dossier des fichiers perso (icone bibliotheque).
             "ma_bibliotheque" to "https://cdn-icons-png.flaticon.com/512/2991/2991108.png",
         )
@@ -1839,6 +1845,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     // Fallback vers le générique ci-dessous
                 }
             }
+        }
+        // 2026-09-06 : chaîne RénéVéo → fiche synthétique « En Direct » (cf. ReneveoTv).
+        if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(id)) {
+            return com.streamflixreborn.streamflix.utils.ReneveoTv.fiche(id)
         }
         // 2026-06-24 : FAST channel (= Samsung TV+, Pluto TV, Plex TV, LG Channels, etc.)
         //   ID = "livehub::fast::<hash>" → TvShow synthétique "En Direct".
@@ -2563,6 +2573,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
             return listOf(officiel) + secoursVegeta(id, null)
         }
         // 2026-07-10 (user "supprime LumiChat partout") : branche LumiChat lumimulti RETIRÉE.
+        // 2026-09-06 : chaîne RénéVéo → ses 1 à 3 sources, « RénéVéo · serveur n » (cf. ReneveoTv).
+        //   La liste est rechargée si besoin (favori rouvert après redémarrage).
+        if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(id)) {
+            return com.streamflixreborn.streamflix.utils.ReneveoTv.serveurs(id)
+        }
         // 2026-06-24 : FAST channel = id "livehub::fast::<hash>"
         //   → retourne l'URL stream directe depuis fastChannelUrls map.
         if (id.startsWith("livehub::fast::")) {
@@ -2789,6 +2804,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
     private val famillesMultiLiveOk = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-09-06 : RénéVéo → HLS direct, Referer du site obligatoire sur ses proxys (cf. ReneveoTv.video).
+        if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(server.id)) {
+            return com.streamflixreborn.streamflix.utils.ReneveoTv.video(server)
+        }
         // 2026-09-05 : Vegeta VOD → URL Xtream directe (mkv/mp4), UA navigateur mobile.
         if (server.id.startsWith(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SRC)) {
             return com.streamflixreborn.streamflix.utils.VegetaVod.video(server)
