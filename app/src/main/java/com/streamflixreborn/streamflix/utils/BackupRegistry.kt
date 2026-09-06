@@ -74,6 +74,7 @@ object BackupRegistry {
     val BACKUP_SOURCES: List<Pair<String, String>> = listOf(
         "ONYX" to "ONYX (mes fichiers hébergés)",
         "Partage" to "Partage de la communauté (fichiers des amis)",
+        "Vegeta VOD" to "Vegeta VOD (films/séries FR des serveurs Vegeta)",
         "Cloudstream" to "Cloudstream",
         "ok.ru" to "ok.ru (VF/VOSTFR)",
         "archive.org" to "archive.org (vieux films/séries)",
@@ -161,7 +162,7 @@ object BackupRegistry {
     //   VAGUE 2 : tout le reste (5 à 10 s), léger décalage.
     private val SOURCES_VAGUE_1 = setOf(
         // 2026-08-17 : mes propres fichiers passent devant tout le reste.
-        "ONYX", "Partage",
+        "ONYX", "Partage", "Vegeta VOD",
         "NetMirror", "Vidzy", "Frembed", "Movix", "Embed", "Yablom",
         "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios", "Rutube",
     )
@@ -1301,6 +1302,21 @@ object BackupRegistry {
                 titrePrincipal = key.title,
                 dureeMinSec = runtimeSecondes,
                 dureeMaxSec = runtimeMaxSecondes,
+                saison = key.season,
+                episode = key.episode,
+            )
+        } }
+        // 2026-09-06 (user : « sur Movix, Les Anges de la téléréalité, les serveurs Vegeta ne
+        //   s'affichent pas sur les saisons ») : films + séries FR des panels Vegeta (index
+        //   nx-data, cf. VegetaVod) proposés comme serveurs « Vegeta VOD · serveur N » sur
+        //   n'importe quel provider. Rattachement par identifiant TMDB, sinon titre exact,
+        //   sinon préfixe de titre pour les séries. URL directe, lue par VegetaVod.video.
+        launch { emit("Vegeta VOD") {
+            VegetaVod.serveursPour(
+                tmdbId = resolvedTmdbId,
+                titresConnus = knownTitles,
+                annee = key.year,
+                estUnFilm = key.isMovie,
                 saison = key.season,
                 episode = key.episode,
             )
@@ -2457,6 +2473,9 @@ object BackupRegistry {
             // 2026-08-11 : archive.org — `src` EST déjà l'URL du fichier (stable, pas de
             //   signature ni d'expiration). Le getVideo ne fait qu'y poser le bon type MIME.
             "archive.org" -> com.streamflixreborn.streamflix.providers.ArchiveOrgProvider.getVideo(server)
+            // 2026-09-06 : Vegeta VOD — `src` est l'URL Xtream directe (mkv/mp4), l'extension
+            //   est le dernier segment de l'id d'origine (cf. VegetaVod.video).
+            "Vegeta VOD" -> VegetaVod.video(orig)
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
                 dynamicBackups[source]?.let { dyn ->
