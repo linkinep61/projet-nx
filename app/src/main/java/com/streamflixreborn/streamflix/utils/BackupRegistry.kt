@@ -74,7 +74,8 @@ object BackupRegistry {
     val BACKUP_SOURCES: List<Pair<String, String>> = listOf(
         "ONYX" to "ONYX (mes fichiers hébergés)",
         "Partage" to "Partage de la communauté (fichiers des amis)",
-        "Vegeta VOD" to "Vegeta VOD (films/séries FR des serveurs Vegeta)",
+        "Ciné Films" to "Ciné Films (films et séries FR)",
+        "Tokyvideo" to "Tokyvideo (vieilles séries et films en VF)",
         "Cloudstream" to "Cloudstream",
         "ok.ru" to "ok.ru (VF/VOSTFR)",
         "archive.org" to "archive.org (vieux films/séries)",
@@ -162,7 +163,7 @@ object BackupRegistry {
     //   VAGUE 2 : tout le reste (5 à 10 s), léger décalage.
     private val SOURCES_VAGUE_1 = setOf(
         // 2026-08-17 : mes propres fichiers passent devant tout le reste.
-        "ONYX", "Partage", "Vegeta VOD",
+        "ONYX", "Partage", "Ciné Films", "Tokyvideo",
         "NetMirror", "Vidzy", "Frembed", "Movix", "Embed", "Yablom",
         "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios", "Rutube",
     )
@@ -1311,9 +1312,22 @@ object BackupRegistry {
         //   nx-data, cf. VegetaVod) proposés comme serveurs « Vegeta VOD · serveur N » sur
         //   n'importe quel provider. Rattachement par identifiant TMDB, sinon titre exact,
         //   sinon préfixe de titre pour les séries. URL directe, lue par VegetaVod.video.
-        launch { emit("Vegeta VOD") {
+        launch { emit("Ciné Films") {
             VegetaVod.serveursPour(
                 tmdbId = resolvedTmdbId,
+                titresConnus = knownTitles,
+                annee = key.year,
+                estUnFilm = key.isMovie,
+                saison = key.season,
+                episode = key.episode,
+            )
+        } }
+        // 2026-09-06 (user : « un site avec des vieilles séries… juste un backup ») : Tokyvideo —
+        //   Columbo, X-Files, Code Quantum, Magnum, Goldorak… + collections de films, index
+        //   nx-data (cf. TokyVideo). Rattachement par titre + année (pas de TMDB chez eux),
+        //   MP4 signé lu au clic par TokyVideo.video.
+        launch { emit("Tokyvideo") {
+            TokyVideo.serveursPour(
                 titresConnus = knownTitles,
                 annee = key.year,
                 estUnFilm = key.isMovie,
@@ -2475,7 +2489,9 @@ object BackupRegistry {
             "archive.org" -> com.streamflixreborn.streamflix.providers.ArchiveOrgProvider.getVideo(server)
             // 2026-09-06 : Vegeta VOD — `src` est l'URL Xtream directe (mkv/mp4), l'extension
             //   est le dernier segment de l'id d'origine (cf. VegetaVod.video).
-            "Vegeta VOD" -> VegetaVod.video(orig)
+            "Ciné Films" -> VegetaVod.video(orig)
+            // 2026-09-06 : Tokyvideo — page de la vidéo → MP4 signé (cf. TokyVideo.video).
+            "Tokyvideo" -> TokyVideo.video(orig)
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
                 dynamicBackups[source]?.let { dyn ->

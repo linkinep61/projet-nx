@@ -1145,6 +1145,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   Placé AVANT le catch-all, sinon rien ne le distinguerait.
             // Motif SANS ACCENT (cf. l'avertissement dans VoeLibrary.sections()) :
             //   le libellé affiché peut en contenir, le motif d'appariement non.
+            // 2026-09-06 (user : « inverser mon dossier Film / série et celui de Vegeta, le sien
+            //   est mille fois mieux ; renommer en Ciné Films, plus vague ») : la carte de
+            //   premier niveau devient « Ciné Films » (clé interne `vegetavod` conservée), et
+            //   « Film / série » descend dans Autres Replays (cf. nestedInAutresReplay +
+            //   LiveHubFolderDialog). Aucune section ne porte ce préfixe : contenu au clic.
+            FolderDef("vegetavod", "Ciné Films", Regex("^Ciné Films - .*$")),
             FolderDef("ma_bibliotheque", "Film / série", Regex("^ONYX - .*$")),
             FolderDef("autres_replay", "Autres Replays", Regex("^Replay .*|^Généraliste$")),
         )
@@ -1236,7 +1242,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY) +
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "vegetavod") +
             // ⚠ 2026-08-17 — CORRIGÉ (user « le dossier série/film n'est pas
             //   stable, regarde pourquoi il disparaît »).
             //   « Film / série » était VOLONTAIREMENT exclu d'ici, au motif
@@ -1278,11 +1284,14 @@ object LiveTvHubProvider : Provider, IptvProvider {
             com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.ReneveoTv.LOGO,
             // 2026-08-17 : dossier des fichiers perso (icone bibliotheque).
             "ma_bibliotheque" to "https://cdn-icons-png.flaticon.com/512/2991/2991108.png",
+            // 2026-09-06 : carte « Ciné Films » (clap de cinéma).
+            "vegetavod" to "https://cdn-icons-png.flaticon.com/512/1179/1179069.png",
         )
         // 2026-06-27 (user "mets Rakuten TV, Sony One et Sport dans Autres Replays") :
         //   ces 3 dossiers ne s'affichent plus en haut du TV Hub ; ils deviennent
         //   des sous-dossiers du dialog "Autres Replays" (cf LiveHubFolderDialog).
-        val nestedInAutresReplay = setOf("sport", "rakuten_tv", "sony_one")
+        // 2026-09-06 : « Film / série » (ma_bibliotheque) y descend aussi, à la place de Ciné Films.
+        val nestedInAutresReplay = setOf("sport", "rakuten_tv", "sony_one", "ma_bibliotheque")
         val folderShows = defs.mapNotNull { def ->
             if (def.key in nestedInAutresReplay) return@mapNotNull null
             val secs = folderContents[def.key]
@@ -1596,7 +1605,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val vv = com.streamflixreborn.streamflix.utils.VegetaVod
             val f = vv.filmDe(id.removePrefix(vv.PREFIX_FILM))
                 ?: run { runCatching { vv.index() }; vv.filmDe(id.removePrefix(vv.PREFIX_FILM)) }
-            val titre = f?.let { vv.titreFilm(it) } ?: "Vegeta VOD"
+            val titre = f?.let { vv.titreFilm(it) } ?: "Ciné Films"
             return TvShow(id = id, title = titre).copy(
                 poster = f?.img, banner = f?.img,
                 seasons = listOf(
@@ -1611,7 +1620,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val vv = com.streamflixreborn.streamflix.utils.VegetaVod
             val cle = id.removePrefix(vv.PREFIX_SERIE)
             val s = vv.serieDe(cle) ?: run { runCatching { vv.index() }; vv.serieDe(cle) }
-                ?: return TvShow(id = id, title = "Vegeta VOD").apply { providerName = "TV Hub" }
+                ?: return TvShow(id = id, title = "Ciné Films").apply { providerName = "TV Hub" }
             // Saisons = union des serveurs (le premier qui a la saison gagne, les autres
             //   servent de secours dans getServers).
             val saisons = java.util.TreeMap<Int, MutableMap<Int, Pair<Int, com.streamflixreborn.streamflix.utils.VegetaVod.Episode>>>()
@@ -2471,7 +2480,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     val url = if (parts[1] == "movie") vv.urlFilm(pos, num, parts[3])
                               else vv.urlEpisode(pos, num, parts[3])
                     // 2026-09-06 : libellé neutre (le numéro du panel n'est pas affiché, cf. VegetaVod.serveursFilm).
-                    return listOfNotNull(url?.let { Video.Server(id = id, name = "Vegeta · serveur 1", src = it) })
+                    return listOfNotNull(url?.let { Video.Server(id = id, name = "Ciné Films · serveur 1", src = it) })
                 }
                 return emptyList()
             }

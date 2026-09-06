@@ -227,9 +227,10 @@ class HomeMobileFragment : Fragment() {
         //   est actif → quand on revient du fullscreen player, l'activity n'a
         //   pas été recréée et le layout mini player n'est pas réappliqué.
         //   Re-appliquer manuellement la bonne géométrie selon l'orientation.
-        if (binding.miniPlayerContainer.visibility == View.VISIBLE) {
-            try { updateMiniPlayerLayout(resources.configuration.orientation) } catch (_: Throwable) {}
-        }
+        // 2026-09-06 : toujours (même conteneur caché) + revérification après layout, cf.
+        //   onConfigurationChanged (mini-lecteur « tout en longueur sur la droite » en portrait).
+        try { updateMiniPlayerLayout(orientationReelle(resources.configuration.orientation)) } catch (_: Throwable) {}
+        reajusterMiniPlayerApresLayout()
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         // If the player was released (e.g. went to fullscreen), re-init and replay
@@ -274,9 +275,35 @@ class HomeMobileFragment : Fragment() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        if (_binding != null && binding.miniPlayerContainer.visibility == View.VISIBLE) {
+        // 2026-09-06 (user : « en position debout, le mini-lecteur se met parfois tout en
+        //   longueur sur la droite, ça casse l'affichage des dossiers, obligé de quitter le
+        //   provider et revenir ») : c'est la géométrie PAYSAGE (1/3 à droite, pleine hauteur)
+        //   restée appliquée en portrait. Deux failles : (1) on ne réappliquait la géométrie que
+        //   si le conteneur était VISIBLE — une rotation pendant que le mini est caché
+        //   (retour du grand lecteur qui force le paysage, dialogue de dossier ouvert) était
+        //   perdue ; (2) au retour du grand lecteur, `resources.configuration` peut encore
+        //   dire « paysage » alors que l'écran repasse debout juste après. On applique donc
+        //   TOUJOURS, puis on revérifie après la passe de layout avec la vraie taille de la vue.
+        if (_binding != null) {
             updateMiniPlayerLayout(newConfig.orientation)
+            reajusterMiniPlayerApresLayout()
         }
+    }
+
+    /** Orientation d'après la taille réelle de la vue racine (fiable une fois le layout passé). */
+    private fun orientationReelle(defaut: Int): Int {
+        val r = _binding?.root ?: return defaut
+        if (r.width <= 0 || r.height <= 0) return defaut
+        return if (r.width > r.height) Configuration.ORIENTATION_LANDSCAPE else Configuration.ORIENTATION_PORTRAIT
+    }
+
+    /** Revérifie la géométrie du mini-lecteur après la passe de layout (auto-réparation). */
+    private fun reajusterMiniPlayerApresLayout() {
+        val root = _binding?.root ?: return
+        root.postDelayed({
+            if (_binding == null || !isAdded) return@postDelayed
+            try { updateMiniPlayerLayout(orientationReelle(resources.configuration.orientation)) } catch (_: Throwable) {}
+        }, 400)
     }
 
 

@@ -360,6 +360,12 @@ object LiveHubFolderDialog {
             show(ctx, "vidaradir_", folderName, onChannelSelected)
             return
         }
+        // 2026-09-06 (user : « inverser Film / série et Vegeta, renommer en Ciné Films ») :
+        //   la carte de premier niveau « Ciné Films » ouvre la racine Films / Séries ci-dessous.
+        if (folderKey == "vegetavod") {
+            show(ctx, "vegetavod_", folderName, onChannelSelected)
+            return
+        }
         // 2026-09-05 : dossier « Vegeta VOD » (films / séries FR des serveurs Vegeta,
         //   index publié par nx-data — cf. VegetaVod). Chemins :
         //   "" → Films / Séries ; "films" → catégories ; "films/<cat>" → jaquettes ;
@@ -386,7 +392,7 @@ object LiveHubFolderDialog {
                 afficherNiveau(ctx, folderName, immediat, onChannelSelected)
                 return
             }
-            val att = android.widget.Toast.makeText(ctx, "Chargement de Vegeta VOD…", android.widget.Toast.LENGTH_SHORT)
+            val att = android.widget.Toast.makeText(ctx, "Chargement de Ciné Films…", android.widget.Toast.LENGTH_SHORT)
             att.show()
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
                 runCatching { vv.index() }
@@ -395,7 +401,7 @@ object LiveHubFolderDialog {
                 val items = niveau()
                 if (items.isEmpty()) {
                     android.widget.Toast.makeText(
-                        ctx, "Vegeta VOD indisponible pour l'instant (index vide)",
+                        ctx, "Ciné Films indisponible pour l'instant (index vide)",
                         android.widget.Toast.LENGTH_SHORT).show()
                     return@launch
                 }
@@ -1550,8 +1556,13 @@ object LiveHubFolderDialog {
         // 2026-09-05 (user, retour Telegram « Vegeta TV serveur 31 a des films et des
         //   séries ») : dossier « Vegeta VOD » — films + séries FR des panels Vegeta, index
         //   nx-data (cf. VegetaVod). Entrée TOUJOURS présente, contenu chargé au clic.
-        folders.add("\uD83C\uDFAC Vegeta VOD" to {
-            show(ctx, "vegetavod_", "Vegeta VOD", onChannelSelected)
+        // 2026-09-06 (user : « inverser mon dossier Film / série et celui de Vegeta, le sien est
+        //   mille fois mieux ; renommer en Ciné Films ») : Vegeta VOD est monté en carte de
+        //   premier niveau du TV Hub sous le nom « Ciné Films » (clé `vegetavod`), et c'est
+        //   « Film / série » (bibliothèque Vidara) qui prend sa place ici.
+        if (com.streamflixreborn.streamflix.utils.VidaraLibrary.disponible)
+        folders.add("\uD83D\uDCDA Film / série" to {
+            show(ctx, "ma_bibliotheque", "Film / série", onChannelSelected)
         })
         com.streamflixreborn.streamflix.utils.VegetaVod.prechauffer()
 

@@ -126,6 +126,15 @@ class TvShowsMobileFragment : Fragment() {
         val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
         (binding.rvTvShows.layoutManager as? GridLayoutManager)?.spanCount = spanCount
         updateMiniPlayerLayout(newConfig.orientation)
+        // 2026-09-06 : revérification après la passe de layout avec la vraie taille de la vue
+        //   (mini-lecteur « tout en longueur sur la droite » en portrait — cf. HomeMobileFragment).
+        binding.root.postDelayed({
+            if (_binding == null || !isAdded) return@postDelayed
+            val r = binding.root
+            val reelle = if (r.width > 0 && r.height > 0) (if (r.width > r.height) Configuration.ORIENTATION_LANDSCAPE else Configuration.ORIENTATION_PORTRAIT)
+                         else resources.configuration.orientation
+            try { updateMiniPlayerLayout(reelle) } catch (_: Throwable) {}
+        }, 400)
     }
 
     override fun onDestroyView() {
