@@ -2032,6 +2032,33 @@ object LiveTvHubProvider : Provider, IptvProvider {
     // 2026-09-05 : cache équivalent pour les séries Vegeta VOD
     private val vegetaSeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
 
+    /**
+     * 2026-09-07 : tous les panels Ciné Films qui ont CET épisode (jusqu'à 4 serveurs).
+     * [idEpisode] = identifiant fabriqué par getTvShow (panel d'origine = [posOrigine]),
+     * [premier] = le serveur de ce panel, gardé en tête. Retrouve la série et la saison
+     * dans [vegetaSeasonEpisodesCache] ; null si l'épisode n'y est pas (fiche jamais
+     * ouverte dans cette session) — l'appelant garde alors le serveur unique.
+     */
+    private suspend fun serveursEpisodeCineFilms(idEpisode: String, posOrigine: Int, premier: Video.Server): List<Video.Server>? {
+        val vv = com.streamflixreborn.streamflix.utils.VegetaVod
+        val entree = vegetaSeasonEpisodesCache.entries.firstOrNull { (_, eps) -> eps.any { it.id == idEpisode } } ?: return null
+        val charge = entree.key.removePrefix(vv.PREFIX_SAISON)
+        val cleSerie = charge.substringBeforeLast("::")
+        val saison = charge.substringAfterLast("::").toIntOrNull() ?: return null
+        val numEp = entree.value.firstOrNull { it.id == idEpisode }?.number ?: return null
+        val s = vv.serieDe(cleSerie) ?: return null
+        val out = arrayListOf(premier)
+        for ((pos, sid) in s.sources) {
+            if (pos == posOrigine) continue
+            if (out.size >= 4) break
+            val eps = try { vv.episodes(pos, sid) } catch (e: Exception) { null } ?: continue
+            val ep = eps[saison]?.firstOrNull { it.num == numEp } ?: continue
+            vv.serveurEpisode(pos, ep, "Ciné Films · serveur ${out.size + 1}")?.let { out += it }
+        }
+        if (out.size > 1) Log.i(TAG, "Ciné Films S${saison}E$numEp « $cleSerie » : ${out.size} serveurs")
+        return out
+    }
+
     // ====== 2026-06-19 : M6+ replay show parser ======
     private val M6_SERVICES = listOf(
         "m6replay", "w9replay", "6terreplay", "gulli", "tevareplay", "parispremierereplay"
@@ -2470,6 +2497,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     ?: return emptyList()
                 return vv.serveursFilm(f)
             }
+            // 2026-09-07 (user « là il n'y a plus du tout de serveur ») : « Regarder maintenant »
+            //   sur la fiche d'une SÉRIE Ciné Films envoie l'identifiant de la série au lecteur,
+            //   qui n'avait aucun serveur pour ça (3 tentatives vides). On résout vers le premier
+            //   épisode de la première saison — la fiche (getTvShow) remplit au passage le cache
+            //   des saisons dont se sert serveursEpisodeCineFilms.
+            if (id.startsWith(vv.PREFIX_SERIE)) {
+                val premierEpisode = runCatching {
+                    getTvShow(id).seasons.minByOrNull { it.number }?.episodes?.minByOrNull { it.number }?.id
+                }.getOrNull()
+                if (premierEpisode != null && premierEpisode != id) return getServers(premierEpisode, videoType)
+                return emptyList()
+            }
             if (id.startsWith(vv.PREFIX_SRC)) {
                 // id = livehub::vegetavod::src::<pos>::<movie|series>::<id>::<ext>
                 val parts = id.removePrefix(vv.PREFIX_SRC).split("::")
@@ -2480,7 +2519,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     val url = if (parts[1] == "movie") vv.urlFilm(pos, num, parts[3])
                               else vv.urlEpisode(pos, num, parts[3])
                     // 2026-09-06 : libellé neutre (le numéro du panel n'est pas affiché, cf. VegetaVod.serveursFilm).
-                    return listOfNotNull(url?.let { Video.Server(id = id, name = "Ciné Films · serveur 1", src = it) })
+                    val premier = url?.let { Video.Server(id = id, name = "Ciné Films · serveur 1", src = it) }
+                    // 2026-09-07 (user « pourquoi un seul serveur sur une série alors qu'un film en a
+                    //   quatre ») : getTvShow garde, par épisode, le PREMIER panel qui l'a — les autres
+                    //   panels de la série (s.sources) étaient annoncés « en secours dans getServers »
+                    //   mais jamais interrogés. On retrouve la série et la saison via le cache que
+                    //   getTvShow remplit (seasonId = PREFIX_SAISON + cléSérie :: saison), puis on
+                    //   demande le même numéro d'épisode aux autres panels, comme le fait déjà la
+                    //   source de secours VegetaVod.serveursPour. Le panel d'origine reste en tête ;
+                    //   cache absent ou rien trouvé → comportement d'avant (serveur unique).
+                    if (parts[1] == "series" && premier != null) {
+                        val serveurs = runCatching { serveursEpisodeCineFilms(id, pos, premier) }.getOrNull()
+                        if (!serveurs.isNullOrEmpty()) return serveurs
+                    }
+                    return listOfNotNull(premier)
                 }
                 return emptyList()
             }
