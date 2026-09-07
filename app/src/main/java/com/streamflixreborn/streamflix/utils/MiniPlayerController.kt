@@ -378,6 +378,15 @@ object MiniPlayerController {
         return try { java.net.URI(url).host ?: "" } catch (_: Exception) { "" }
     }
 
+    /** 2026-09-07 : vrai si l'URL est un FICHIER vidéo progressif (Ciné Films, Tokyvideo,
+     *  Partage…) et non un flux live (m3u8/ts/mpd). Sert à adapter le chien de garde. */
+    private fun estFichierVod(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        val chemin = try { java.net.URI(url).path?.lowercase() ?: "" } catch (_: Exception) { url.substringBefore('?').lowercase() }
+        return chemin.endsWith(".mp4") || chemin.endsWith(".mkv") || chemin.endsWith(".avi") ||
+            chemin.endsWith(".webm") || chemin.endsWith(".mov")
+    }
+
     private fun recordHostFail(url: String) {
         val host = extractHost(url)
         if (host.isNotBlank()) {
@@ -1528,8 +1537,22 @@ object MiniPlayerController {
         //   donne 15s pour laisser le temps de démarrer. Sinon le default
         //   6s reste actif (= cas VOD multi-extracteurs où on peut basculer
         //   vite sur un autre serveur).
-        val effectiveWatchdogMs = if (availableServers.size <= 1) 15_000L
-            else BUFFERING_WATCHDOG_MS
+        // 2026-09-07 (user « dans Ciné Films certaines vidéos ne se lancent pas ») :
+        //   un FICHIER VOD (.mp4/.mkv de 1 Go, index `moov` en fin de fichier) demande
+        //   à ExoPlayer de lire l'en-tête, sauter à la fin par une requête Range,
+        //   télécharger 5 Mo d'index puis revenir au début — mesuré > 6 s sur le Oppo
+        //   pour un serveur parfaitement valide, que le chien de garde tuait. Un
+        //   fichier n'est pas un flux live : on lui laisse 15 s (mesuré sur le Oppo :
+        //   pistes trouvées à 7,5 s, lecture coupée à 12 s alors qu'elle allait
+        //   démarrer). Les serveurs morts restent écartés en < 1 s par l'erreur de
+        //   format (page HTML au lieu de la vidéo), donc ce délai ne coûte que sur un
+        //   serveur qui ne répond pas — et celui-là est ensuite relégué (HotesEnEchec).
+        val uriAtArm = try { player?.currentMediaItem?.localConfiguration?.uri?.toString() } catch (_: Throwable) { null }
+        val effectiveWatchdogMs = when {
+            availableServers.size <= 1 -> 15_000L
+            estFichierVod(uriAtArm) -> 15_000L
+            else -> BUFFERING_WATCHDOG_MS
+        }
         bufferingWatchdogJob = scope.launch {
             delay(effectiveWatchdogMs)
             // Only fire if we're still on the same channel + same server still buffering.
@@ -1539,6 +1562,13 @@ object MiniPlayerController {
                 val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
                 if (!playingUri.isNullOrBlank()) {
                     recordHostFail(playingUri)
+                    // 2026-09-07 : un hôte VOD qui ne répond pas est retenu comme fautif au
+                    //   même titre qu'un hôte en erreur (onPlayerError le faisait déjà, pas
+                    //   le chien de garde). Sans ça, deux serveurs Ciné Films muets restaient
+                    //   en tête de liste d'un film à l'autre = 12 s de moulinage à chaque
+                    //   clic avant d'atteindre le serveur qui marche. Limité aux fichiers
+                    //   VOD pour ne rien changer aux chaînes live (Tahiti, flux lents).
+                    if (estFichierVod(playingUri)) HotesEnEchec.signaler(playingUri)
                     // 2026-06-15 : ne déléguer à OlaTvProvider QUE si chaîne Ola.
                     if (isCurrentChannelOla()) {
                         try {
