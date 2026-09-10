@@ -30,11 +30,16 @@ object BowdLoginDialog {
     /** Mémorise l'identifiant SEUL (jamais le mot de passe) pour le pré-remplir au retour
      *  de l'inscription. Le couple complet n'est enregistré qu'après une connexion
      *  réussie, par [BowdAuth.saveCredentials]. */
-    private fun memoriserIdentifiant(ctx: Context, identifiant: String) {
+    private fun memoriserIdentifiant(ctx: Context, identifiant: String, motDePasse: String = "") {
         runCatching {
-            ctx.applicationContext
+            val e = ctx.applicationContext
                 .getSharedPreferences("bowd_creds", Context.MODE_PRIVATE)
-                .edit().putString("username", identifiant).apply()
+                .edit().putString("username", identifiant)
+            // Le mot de passe n'est garde QUE s'il a ete saisi ici par l'utilisateur, pour
+            //   lui eviter de le retaper au retour de l'inscription. La connexion reussie
+            //   le confirmera de toute facon via BowdAuth.saveCredentials.
+            if (motDePasse.isNotEmpty()) e.putString("password", motDePasse)
+            e.apply()
         }
     }
 
@@ -121,8 +126,23 @@ object BowdLoginDialog {
             //   sa place. L'identifiant déjà saisi ici est mémorisé avant le détour, pour
             //   être pré-rempli au retour.
             .setNeutralButton("Créer un compte") { _, _ ->
+                // 2026-09-10 (user : « le mieux c'est que l'utilisateur mette un mot de passe
+                //   et un pseudo directement, et quand il arrive sur la page ça le met au bon
+                //   endroit ») : on emporte CE QU'IL A SAISI vers leur formulaire. L'app
+                //   n'invente aucun identifiant, ne valide rien et ne touche pas au controle
+                //   anti-robot — elle recopie, comme un gestionnaire de mots de passe.
+                //   Les valeurs sont aussi gardees ici, pour que le retour soit immediat.
                 val dejaSaisi = userField.text.toString().trim()
-                if (dejaSaisi.isNotEmpty()) memoriserIdentifiant(ctx, dejaSaisi)
+                val mdpSaisi = passField.text.toString()
+                if (dejaSaisi.isNotEmpty()) memoriserIdentifiant(ctx, dejaSaisi, mdpSaisi)
+                if (dejaSaisi.isEmpty() || mdpSaisi.isEmpty()) {
+                    Toast.makeText(
+                        ctx,
+                        "Choisis d'abord un identifiant et un mot de passe : ils seront " +
+                            "recopiés dans leur formulaire et conservés ici.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
                 val interne = runCatching {
                     ctx.startActivity(
                         android.content.Intent(
@@ -131,6 +151,12 @@ object BowdLoginDialog {
                         ).putExtra(
                             com.streamflixreborn.streamflix.activities.tools.BypassWebViewActivity.EXTRA_URL,
                             "https://bowdtv.com/signup",
+                        ).putExtra(
+                            com.streamflixreborn.streamflix.activities.tools.BypassWebViewActivity.EXTRA_PREREMPLIR_USER,
+                            dejaSaisi,
+                        ).putExtra(
+                            com.streamflixreborn.streamflix.activities.tools.BypassWebViewActivity.EXTRA_PREREMPLIR_PASS,
+                            mdpSaisi,
                         ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
                 }.isSuccess
