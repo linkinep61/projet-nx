@@ -84,6 +84,7 @@ object BackupRegistry {
         "Movix" to "Movix",
         "Frembed" to "Frembed",
         "Vidzy" to "Vidzy (par TMDB)",
+        "Bowd" to "Bowd (films et séries, par TMDB)",
         "Nakios" to "Nakios",
         "LoiFlix" to "LoiFlix",
         "Nabistream" to "Nabistream (dramas)",
@@ -1561,6 +1562,19 @@ object BackupRegistry {
             //   2026-07-31 (user) : indexé PAR TMDB → aucun matching de titre, donc AUCUN
             //   mauvais film/série possible (contrairement aux providers qui cherchent par nom).
             //   /serie/{tmdb}/{s}/{e} et /movie/{tmdb} → iframe vidzy.cc lue par l'extracteur Vidzy.
+            // 2026-09-10 : Bowd. Leur index /vod/playable est une liste d'id TMDB
+            //   (29 436 films, 397 séries) → appariement EXACT, aucun matching par titre.
+            //   L'index sert de pré-filtre : pas d'appel réseau pour ce qu'ils n'ont pas.
+            //   Nécessite un compte Bowd connecté (cf. BowdAuth), sinon la source rend vide.
+            launch { emit("Bowd") {
+                com.streamflixreborn.streamflix.utils.BowdTv.serveursVod(
+                    tmdbId = resolvedTmdbId,
+                    isMovie = key.isMovie,
+                    season = key.season,
+                    episode = key.episode,
+                )
+            } }
+
             launch { emit("Vidzy") {
                 com.streamflixreborn.streamflix.providers.VidzyTmdbProvider.fetchVidzyBackupServers(
                     tmdbId = resolvedTmdbId,

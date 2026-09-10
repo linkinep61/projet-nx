@@ -833,6 +833,42 @@ object LiveHubFolderDialog {
             }
             return
         }
+
+        // 2026-09-10 (user : « il faut faire ça directement par le navigateur ») : dossier Bowd.
+        //   Catalogue via jeton anonyme (689 chaînes FR, aucun compte) ; la LECTURE se fait
+        //   dans leur page player en WebView, cf. BowdTv et BowdWebPlayerActivity.
+        if (folderKey == com.streamflixreborn.streamflix.utils.BowdTv.FOLDER_KEY) {
+            val bd = com.streamflixreborn.streamflix.utils.BowdTv
+            // Le catalogue est lisible en anonyme, mais la LECTURE exige un compte : on
+            //   propose la connexion dès l'ouverture pour éviter que l'utilisateur ne
+            //   découvre le blocage seulement au moment de lancer une chaîne.
+            if (!com.streamflixreborn.streamflix.utils.BowdAuth.estConnecte(ctx)) {
+                com.streamflixreborn.streamflix.activities.BowdLoginDialog.show(ctx)
+            }
+            val deja = bd.categories(bd.chainesSiDejaChargees())
+            if (deja.isNotEmpty()) {
+                displayCategories(ctx, folderName, deja, onChannelSelected)
+                return
+            }
+            android.widget.Toast.makeText(ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT).show()
+            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            scope.launch {
+                val cats = try {
+                    bd.categories(bd.chaines())
+                } catch (t: Throwable) {
+                    android.util.Log.w("LiveHubFolderDialog", "Bowd KO : ${t.message}")
+                    emptyList()
+                }
+                withContext(Dispatchers.Main) {
+                    if (cats.isEmpty()) {
+                        android.widget.Toast.makeText(ctx, "$folderName indisponible — réessaie", android.widget.Toast.LENGTH_LONG).show()
+                    } else {
+                        displayCategories(ctx, folderName, cats, onChannelSelected)
+                    }
+                }
+            }
+            return
+        }
         // 2026-07-10 (user "supprime la version de base") : ancienne branche Stream4Free `stream4`
         //   (résolveur OkHttp + git) RETIRÉE. Stream4Free = maintenant la clé `stream4cf` (version CF).
         // 2026-07-10 (user "supprime LumiChat partout") : branche lazy-fetch LumiChat RETIRÉE.
