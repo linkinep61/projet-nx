@@ -179,7 +179,11 @@ class TvWebCursor private constructor(
             //   atteint le contenu de l'iframe. On ne s'en sert que dans ce cas : ailleurs
             //   le clic DOM reste preferable (cf. l'en-tete sur isTrusted).
             val cible = r?.trim('"')?.uppercase().orEmpty()
-            if (cible.contains("IFRAME") || cible.contains("RIEN") || cible.startsWith("ERREUR")) {
+            // Un clic DOM ne vaut que s'il a atteint un element reellement interactif.
+            //   Sur un DIV ou un SPAN il ne se passe rien : autant injecter l'appui reel.
+            val vraimentClique = listOf("A", "BUTTON", "INPUT", "SELECT", "LABEL", "TEXTAREA")
+                .any { cible == it }
+            if (!vraimentClique) {
                 Log.d(TAG, "iframe ou cible absente → événement tactile réel")
                 tapReel(cx, cy)
             }
@@ -215,15 +219,24 @@ class TvWebCursor private constructor(
         val x = cx - pos[0]
         val y = cy - pos[1]
         val t = android.os.SystemClock.uptimeMillis()
-        val bas = android.view.MotionEvent.obtain(t, t, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+        fun evenement(quand: Long, action: Int) =
+            android.view.MotionEvent.obtain(t, quand, action, x, y, 0).apply {
+                // 2026-09-10 — LIGNE OUBLIEE, cause reelle du clic sans effet sur le
+                //   challenge : un MotionEvent construit a la main part avec une source
+                //   INCONNUE. Chromium ecarte les evenements dont la provenance n'est pas
+                //   un peripherique reconnu, donc l'appui n'atteignait jamais l'iframe.
+                source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+            }
+        val bas = evenement(t, android.view.MotionEvent.ACTION_DOWN)
         webView.dispatchTouchEvent(bas)
         bas.recycle()
-        // Un appui trop bref passe parfois pour du bruit : 90 ms ressemble a un vrai doigt.
+        // Un appui trop bref passe pour du bruit : 90 ms ressemble a un vrai doigt.
         webView.postDelayed({
             val t2 = android.os.SystemClock.uptimeMillis()
-            val haut = android.view.MotionEvent.obtain(t, t2, android.view.MotionEvent.ACTION_UP, x, y, 0)
+            val haut = evenement(t2, android.view.MotionEvent.ACTION_UP)
             webView.dispatchTouchEvent(haut)
             haut.recycle()
+            Log.d(TAG, "appui tactile injecte en ($x, $y)")
         }, 90L)
     }
 
