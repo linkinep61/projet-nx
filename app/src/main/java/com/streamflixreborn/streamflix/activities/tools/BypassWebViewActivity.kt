@@ -39,6 +39,11 @@ class BypassWebViewActivity : AppCompatActivity() {
     }
 
     private lateinit var webView: WebView
+
+    /** 2026-09-10 (user : « on a oublié de mettre une souris virtuelle pour valider le
+     *  captcha ») : sur TV, une case Cloudflare n'est pas focusable et reste donc
+     *  inatteignable au D-pad. Ce pointeur permet d'aller la cocher soi-même. Null hors TV. */
+    private var curseurTv: com.streamflixreborn.streamflix.utils.TvWebCursor? = null
     private lateinit var progressBar: ProgressBar
     private lateinit var statusView: TextView
     private lateinit var continueButton: Button
@@ -74,6 +79,7 @@ class BypassWebViewActivity : AppCompatActivity() {
             insets
         }
         webView = findViewById(R.id.bypass_webview)
+        curseurTv = com.streamflixreborn.streamflix.utils.TvWebCursor.attacher(this, webView)
         progressBar = findViewById(R.id.bypass_progress)
         statusView = findViewById(R.id.bypass_status)
         continueButton = findViewById(R.id.bypass_continue)
@@ -115,6 +121,11 @@ class BypassWebViewActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
         webView.loadUrl(targetUrl)
         mainHandler.post(cookiePollRunnable)
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (curseurTv?.onKey(event) == true) return true
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onDestroy() {

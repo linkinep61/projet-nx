@@ -133,11 +133,34 @@ class DeviceSyncActivity : AppCompatActivity() {
 
             result.fold(
                 onSuccess = { code ->
-                    val formatted = code.take(3) + " " + code.drop(3)
+                    // 2026-09-10 : le code peut désormais porter un secret après un tiret
+                    //   (« A1B2C3-K7M9 ») quand des comptes sont du voyage — cf.
+                    //   DeviceSyncManager. L'ancien découpage 3+3 supposait six caractères
+                    //   et aurait affiché « A1B 2C3-K7M9 ». On sépare donc les deux parties
+                    //   nettement, pour qu'on voie qu'il faut retaper l'ensemble.
+                    val codeServeur = code.substringBefore("-")
+                    val secret = code.substringAfter("-", "")
+                    val formatted = codeServeur.take(3) + " " + codeServeur.drop(3) +
+                        if (secret.isNotEmpty()) "  -  $secret" else ""
                     tvSendLabel.visibility = View.VISIBLE
                     tvSendCode.visibility = View.VISIBLE
                     tvSendCode.text = formatted
                     tvSendExpires.visibility = View.VISIBLE
+                    // 2026-09-10 (user : « tu devrais mettre un avertissement si les gens ne
+                    //   souhaitent pas partager le mot de passe ») : le transfert emporte
+                    //   TOUT, comptes compris — c'est voulu, pour n'avoir rien à refaire en
+                    //   face. Mais quelqu'un qui passe sa configuration à un proche ne s'en
+                    //   doute pas. Il n'y a pas de demi-mesure possible : le bloc part
+                    //   entier ou pas du tout, d'où la consigne de se déconnecter avant.
+                    tvSendExpires.text = if (secret.isNotEmpty()) {
+                        "Ce code expire dans 5 minutes.\n\n" +
+                        "⚠ Il contient aussi tes connexions (Bowd, TF1+, M6+, BFM). " +
+                        "Ne le transmets qu'à tes propres appareils — pour le partager " +
+                        "avec quelqu'un d'autre, déconnecte-toi de ces services avant de " +
+                        "générer le code."
+                    } else {
+                        "Ce code expire dans 5 minutes."
+                    }
                     tvSubtitle.text = "Données prêtes !"
 
                     tvSendStatus.visibility = View.VISIBLE
