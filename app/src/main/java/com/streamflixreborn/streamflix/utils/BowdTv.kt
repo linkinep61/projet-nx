@@ -230,8 +230,21 @@ object BowdTv {
                 Video.Server(id = "$PREFIX${c.id}::hls$i", name = "Bowd · $libelle", src = url)
             }
         }
+        // 2026-09-10 (user : « quand je clique sur un live ça m'amène sur leur page web
+        //   alors qu'on avait changé ça ») : le repli WebView ne vaut QUE pour un
+        //   utilisateur non connecté, à qui il sert d'invitation à se connecter. Connecté,
+        //   un flux qui échoue — leur API rend des 503 par intermittence, constaté — ne doit
+        //   surtout pas le faire sortir de l'application : la chaîne n'a simplement aucun
+        //   serveur Bowd pour l'instant, comme n'importe quelle source momentanément morte.
+        val ctx = runCatching {
+            com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
+        }.getOrNull()
+        if (ctx != null && BowdAuth.estConnecte(ctx)) {
+            Log.d(TAG, "flux ${c.id} indisponible → aucun serveur (pas de repli web, session active)")
+            return emptyList()
+        }
         return listOf(
-            Video.Server(id = "$PREFIX${c.id}::web", name = "Bowd · lecteur web", src = c.pagePlayer)
+            Video.Server(id = "$PREFIX${c.id}::web", name = "Bowd · se connecter", src = c.pagePlayer)
         )
     }
 
