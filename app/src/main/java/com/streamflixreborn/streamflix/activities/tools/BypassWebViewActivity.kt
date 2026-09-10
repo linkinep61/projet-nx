@@ -35,6 +35,14 @@ class BypassWebViewActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_URL = "extra_url"
         const val EXTRA_COOKIE_HEADER = "extra_cookie_header"
+
+        /** 2026-09-10 (user : « quand il arrive sur la page web pour créer le compte, ça le
+         *  met automatiquement au bon endroit ») : identifiants SAISIS PAR L'UTILISATEUR,
+         *  recopiés dans le formulaire de la page. L'app ne les invente pas, ne valide pas
+         *  le formulaire et ne touche pas au controle anti-robot : c'est du remplissage,
+         *  comme le ferait un gestionnaire de mots de passe. */
+        const val EXTRA_PREREMPLIR_USER = "extra_preremplir_user"
+        const val EXTRA_PREREMPLIR_PASS = "extra_preremplir_pass"
         private const val COOKIE_POLL_INTERVAL_MS = 1000L
     }
 
@@ -123,6 +131,50 @@ class BypassWebViewActivity : AppCompatActivity() {
         mainHandler.post(cookiePollRunnable)
     }
 
+    /**
+     * Recopie l'identifiant et le mot de passe choisis par l'utilisateur dans les champs
+     * du formulaire, s'il y en a. Ne soumet rien : l'utilisateur coche le controle et
+     * valide lui-meme. Les selecteurs sont volontairement generiques — on ne connait pas
+     * la structure exacte de la page et elle peut changer.
+     */
+    private fun preremplirSiDemande() {
+        val u = intent.getStringExtra(EXTRA_PREREMPLIR_USER)?.takeIf { it.isNotBlank() } ?: return
+        val p = intent.getStringExtra(EXTRA_PREREMPLIR_PASS).orEmpty()
+        // Passage par JSON : un mot de passe peut contenir guillemets, antislash ou accents.
+        val uJs = org.json.JSONObject.quote(u)
+        val pJs = org.json.JSONObject.quote(p)
+        val js = """
+            (function() {
+              try {
+                function poser(el, v) {
+                  if (!el || !v) return false;
+                  var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                  setter.call(el, v);
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                  return true;
+                }
+                var mdp = document.querySelector('input[type=password]');
+                var ident = document.querySelector(
+                  'input[autocomplete=username], input[name=username], input[name=user], input[id*=user]'
+                );
+                if (!ident) {
+                  var champs = Array.prototype.slice.call(document.querySelectorAll('input'));
+                  var i = champs.indexOf(mdp);
+                  for (var k = (i > 0 ? i - 1 : 0); k >= 0; k--) {
+                    var t = (champs[k].type || 'text').toLowerCase();
+                    if (t === 'text' || t === 'email') { ident = champs[k]; break; }
+                  }
+                }
+                var a = poser(ident, $uJs);
+                var b = poser(mdp, $pJs);
+                return 'identifiant=' + a + ' motdepasse=' + b;
+              } catch (e) { return 'ERREUR ' + e.message; }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js) { r -> android.util.Log.d("BypassWebView", "pre-remplissage : $r") }
+    }
+
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         if (curseurTv?.onKey(event) == true) return true
         return super.dispatchKeyEvent(event)
@@ -196,6 +248,7 @@ class BypassWebViewActivity : AppCompatActivity() {
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                preremplirSiDemande()
                 if (isCleaningUp) return
                 currentPageUrl = url
                 updateBypassState(url)

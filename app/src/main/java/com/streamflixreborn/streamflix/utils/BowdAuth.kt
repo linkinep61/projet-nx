@@ -108,7 +108,9 @@ object BowdAuth {
     fun savedUsername(ctx: Context): String? =
         ctx.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(K_USER, null)
 
-    private fun savedPassword(ctx: Context): String? =
+    /** Public depuis 2026-09-10 : les réglages permettent de RELIRE ses identifiants
+     *  (cf. « Compte Bowd »), pour pouvoir les ressaisir sur un autre appareil. */
+    fun savedPassword(ctx: Context): String? =
         ctx.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(K_PASS, null)
 
     // ─────────────────────────────── Connexion

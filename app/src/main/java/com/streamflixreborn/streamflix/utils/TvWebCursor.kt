@@ -169,7 +169,21 @@ class TvWebCursor private constructor(
               } catch (e) { return 'ERREUR ' + e.message; }
             })();
         """.trimIndent()
-        webView.evaluateJavascript(js) { r -> Log.d(TAG, "clic → $r") }
+        webView.evaluateJavascript(js) { r ->
+            Log.d(TAG, "clic → $r")
+            // 2026-09-10 (user : « le clic souris ne coche pas le challenge CF ») :
+            //   un Turnstile vit dans une iframe de challenges.cloudflare.com, donc d'une
+            //   AUTRE ORIGINE. elementFromPoint rend l'iframe, jamais la case a l'interieur,
+            //   et le JavaScript n'a pas le droit d'y descendre — le clic DOM ne peut donc
+            //   RIEN cocher. Seul un vrai evenement tactile, route par le moteur de rendu,
+            //   atteint le contenu de l'iframe. On ne s'en sert que dans ce cas : ailleurs
+            //   le clic DOM reste preferable (cf. l'en-tete sur isTrusted).
+            val cible = r?.trim('"')?.uppercase().orEmpty()
+            if (cible.contains("IFRAME") || cible.contains("RIEN") || cible.startsWith("ERREUR")) {
+                Log.d(TAG, "iframe ou cible absente → événement tactile réel")
+                tapReel(cx, cy)
+            }
+        }
         flash()
     }
 
@@ -189,6 +203,28 @@ class TvWebCursor private constructor(
         val g = p[0] - r[0]; val h = p[1] - r[1]
         return if (cx >= g && cx <= g + vueParente.width && cy >= h && cy <= h + vueParente.height) vueParente
         else null
+    }
+
+    /**
+     * Injecte un vrai appui tactile dans la WebView, aux coordonnées du curseur.
+     * Passe par le pipeline d'entrée du moteur, donc atteint le contenu des iframes
+     * d'origine tierce, hors de portée du JavaScript de la page.
+     */
+    private fun tapReel(cx: Float, cy: Float) {
+        val pos = IntArray(2); webView.getLocationOnScreen(pos)
+        val x = cx - pos[0]
+        val y = cy - pos[1]
+        val t = android.os.SystemClock.uptimeMillis()
+        val bas = android.view.MotionEvent.obtain(t, t, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+        webView.dispatchTouchEvent(bas)
+        bas.recycle()
+        // Un appui trop bref passe parfois pour du bruit : 90 ms ressemble a un vrai doigt.
+        webView.postDelayed({
+            val t2 = android.os.SystemClock.uptimeMillis()
+            val haut = android.view.MotionEvent.obtain(t, t2, android.view.MotionEvent.ACTION_UP, x, y, 0)
+            webView.dispatchTouchEvent(haut)
+            haut.recycle()
+        }, 90L)
     }
 
     private fun flash() {
