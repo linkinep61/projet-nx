@@ -62,6 +62,11 @@ class BowdWebPlayerActivity : AppCompatActivity() {
     }
 
     private lateinit var webView: WebView
+
+    /** 2026-09-10 (user : « on a oublié de mettre une souris virtuelle pour valider le
+     *  captcha ») : sur TV, une case Cloudflare n'est pas focusable, donc inatteignable
+     *  au D-pad. Ce pointeur permet à l'utilisateur d'aller la cocher lui-même. Null hors TV. */
+    private var curseurTv: com.streamflixreborn.streamflix.utils.TvWebCursor? = null
     private lateinit var progressBar: ProgressBar
     private lateinit var fullscreenContainer: FrameLayout
     private lateinit var errorOverlay: LinearLayout
@@ -89,6 +94,7 @@ class BowdWebPlayerActivity : AppCompatActivity() {
         intent.getStringExtra(EXTRA_TITLE)?.takeIf { it.isNotBlank() }?.let { title = it }
 
         configurer()
+        curseurTv = com.streamflixreborn.streamflix.utils.TvWebCursor.attacher(this, webView)
         charger()
     }
 
@@ -169,6 +175,11 @@ class BowdWebPlayerActivity : AppCompatActivity() {
             return
         }
         finish()
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (curseurTv?.onKey(event) == true) return true
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onPause() {
