@@ -744,12 +744,25 @@ abstract class Extractor {
             m
         }
 
-        /** Même index, mais sur le domaine PRIVÉ de son extension (second passage historique). */
+        /** Même index, mais sur le domaine PRIVÉ de son extension (second passage historique).
+         *
+         *  2026-09-10 — Les alias à TLD tournant, écrits avec un point final (ex.
+         *  `"https://api.voirfilm."`), sont EXCLUS de cette table. Raison : la réduction
+         *  en racine les tronque au premier label, si bien que `"https://api.voirfilm."`
+         *  devenait `"api."` — et le `startsWith` correspondant détournait alors vers
+         *  ApiVoirFilm TOUTE URL hébergée sur un domaine commençant par `api.`, quel que
+         *  soit le site. Constaté en direct sur `api.bowdtv.com/p/vod/master.m3u8` : le
+         *  lien HLS partait dans un extracteur HTML, qui levait, et le serveur s'affichait
+         *  en rouge. Ces alias restent pleinement couverts par `indexPrefixes`, qui les
+         *  garde entiers (`api.voirfilm.`) et reste donc parfaitement sélectif. */
         private val indexRacines: Map<String, Extractor> by lazy {
             val m = LinkedHashMap<String, Extractor>()
             for (e in extractors) {
                 m.putIfAbsent(e.mainUrl.lowercase().replace(PREFIXE_ET_EXTENSION, "$3"), e)
-                for (a in e.aliasUrls) m.putIfAbsent(a.lowercase().replace(PREFIXE_ET_EXTENSION, "$3"), e)
+                for (a in e.aliasUrls) {
+                    if (a.endsWith(".")) continue
+                    m.putIfAbsent(a.lowercase().replace(PREFIXE_ET_EXTENSION, "$3"), e)
+                }
             }
             m
         }

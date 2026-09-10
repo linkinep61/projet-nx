@@ -1123,6 +1123,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   ~40 chaînes FR, liste Supabase + lecture avec Referer, cf. ReneveoTv. Contenu
             //   chargé au clic (LiveHubFolderDialog, clé `reneveo`), carte toujours affichée.
             FolderDef(com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "RénéVéo", Regex("^RénéVéo - .*")),
+            // 2026-09-10 (user : « il faut faire ça directement par le navigateur ») : dossier Bowd.
+            //   689 chaînes FR listées via un jeton anonyme ; lecture dans leur page player en
+            //   WebView (leur /stream est fermé en anonyme, cf. BowdTv). Contenu chargé au clic.
+            FolderDef(com.streamflixreborn.streamflix.utils.BowdTv.FOLDER_KEY, "Bowd", Regex("^Bowd - .*")),
             // 2026-07-08 : dossier NetMirror TV hub MIS DE CÔTÉ (archivé C:\Users\guill\Desktop\ONYX).
             //   Lecture WebView pas finalisée (CORS/hls.js). Provider natif NetMirror = OK par ailleurs.
             FolderDef("documentaire", "Documentaire", Regex("^Documentaire$")),
@@ -1242,7 +1246,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "vegetavod") +
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, com.streamflixreborn.streamflix.utils.BowdTv.FOLDER_KEY, "vegetavod") +
             // ⚠ 2026-08-17 — CORRIGÉ (user « le dossier série/film n'est pas
             //   stable, regarde pourquoi il disparaît »).
             //   « Film / série » était VOLONTAIREMENT exclu d'ici, au motif
@@ -1282,6 +1286,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             "stream4cf"      to "https://www.stream4free.tv/images/logos4f.png",
             // 2026-09-06 : dossier RénéVéo (favicon du site).
             com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.ReneveoTv.LOGO,
+            com.streamflixreborn.streamflix.utils.BowdTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.BowdTv.LOGO,
             // 2026-08-17 : dossier des fichiers perso (icone bibliotheque).
             "ma_bibliotheque" to "https://cdn-icons-png.flaticon.com/512/2991/2991108.png",
             // 2026-09-06 : carte « Ciné Films » (clap de cinéma).
@@ -1858,6 +1863,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-09-06 : chaîne RénéVéo → fiche synthétique « En Direct » (cf. ReneveoTv).
         if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(id)) {
             return com.streamflixreborn.streamflix.utils.ReneveoTv.fiche(id)
+        }
+        // 2026-09-10 : chaîne Bowd → fiche synthétique « En Direct » (cf. BowdTv).
+        if (com.streamflixreborn.streamflix.utils.BowdTv.estChaine(id)) {
+            return com.streamflixreborn.streamflix.utils.BowdTv.fiche(id)
         }
         // 2026-06-24 : FAST channel (= Samsung TV+, Pluto TV, Plex TV, LG Channels, etc.)
         //   ID = "livehub::fast::<hash>" → TvShow synthétique "En Direct".
@@ -2639,6 +2648,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
         if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(id)) {
             return com.streamflixreborn.streamflix.utils.ReneveoTv.serveurs(id)
         }
+        // 2026-09-10 : Bowd → un seul « serveur », leur page player ouverte en WebView.
+        if (com.streamflixreborn.streamflix.utils.BowdTv.estChaine(id)) {
+            return com.streamflixreborn.streamflix.utils.BowdTv.serveurs(id)
+        }
         // 2026-06-24 : FAST channel = id "livehub::fast::<hash>"
         //   → retourne l'URL stream directe depuis fastChannelUrls map.
         if (id.startsWith("livehub::fast::")) {
@@ -2868,6 +2881,28 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-09-06 : RénéVéo → HLS direct, Referer du site obligatoire sur ses proxys (cf. ReneveoTv.video).
         if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(server.id)) {
             return com.streamflixreborn.streamflix.utils.ReneveoTv.video(server)
+        }
+        // 2026-09-10 : Bowd. Connecté → vrai flux HLS rendu par leur API, joué en natif
+        //   (mini-lecteur, favoris et D-pad fonctionnent normalement). Pas de session →
+        //   repli sur leur page player en WebView, qui invite à se connecter ; on coupe
+        //   alors le flux ExoPlayer par une exception, comme NetMirror.
+        if (com.streamflixreborn.streamflix.utils.BowdTv.estChaine(server.id)) {
+            // Session présente → vrai flux HLS, lu nativement par ExoPlayer.
+            if (!com.streamflixreborn.streamflix.utils.BowdTv.estServeurWeb(server.id)) {
+                return Video(
+                    source = server.src,
+                    subtitles = emptyList(),
+                )
+            }
+            val page = com.streamflixreborn.streamflix.utils.BowdTv.pagePlayerDe(server.id)
+            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                com.streamflixreborn.streamflix.activities.tools.BowdWebPlayerActivity.launch(
+                    context = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext,
+                    url = page,
+                    title = com.streamflixreborn.streamflix.utils.BowdTv.chainesSiDejaChargees().firstOrNull { page.endsWith(it.id) }?.nom,
+                )
+            }
+            throw IllegalStateException("Bowd : lecture dans le lecteur WebView intégré")
         }
         // 2026-09-05 : Vegeta VOD → URL Xtream directe (mkv/mp4), UA navigateur mobile.
         if (server.id.startsWith(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SRC)) {

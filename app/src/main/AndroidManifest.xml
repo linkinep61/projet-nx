@@ -248,6 +248,11 @@
             android:hardwareAccelerated="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.AppCompat.NoActionBar" />
+        <activity
+            android:name=".activities.tools.BowdWebPlayerActivity"
+            android:exported="false"
+            android:hardwareAccelerated="true"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <activity
             android:name=".activities.tools.LocalPlayerActivity"
