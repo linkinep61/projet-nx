@@ -320,8 +320,14 @@ object BowdTv {
         // Trois passages au plus : 401 → reconnexion complète, 5xx → une reprise.
         //   Leur propre client fait de même (`retry: 1` sur /vod/playable) : ce service
         //   rend des 500 par intermittence, y compris pour leur application officielle.
-        var reprise5xx = false
-        repeat(3) { essai ->
+        // 2026-09-10 — MESURE : sur 40 chaines enchainees, 28 rendaient 503 ; les memes
+        //   reessayees espacees passaient a 200 pour une bonne part (TF1 notamment).
+        //   Une partie des 503 est donc de la charge ou de la limitation de debit, pas une
+        //   panne : deux reprises espacees rattrapent ces chaines-la. Celles qui echouent
+        //   encore (France 5 ce soir) sont reellement hors service chez eux, et insister
+        //   davantage ne servirait qu'a faire attendre.
+        var reprises = 0
+        repeat(4) { essai ->
             try {
                 val rejouer = client.newCall(requeteApi("$API$chemin", jwt)).execute().use { r ->
                     when {
@@ -330,9 +336,9 @@ object BowdTv {
                             jwt = BowdAuth.jetonFrais(ctx) ?: return@withContext null
                             true
                         }
-                        r.code in 500..599 && !reprise5xx -> {
-                            reprise5xx = true
-                            Log.d(TAG, "$etiquette : HTTP ${r.code} → une reprise")
+                        r.code in 500..599 && reprises < 2 -> {
+                            reprises++
+                            Log.d(TAG, "$etiquette : HTTP ${r.code} → reprise $reprises/2")
                             true
                         }
                         else -> {
@@ -341,12 +347,12 @@ object BowdTv {
                         }
                     }
                 }
-                if (rejouer && reprise5xx) kotlinx.coroutines.delay(1200)
+                if (rejouer && reprises > 0) kotlinx.coroutines.delay(1500L * reprises)
             } catch (t: Throwable) {
-                if (!reprise5xx) {
-                    reprise5xx = true
-                    Log.d(TAG, "$etiquette : ${t.message} → une reprise")
-                    kotlinx.coroutines.delay(1200)
+                if (reprises < 2) {
+                    reprises++
+                    Log.d(TAG, "$etiquette : ${t.message} → reprise $reprises/2")
+                    kotlinx.coroutines.delay(1500L * reprises)
                 } else {
                     Log.w(TAG, "$etiquette KO : ${t.message}")
                     return@withContext null
