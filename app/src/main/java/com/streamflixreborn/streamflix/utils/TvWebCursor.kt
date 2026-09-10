@@ -131,18 +131,14 @@ class TvWebCursor private constructor(
         val cx = x + TAILLE / 2f
         val cy = y + TAILLE / 2f
 
-        // Un bouton Android posé en surimpression a la priorité sur la page.
-        for (i in 0 until racine.childCount) {
-            val enfant = racine.getChildAt(i)
-            if (enfant is android.widget.Button && enfant.isClickable && enfant.visibility == View.VISIBLE) {
-                val p = IntArray(2); enfant.getLocationOnScreen(p)
-                val r = IntArray(2); racine.getLocationOnScreen(r)
-                val g = p[0] - r[0]; val h = p[1] - r[1]
-                if (cx >= g && cx <= g + enfant.width && cy >= h && cy <= h + enfant.height) {
-                    enfant.performClick(); flash(); return
-                }
-            }
-        }
+        // Un bouton Android a la priorité sur la page.
+        //   2026-09-10 (user : « l'option annuler ou continuer ne paraît pas focusable ») :
+        //   la recherche ne parcourait que les enfants DIRECTS de la racine. Or les boutons
+        //   d'un layout sont imbriqués (ici dans le LinearLayout de activity_bypass_webview),
+        //   donc ils échappaient au pointeur — et comme le curseur consomme tout le D-pad,
+        //   le focus ne pouvait plus les atteindre non plus : ils devenaient inutilisables
+        //   sur TV. On descend donc dans TOUT l'arbre.
+        boutonSous(racine, cx, cy)?.let { it.performClick(); flash(); return }
 
         val pos = IntArray(2); webView.getLocationOnScreen(pos)
         val d = activity.resources.displayMetrics.density
@@ -175,6 +171,24 @@ class TvWebCursor private constructor(
         """.trimIndent()
         webView.evaluateJavascript(js) { r -> Log.d(TAG, "clic → $r") }
         flash()
+    }
+
+    /** Cherche en profondeur une vue cliquable sous le point donné (coords racine). */
+    private fun boutonSous(vueParente: View, cx: Float, cy: Float): View? {
+        if (vueParente.visibility != View.VISIBLE) return null
+        if (vueParente is android.view.ViewGroup) {
+            // Du dernier au premier : le dessus de la pile gagne, comme un vrai clic.
+            for (i in vueParente.childCount - 1 downTo 0) {
+                boutonSous(vueParente.getChildAt(i), cx, cy)?.let { return it }
+            }
+        }
+        if (vueParente === webView || vueParente === vue) return null
+        if (!vueParente.isClickable) return null
+        val p = IntArray(2); vueParente.getLocationOnScreen(p)
+        val r = IntArray(2); racine.getLocationOnScreen(r)
+        val g = p[0] - r[0]; val h = p[1] - r[1]
+        return if (cx >= g && cx <= g + vueParente.width && cy >= h && cy <= h + vueParente.height) vueParente
+        else null
     }
 
     private fun flash() {
