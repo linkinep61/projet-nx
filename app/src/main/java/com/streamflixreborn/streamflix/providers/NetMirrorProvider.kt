@@ -2320,7 +2320,15 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             val audioTracks = master.lineSequence()
                 .filter { it.startsWith("#EXT-X-MEDIA") && it.contains("TYPE=AUDIO") }
                 .mapNotNull { line ->
-                    val uri = Regex("URI=\"(https?://[^\"]+/files/\\d+/a/\\d+/\\d+\\.m3u8)\"").find(line)?.groupValues?.get(1) ?: return@mapNotNull null
+                    // 2026-09-11 (user : « j'ai un serveur NetMirror Prime Video qui ne
+                    //   fonctionne pas alors que les NetMirror tout court fonctionnent ») :
+                    //   l'identifiant d'asset etait lu en \d+, donc NUMERIQUE. C'est vrai chez
+                    //   Netflix (/files/70109436/a/…) mais PAS chez Prime Video, qui utilise de
+                    //   l'alphanumerique (/files/0MHL3PDMP9F9YY88VUUWRW1A4W/a/…). Le motif ne
+                    //   matchait donc jamais → « 0 piste audio » → reconstruction abandonnee →
+                    //   le serveur echouait sur 100 % des contenus Prime. Vu dans le logcat du
+                    //   Oppo le 2026-09-11. Hotstar et Disney+ ont le meme format.
+                    val uri = Regex("URI=\"(https?://[^\"]+/files/[A-Za-z0-9]+/a/[^\"]+\\.m3u8)\"").find(line)?.groupValues?.get(1) ?: return@mapNotNull null
                     val lang = Regex("LANGUAGE=\"([^\"]*)\"").find(line)?.groupValues?.get(1)?.lowercase() ?: ""
                     val name = Regex("NAME=\"([^\"]*)\"").find(line)?.groupValues?.get(1)?.lowercase() ?: ""
                     ATrack(lang, name, uri)
@@ -2331,7 +2339,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                 ?: audioTracks.firstOrNull { it.lang.startsWith("en") || it.name.contains("english") }
                 ?: audioTracks.first()
             val audioUrl = chosen.uri
-            val hostAssetM = Regex("https?://([^/]+)/files/(\\d+)/a/").find(audioUrl) ?: return@withContext null
+            val hostAssetM = Regex("https?://([^/]+)/files/([A-Za-z0-9]+)/a/").find(audioUrl) ?: return@withContext null
             val host = hostAssetM.groupValues[1]; val asset = hostAssetM.groupValues[2]
             Log.d(TAG, "reconstructRealFilm audio: lang=${chosen.lang} name=${chosen.name} (sur ${audioTracks.size} pistes)")
             val audioManifest = httpGet(audioUrl) ?: return@withContext null
