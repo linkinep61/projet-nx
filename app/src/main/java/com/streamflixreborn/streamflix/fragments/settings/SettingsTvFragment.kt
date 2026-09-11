@@ -1238,6 +1238,67 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         val cat = findPreference<PreferenceCategory>("pc_provider_settings") ?: return
         cat.isVisible = true
         findPreference<PreferenceCategory>("pc_provider_empty_state")?.isVisible = false
+        // 2026-09-11 (user : « t'as oublié de mettre l'option connexion déconnexion sur la
+        //   version TV ») : entrée Compte Bowd, identique à celle des réglages mobile.
+        //   Elle compte double ici : sur télévision, relire ses identifiants évite de devoir
+        //   les retaper à la télécommande, et c'est le seul endroit d'où l'on peut se
+        //   déconnecter pour revoir l'écran d'inscription.
+        val bowdKey = "tvhub_account_bowd"
+        if (findPreference<Preference>(bowdKey) == null) {
+            val pref = Preference(requireContext()).apply {
+                key = bowdKey
+                title = "Compte Bowd"
+                isIconSpaceReserved = false
+                summary = bowdAccountSummary()
+                setOnPreferenceClickListener {
+                    val ctx = requireContext()
+                    val ba = com.streamflixreborn.streamflix.utils.BowdAuth
+                    if (!ba.hasCredentials(ctx)) {
+                        com.streamflixreborn.streamflix.activities.BowdLoginDialog.show(ctx) {
+                            summary = bowdAccountSummary()
+                        }
+                        return@setOnPreferenceClickListener true
+                    }
+                    AlertDialog.Builder(ctx)
+                        .setTitle("Compte Bowd")
+                        .setItems(arrayOf(
+                            "Voir mes identifiants",
+                            "Changer de compte",
+                            "Déconnexion (efface identifiants)",
+                        )) { _, idx ->
+                            when (idx) {
+                                0 -> AlertDialog.Builder(ctx)
+                                    .setTitle("Identifiants Bowd")
+                                    .setMessage(
+                                        "Identifiant : " + (ba.savedUsername(ctx) ?: "—") + "\n" +
+                                        "Mot de passe : " + (ba.savedPassword(ctx) ?: "—") + "\n\n" +
+                                        "Ils sont stockés sur cet appareil. Le transfert par code " +
+                                        "les emporte aussi, ce qui évite de les ressaisir ailleurs."
+                                    )
+                                    .setPositiveButton("Fermer", null)
+                                    .show()
+                                1 -> com.streamflixreborn.streamflix.activities.BowdLoginDialog.show(ctx) {
+                                    summary = bowdAccountSummary()
+                                }
+                                2 -> AlertDialog.Builder(ctx)
+                                    .setTitle("Déconnecter Bowd ?")
+                                    .setMessage("Ton identifiant et ton mot de passe Bowd seront supprimés de cet appareil. Tes favoris et le reste ne sont pas touchés.")
+                                    .setPositiveButton("Déconnecter") { _, _ ->
+                                        ba.clearCredentials(ctx)
+                                        summary = bowdAccountSummary()
+                                        Toast.makeText(ctx, "Bowd : déconnecté", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .setNegativeButton("Annuler", null)
+                                    .show()
+                            }
+                        }
+                        .setNegativeButton("Annuler", null)
+                        .show()
+                    true
+                }
+            }
+            cat.addPreference(pref)
+        }
         val tf1Key = "tvhub_account_tf1"
         if (findPreference<Preference>(tf1Key) == null) {
             val pref = Preference(requireContext()).apply {
@@ -1347,6 +1408,13 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             }
             cat.addPreference(pref)
         }
+    }
+
+    private fun bowdAccountSummary(): String {
+        val ctx = requireContext()
+        val ba = com.streamflixreborn.streamflix.utils.BowdAuth
+        return if (ba.hasCredentials(ctx)) "✓ Connecté — " + (ba.savedUsername(ctx) ?: "compte enregistré")
+        else "Non connecté — nécessaire pour lire les chaînes et films Bowd"
     }
 
     private fun tf1AccountSummary(): String =
