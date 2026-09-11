@@ -763,6 +763,58 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         return false
     }
 
+    /**
+     * ── 2026-09-11 : LES LECTEURS QUE LE SITE LUI-MÊME ÉCARTE ────────────────────────────
+     *
+     *   Le user : « je suspecte qu'on ne possède pas ce serveur USTR » — puis, en regardant
+     *   leur page : « pour le même serveur c'est VOE en serveur 1 et serveur 2, et sur
+     *   l'application c'est pas le cas ».
+     *
+     *   Vérifié sur leur page (flemmix, miroir Wiflix du moment) : le HTML contient ENCORE
+     *   des liens `up4fun.top`, mais la page embarque un script qui les saute au clic —
+     *   il repère le lien, va chercher le SUIVANT dans la liste et charge celui-là. Leur
+     *   propre source porte le commentaire `<!-- NO up4fun -->` :
+     *
+     *       if (match && match[1].includes("https://up4fun.top")) { let nextLink … }
+     *
+     *   D'où l'écart constaté : sur le site on clique « Lecteur 1 » et c'est VOE qui part,
+     *   parce que le lecteur mort est sauté en silence. Nous lisons le HTML brut, sans
+     *   jamais exécuter ce script : on récupérait donc précisément le lien que le site
+     *   jette, on l'attribuait à USTR, et le serveur s'affichait rouge à tous les coups.
+     *
+     *   Mesuré le même soir : `ups2up.fun` ne sert plus de vidéo (il redirige vers un site
+     *   de streaming sans rapport), `up4fun.top` répond 502 derrière un pare-feu. Il n'y a
+     *   donc rien à récupérer — on écarte ces liens comme le site le fait.
+     *
+     *   ⚠ 2026-09-11, remarque du user : « il faut s'adapter, le serveur 1 peut être un
+     *   autre du jour au lendemain ». On ne code donc AUCUN domaine en dur : on lit la
+     *   règle DANS LA PAGE, à l'endroit même où le site la déclare. Le jour où Wiflix
+     *   écartera un autre hébergeur, on suivra tout seul, sans nouvelle version de l'app.
+     *   La liste figée ne sert que de filet si leur script change de forme.
+     */
+    private val MOTIF_LECTEUR_ECARTE =
+        Regex("""includes\(\s*["']https?://([a-z0-9.\-]+)["']\s*\)""", RegexOption.IGNORE_CASE)
+
+    /** Derniers hôtes connus comme écartés — filet de sécurité uniquement (cf. ci-dessus). */
+    private val HOTES_ECARTES_CONNUS = setOf("up4fun.top", "ups2up.fun", "up4stream.com")
+
+    /** Hôtes que la page elle-même saute, lus dans son script `loadVideo`. */
+    private fun hotesEcartesParLeSite(html: String): Set<String> {
+        val lus = MOTIF_LECTEUR_ECARTE.findAll(html)
+            .map { it.groupValues[1].removePrefix("www.").lowercase() }
+            .toSet()
+        if (lus.isNotEmpty()) {
+            Log.i("WiflixProvider", "lecteurs écartés par le site : ${lus.joinToString(", ")}")
+        }
+        return lus.ifEmpty { HOTES_ECARTES_CONNUS }
+    }
+
+    private fun estEcarte(src: String, ecartes: Set<String>): Boolean {
+        val hote = src.removePrefix("https://").removePrefix("http://")
+            .removePrefix("www.").substringBefore("/").lowercase()
+        return hote in ecartes
+    }
+
     /** Remove duplicate servers that resolve to the same service (e.g. luluvdo.com & luluvdoo.com). */
     private fun deduplicateServers(servers: List<Video.Server>): List<Video.Server> {
         val seen = mutableSetOf<String>()
@@ -1998,10 +2050,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 //   n'apparaissent pas ? » alors que le site en affiche une quinzaine).
                 val allAnchors = document.select("div.$rel a")
                 val keptAnchors = allAnchors.filter { ignoreSource(it.text().trim()) == false }
+                val ecartesSerie = hotesEcartesParLeSite(document.html())
                 Log.i("WiflixProvider", "serveurs série: ${allAnchors.size} <a> trouvés, " +
                     "${keptAnchors.size} après ignoreSource (rel=$rel)")
                 keptAnchors.
                     mapIndexedNotNull { index, it ->
+                        val ecartes = ecartesSerie
                         val onclick = it.attr("onclick")
                         // 2026-06-03 (user "y a un WIFLIX SAVE Ça existe même pas
                         //   ça") : ne ramener un serveur QUE si le onclick contient
@@ -2015,6 +2069,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         // Filtre robuste : le src doit être une vraie URL HTTP(S),
                         //   sinon c'est un fragment JS qui s'est faufilé.
                         if (src.isBlank() || !src.startsWith("http", ignoreCase = true)) {
+                            return@mapIndexedNotNull null
+                        }
+                        // Lecteur que la page saute elle-même au clic (cf. hotesEcartesParLeSite).
+                        if (estEcarte(src, ecartes)) {
+                            Log.i("WiflixProvider", "lecteur écarté comme sur le site : ${it.text().trim()}")
                             return@mapIndexedNotNull null
                         }
                         val spanText = it.selectFirst("span")?.text()?.trim() ?: ""
@@ -2056,10 +2115,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 //   expose vraiment vs combien survivent au filtrage).
                 val allMovieAnchors = document.select("div.tabs-sel a")
                 val keptMovieAnchors = allMovieAnchors.filter { ignoreSource(it.text().trim()) == false }
+                val ecartesFilm = hotesEcartesParLeSite(document.html())
                 Log.i("WiflixProvider", "serveurs film: ${allMovieAnchors.size} <a> trouvés, " +
                     "${keptMovieAnchors.size} après ignoreSource")
                 keptMovieAnchors.
                     mapIndexedNotNull { index, it ->
+                        val ecartes = ecartesFilm
                         val onclick = it.attr("onclick")
                         // 2026-06-03 (user "y a un WIFLIX SAVE Ça existe même pas
                         //   ça") : ne ramener un serveur QUE si le onclick contient
@@ -2073,6 +2134,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         // Filtre robuste : le src doit être une vraie URL HTTP(S),
                         //   sinon c'est un fragment JS qui s'est faufilé.
                         if (src.isBlank() || !src.startsWith("http", ignoreCase = true)) {
+                            return@mapIndexedNotNull null
+                        }
+                        // Lecteur que la page saute elle-même au clic (cf. hotesEcartesParLeSite).
+                        if (estEcarte(src, ecartes)) {
+                            Log.i("WiflixProvider", "lecteur écarté comme sur le site : ${it.text().trim()}")
                             return@mapIndexedNotNull null
                         }
                         val spanText = it.selectFirst("span")?.text()?.trim() ?: ""
