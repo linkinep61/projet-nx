@@ -74,10 +74,20 @@ internal object ByseAcces {
     private val cache = java.util.concurrent.ConcurrentHashMap<String, Acces>()
 
     private val client by lazy {
+        // ── 2026-09-11 : DES DELAIS COURTS, PARCE QUE LE CALCUL NE COUTE PLUS RIEN ────────
+        //   Mesure faite ce soir en rejouant toute la negociation depuis le PC, 10 fois de
+        //   suite : difficulte 12 a chaque fois (~4 000 essais, ~0,1 s sur le telephone) et
+        //   les trois POST bouclent en 2 s. La preuve n'est donc PAS le gouffre.
+        //   Le journal du 2026-09-11 21:17 montre l'inverse : 15 s brulees AVANT la preuve
+        //   (ni « preuve resolue », ni « abandon » — le calcul n'avait pas commence), puis
+        //   l'abandon. C'etait un appel HTTP qui trainait, avec un plafond d'appel a 20 s,
+        //   soit plus que tout le budget de l'appelant. Un appel lent doit echouer VITE pour
+        //   qu'on reparte sur un miroir : ils repondent tous en moins d'une seconde et
+        //   menent tous au meme domaine de lecture.
         Extractor.sharedClient.newBuilder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(12, TimeUnit.SECONDS)
-            .callTimeout(20, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(6, TimeUnit.SECONDS)
+            .callTimeout(8, TimeUnit.SECONDS)
             .build()
     }
 
@@ -193,6 +203,11 @@ internal object ByseAcces {
             )
         )
         val difficulte = defiPow.optInt("pow_difficulty", 16)
+        // 2026-09-11 : tracée AVANT de calculer. Jusqu'ici elle n'apparaissait qu'en cas de
+        //   succès ou d'abandon — donc jamais quand on renonçait plus tôt, précisément le
+        //   cas qu'on cherchait à comprendre. Repère mesuré : 12 ≈ 0,1 s, 16 ≈ 1,8 s,
+        //   20 ≈ 26 s sur l'appareil (~40 000 hachages/s sur 3 fils).
+        Log.d(TAG, "défi reçu : difficulté $difficulte")
         val debut = System.currentTimeMillis()
         val solution = resoudrePreuve(defiPow.getString("pow_nonce"), difficulte)
             ?: run {
@@ -227,6 +242,23 @@ internal object ByseAcces {
     }
 
     private fun poster(url: String, corps: JSONObject?, x: Map<String, String>): String {
+        // 2026-09-11 : on chronometre CHAQUE appel. Sans ça, un journal d'echec ne dit pas
+        //   si le temps est parti dans le reseau ou dans la preuve — il a fallu deux heures
+        //   et une sonde Python pour trancher une fois. Le nom de l'etape suffit : c'est le
+        //   dernier segment du chemin (challenge / attest / captcha / verify).
+        val etape = url.substringAfterLast('/')
+        val debutAppel = System.currentTimeMillis()
+        try {
+            return posterInterne(url, corps, x).also {
+                Log.d(TAG, "étape $etape : ${System.currentTimeMillis() - debutAppel} ms")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "étape $etape échouée en ${System.currentTimeMillis() - debutAppel} ms : ${e.message}")
+            throw e
+        }
+    }
+
+    private fun posterInterne(url: String, corps: JSONObject?, x: Map<String, String>): String {
         val requete = Request.Builder()
             .url(url)
             .post((corps?.toString() ?: "").toRequestBody(JSON))

@@ -138,7 +138,30 @@ open class FilemoonExtractor : Extractor() {
         private val AUTO_CLICK_SCRIPT = """
             <script>
             (function(){
+                // ── 2026-09-11 : COUPER LE SON, DANS L'IFRAME AUSSI ──────────────────────
+                //   Le lecteur vit dans une iframe d'un AUTRE domaine : le JS injecté dans
+                //   la page du dessus ne peut pas l'atteindre. Or c'est bien lui qui joue.
+                //   Comme on réécrit déjà le HTML de cette iframe pour y glisser l'auto-clic,
+                //   on y glisse aussi la coupure du son — c'est le seul endroit d'où on
+                //   puisse la poser. En continu : la balise <video> naît après le clic.
+                function mute(){
+                    try{
+                        var m=document.querySelectorAll('video,audio');
+                        for(var i=0;i<m.length;i++){try{m[i].muted=true;m[i].volume=0;}catch(e){}}
+                    }catch(e){}
+                }
+                try{
+                    var P=HTMLMediaElement.prototype.play;
+                    HTMLMediaElement.prototype.play=function(){
+                        try{this.muted=true;this.volume=0;}catch(e){}
+                        return P.apply(this,arguments);
+                    };
+                }catch(e){}
+                mute();
+                try{new MutationObserver(mute).observe(document.documentElement,{childList:true,subtree:true});}catch(e){}
+                setInterval(mute,250);
                 function tryClick(){
+                    mute();
                     var c=document.querySelectorAll('button,[role="button"],[onclick],a,.play-btn,.btn-play,.play,.vjs-big-play-button');
                     for(var i=0;i<c.length;i++){try{c[i].click();}catch(e){}}
                     var s=document.querySelectorAll('svg,.play-icon,.fa-play,.icon-play');
@@ -846,6 +869,31 @@ open class FilemoonExtractor : Extractor() {
                             servirViaDoh(url, request)?.let { return it }
                         }
 
+                        // ── 0. 2026-09-11 : AUCUN MÉDIA NE DOIT ÊTRE TÉLÉCHARGÉ ICI ────────
+                        //   Le user : « il a sorti un audio en arrière-plan qui n'a rien à voir
+                        //   avec ce que je voulais lancer ». Cette WebView est attachée à la
+                        //   fenêtre (réduite par scaleX/Y = 0.01) : invisible, mais audible —
+                        //   et l'appui tactile synthétique démarre vraiment la lecture.
+                        //   Couper le son en JS ne suffit pas : le lecteur vit dans une iframe
+                        //   d'un AUTRE domaine, hors de portée de tout script injecté. En
+                        //   revanche ce point de passage-ci voit les requêtes de TOUTES les
+                        //   frames. Or on ne cherche qu'une URL de playlist : les segments ne
+                        //   nous servent à rien. On les renvoie vides — plus aucun son possible,
+                        //   d'où qu'il vienne (contenu comme publicité), et la donnée mobile
+                        //   du user n'y passe plus non plus.
+                        val chemin = request?.url?.path?.lowercase() ?: ""
+                        val estSegment = chemin.endsWith(".ts") || chemin.endsWith(".m4s") ||
+                            chemin.endsWith(".mp4") || chemin.endsWith(".m4a") ||
+                            chemin.endsWith(".aac") || chemin.endsWith(".mp3") ||
+                            chemin.endsWith(".webm") || chemin.endsWith(".mpd")
+                        if (estSegment) {
+                            return WebResourceResponse(
+                                "application/octet-stream", "UTF-8", 204, "No Content",
+                                mapOf("Access-Control-Allow-Origin" to "*"),
+                                java.io.ByteArrayInputStream(ByteArray(0)),
+                            )
+                        }
+
                         // 1. Intercept m3u8 requests → we have the video
                         if (url.contains(".m3u8") && !resolved) {
                             Log.i(TAG, "[Filemoon-WV] m3u8 captured: $url")
@@ -874,6 +922,36 @@ open class FilemoonExtractor : Extractor() {
                     //   aboutit, si elle est redirigée, ou si elle échoue en silence ?
                     override fun onPageFinished(view: WebView?, u: String?) {
                         Log.d(TAG, "[Filemoon-WV] page chargée : ${u?.take(120)}")
+                        couperLeSon(view)
+                    }
+
+                    /**
+                     * ── 2026-09-11 : LE REPLI JOUAIT LE FILM EN FOND, AVEC LE SON ───────────
+                     *   Signalé par le user : « il a sorti un audio en arrière-plan qui n'a
+                     *   rien à voir avec ce que je voulais lancer », pendant que le serveur
+                     *   Filemoon virait au rouge. C'est exactement ça : cette WebView est
+                     *   ATTACHÉE À LA FENÊTRE (elle est juste réduite par `scaleX/Y = 0.01`),
+                     *   donc invisible mais parfaitement audible — et l'appui tactile
+                     *   synthétique plus bas démarre vraiment le lecteur, pour 30 s.
+                     *   Filemoon était le SEUL extracteur de l'app à ne pas couper le son :
+                     *   Uqload, VidMoLy, Streamhg, OnRegardeOu, Freeshot, WebViewStreamResolver
+                     *   et WebJsProvider injectent tous `muted = true` avant de lancer.
+                     *   On coupe en continu (un MutationObserver + une passe périodique), parce
+                     *   que le lecteur crée sa balise <video> APRÈS le chargement de la page.
+                     */
+                    private fun couperLeSon(view: WebView?) {
+                        view?.evaluateJavascript(
+                            "(function(){try{" +
+                                "function mute(){try{document.querySelectorAll('video,audio')" +
+                                ".forEach(function(m){try{m.muted=true;m.volume=0;}catch(e){}});}catch(e){}}" +
+                                "mute();" +
+                                "if(!window.__onyxMute){window.__onyxMute=1;" +
+                                "try{new MutationObserver(mute).observe(document.documentElement," +
+                                "{childList:true,subtree:true});}catch(e){}" +
+                                "setInterval(mute,250);}" +
+                                "}catch(e){}})();",
+                            null,
+                        )
                     }
 
                     override fun onReceivedError(

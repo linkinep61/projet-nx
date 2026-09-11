@@ -689,6 +689,16 @@ abstract class Extractor {
         // le domaine mort). Cache en mémoire, reset au restart app.
         private val domainRedirects = ConcurrentHashMap<String, String>()
 
+        /** ⚠ 2026-09-11 — NE PAS RACCOURCIR LE DÉLAI DES DOMAINES DE REPLI.
+         *  Essayé ce soir (8 s par alias, abandon après 2 échecs), puis ANNULÉ. Vidzy
+         *  paraissait hors service, mais il n'était que très lent : mesuré sans plafond,
+         *  vidzy.org répond 200 en 54 s, vidzy.cc en 41 s, vidzy.live en 10 s, et la page
+         *  de lecture `embed-…` en 56 s. Les premières mesures qui concluaient « mort »
+         *  avaient un plafond de 12 s : elles mesuraient ce plafond, pas le site.
+         *  Un budget court transformerait donc un hébergeur lent mais VIVANT en hébergeur
+         *  systématiquement rouge — on cacherait un flux qui marche. Le délai long est
+         *  volontaire : mieux vaut attendre que perdre la source. */
+
         /** Extrait le host d'une URL (sans protocole ni www). */
         private fun extractHost(url: String): String? {
             return try {
