@@ -46,9 +46,9 @@ object DeviceSyncManager {
     private const val TAG = "DeviceSync"
 
     /** 2026-09-10 (user : « j'aurai plus qu'à transférer le code de mon Oppo vers ma télé ») :
-     *  les COMPTES sont désormais transférables. Ce sont les seuls fichiers concernés — ils
-     *  contiennent des mots de passe, d'où le chiffrement ci-dessous : le Worker et D1 ne
-     *  voient qu'un blob illisible, la clé n'existe que dans le code lu par l'utilisateur. */
+     *  les COMPTES sont désormais transférables. Ce sont les seuls fichiers concernés.
+     *  2026-09-11 (user : « tu pouvais pas laisser ça comme avant avec le code simple ») :
+     *  ils voyagent dans le payload ordinaire, le code reste à 6 caractères. */
     private val FICHIERS_COMPTES = listOf(
         "bowd_creds",
         "replay_auth_tf1_creds",
@@ -56,38 +56,7 @@ object DeviceSyncManager {
         "replay_auth_bfm_creds",
     )
 
-    /** Chiffrement AES-GCM, clé dérivée du secret par SHA-256. Sortie : base64(iv|chiffré). */
-    private fun chiffrer(clair: String, secret: String): String {
-        val cle = javax.crypto.spec.SecretKeySpec(
-            java.security.MessageDigest.getInstance("SHA-256").digest(secret.toByteArray()), "AES")
-        val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
-        val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(javax.crypto.Cipher.ENCRYPT_MODE, cle, javax.crypto.spec.GCMParameterSpec(128, iv))
-        val chiffre = c.doFinal(clair.toByteArray())
-        return android.util.Base64.encodeToString(iv + chiffre, android.util.Base64.NO_WRAP)
-    }
-
-    private fun dechiffrer(b64: String, secret: String): String? = try {
-        val brut = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
-        val cle = javax.crypto.spec.SecretKeySpec(
-            java.security.MessageDigest.getInstance("SHA-256").digest(secret.toByteArray()), "AES")
-        val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(javax.crypto.Cipher.DECRYPT_MODE, cle,
-            javax.crypto.spec.GCMParameterSpec(128, brut.copyOfRange(0, 12)))
-        String(c.doFinal(brut.copyOfRange(12, brut.size)))
-    } catch (t: Throwable) {
-        Log.w(TAG, "déchiffrement des comptes impossible : ${t.message}")
-        null
-    }
-
-    /** Secret aléatoire de 4 caractères, accolé au code du serveur et jamais transmis à lui. */
-    private fun genererSecret(): String {
-        val alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  // sans I/O/0/1, illisibles à la télé
-        val r = java.security.SecureRandom()
-        return (1..4).map { alpha[r.nextInt(alpha.length)] }.joinToString("")
-    }
-
-    private fun collectComptes(context: Context, secret: String): String? {
+    private fun collectComptes(context: Context): JSONObject? {
         val tout = JSONObject()
         var n = 0
         for (nom in FICHIERS_COMPTES) {
@@ -106,12 +75,10 @@ object DeviceSyncManager {
         }
         if (n == 0) return null
         Log.d(TAG, "comptes collectés : $n service(s)")
-        return chiffrer(tout.toString(), secret)
+        return tout
     }
 
-    private fun applyComptes(context: Context, blob: String, secret: String) {
-        val clair = dechiffrer(blob, secret) ?: return
-        val tout = JSONObject(clair)
+    private fun applyComptes(context: Context, tout: JSONObject) {
         var n = 0
         for (nom in tout.keys()) {
             if (nom !in FICHIERS_COMPTES) continue          // on n'écrit que nos fichiers
@@ -140,11 +107,7 @@ object DeviceSyncManager {
      */
     suspend fun sendData(context: Context): Result<String> = withContext(Dispatchers.IO) {
         try {
-            // Le code est attribué par le Worker APRÈS l'envoi : il ne peut donc pas servir
-            //   de clé. On tire un secret ici, on chiffre avec, et on l'accole au code —
-            //   l'utilisateur lit une chaîne, le serveur n'en connaît que la moitié.
-            val secret = genererSecret()
-            val payload = collectAllData(context, secret)
+            val payload = collectAllData(context)
 
             val body = JSONObject().apply {
                 put("payload", payload.toString())
@@ -170,9 +133,13 @@ object DeviceSyncManager {
                 return@withContext Result.failure(Exception("Code vide dans la réponse"))
             }
 
-            val codeComplet = if (payload.has("comptesChiffres")) "$code-$secret" else code
+            // 2026-09-11 (user : « tu pouvais pas laisser ça comme avant avec le code
+            //   simple ») : RETOUR AU CODE 6 CARACTERES. Le secret accole rallongeait le
+            //   code, le rendait penible a retaper sur une television, et a casse le
+            //   transfert pendant une soiree. Les comptes voyagent toujours, mais dans le
+            //   payload ordinaire — ils transitent donc par le Worker comme le reste.
             Log.d(TAG, "Data uploaded with code $code (${payload.toString().length} chars)")
-            Result.success(codeComplet)
+            Result.success(code)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send data", e)
             Result.failure(e)
@@ -187,11 +154,7 @@ object DeviceSyncManager {
      */
     suspend fun receiveData(context: Context, code: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            // « ABC123-K7M9 » → code serveur + secret de déchiffrement. Sans tiret, c'est
-            //   un transfert sans comptes (ou émis par une version antérieure) : rien à faire.
-            val saisi = code.uppercase().replace(" ", "").trim()
-            val normalizedCode = saisi.substringBefore("-")
-            val secret = saisi.substringAfter("-", "").takeIf { it.isNotBlank() }
+            val normalizedCode = code.uppercase().replace(" ", "").trim()
 
             val body = JSONObject().apply {
                 put("code", normalizedCode)
@@ -221,7 +184,7 @@ object DeviceSyncManager {
             }
 
             val payload = JSONObject(payloadStr)
-            applyAllData(context, payload, secret)
+            applyAllData(context, payload)
 
             Log.d(TAG, "Data received and applied from code $normalizedCode")
             Result.success(Unit)
@@ -233,9 +196,9 @@ object DeviceSyncManager {
 
     // ── SÉRIALISATION ──────────────────────────────────────────────────
 
-    private suspend fun collectAllData(context: Context, secret: String?): JSONObject {
+    private suspend fun collectAllData(context: Context): JSONObject {
         val root = JSONObject()
-        // v3 : ajout du bloc « comptes » (chiffré). Un récepteur plus ancien ignore
+        // v3 : ajout du bloc « comptes ». Un récepteur plus ancien ignore
         //   simplement la clé qu'il ne connaît pas — la rétrocompatibilité est gratuite.
         root.put("syncVersion", 3)
         root.put("timestamp", System.currentTimeMillis())
@@ -352,11 +315,10 @@ object DeviceSyncManager {
             )
         }
         if (wlSourcesObj.length() > 0) root.put("worldLiveSources", wlSourcesObj)
-        // 13. Comptes (Bowd, TF1+, M6+, BFM) — CHIFFRÉS avec le secret du code.
-        //     Ce sont des mots de passe : le Worker et D1 n'en voient qu'un blob.
-        if (secret != null) {
-            collectComptes(context, secret)?.let { root.put("comptesChiffres", it) }
-        }
+        // 13. Comptes (Bowd, TF1+, M6+, BFM). Ce sont des mots de passe : ils transitent
+        //     par le Worker comme le reste du transfert, et le code expire en 5 minutes.
+        //     L'ecran d'envoi avertit l'utilisateur de ne le donner qu'a ses appareils.
+        collectComptes(context)?.let { root.put("comptes", it) }
 
 
         return root
@@ -479,12 +441,10 @@ object DeviceSyncManager {
 
     // ── DÉSÉRIALISATION / APPLICATION ──────────────────────────────────
 
-    private suspend fun applyAllData(context: Context, payload: JSONObject, secret: String? = null) {
-        // Comptes : uniquement si l'émetteur en a envoyé ET que le secret accompagne le code.
-        if (secret != null) {
-            payload.optString("comptesChiffres").takeIf { it.isNotBlank() }?.let {
-                runCatching { applyComptes(context, it, secret) }
-            }
+    private suspend fun applyAllData(context: Context, payload: JSONObject) {
+        // Comptes : uniquement si l'émetteur en a envoyé.
+        payload.optJSONObject("comptes")?.let {
+            runCatching { applyComptes(context, it) }
         }
 
         // 1. Profils
