@@ -660,6 +660,15 @@ object MiniPlayerController {
             //   → server 456 → onPlayerError → loop CPU 250% → ANR → crash.
             val cause = error.cause
             val httpCode = if (cause is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) cause.responseCode else -1
+            // 2026-09-13 (parité grand lecteur — comptes 1 connexion) : 509 (quota/occupé)
+            //   ou 429 = la place du compte est prise MAINTENANT. Recharger le même ne sert
+            //   à rien → serveur suivant tout de suite. On NE marque PAS l'URL morte (c'est
+            //   transitoire : le compte se libère plus tard).
+            if (httpCode == 509 || httpCode == 429) {
+                Log.w(TAG, "Compte occupé HTTP $httpCode sur [$currentServerIndex/${availableServers.size}] — serveur suivant (mini)")
+                tryNextServer()
+                return
+            }
             // 2026-06-03 : sur HTTP 456/401/402/451 = HARD FAIL, on saute au server
             //   SUIVANT au lieu de stop(). Le palier resilientLoadErrorPolicy a déjà
             //   empêché le retry-loop sur le MÊME server (C.TIME_UNSET).
