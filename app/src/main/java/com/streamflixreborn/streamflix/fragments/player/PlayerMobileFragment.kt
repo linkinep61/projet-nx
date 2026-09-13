@@ -5408,24 +5408,32 @@ class PlayerMobileFragment : Fragment() {
                                 var initialSwitchTries = 0
                                 while (_binding != null &&
                                     (try { player.playbackState == Player.STATE_BUFFERING } catch (_: Exception) { false })) {
-                                    // Fenêtre courte (7s) tant que ça n'a jamais démarré sur OLA
-                                    // (on veut sauter vite un serveur muet) ; 12s sinon.
+                                    // 2026-09-13 (user « des serveurs restent noirs hyper
+                                    //   longtemps ») : un serveur qui n'a jamais démarré et qui
+                                    //   reste noir ~10 s est muet — on le saute vite, sur TOUTES
+                                    //   les chaînes live (avant : seulement OLA à 7 s, les autres
+                                    //   rechargeaient le même à l'infini). 12 s pour un stall en
+                                    //   cours de lecture (blip réseau) — là on ne churne pas un
+                                    //   serveur qui marchait.
                                     val neverWorked = !iptvCurrentStreamHasWorked
-                                    kotlinx.coroutines.delay(if (neverWorked && isOlaCh) 7_000L else 12_000L)
+                                    kotlinx.coroutines.delay(if (neverWorked) 10_000L else 12_000L)
                                     if (_binding == null) break
                                     val stillBuffering = try { player.playbackState == Player.STATE_BUFFERING } catch (_: Exception) { false }
                                     if (!stillBuffering) break
                                     if (preemptiveReloadInFlight) continue
 
-                                    // CAS 1 — jamais démarré + OLA : le serveur courant est muet
-                                    //   → hop au variant suivant (max 6 tentatives) au lieu de
-                                    //   re-prepare le même. getVideo relance un cycle propre.
-                                    if (!iptvCurrentStreamHasWorked && isOlaCh && initialSwitchTries < 6) {
+                                    // CAS 1 — jamais démarré (toute chaîne live) : le serveur
+                                    //   courant est muet → on saute au serveur suivant (max 6)
+                                    //   au lieu de recharger le même. getVideo relance un cycle
+                                    //   propre. C'est ce qui règle « le serveur noir ne change
+                                    //   jamais tout seul ».
+                                    if (!iptvCurrentStreamHasWorked && initialSwitchTries < 6) {
                                         initialSwitchTries++
-                                        Log.w("PlayerMobileFragment", "Live BUFFERING (jamais READY) → switch variant OLA #$initialSwitchTries")
-                                        val switched = tryNextChannelVariant(currentServer)
-                                        if (switched) break  // nouveau getVideo → nouveau listener/loop
-                                        // plus de variant → on retombe sur le re-prepare ci-dessous
+                                        Log.w("PlayerMobileFragment", "Live BUFFERING (jamais READY, serveur noir) → switch serveur #$initialSwitchTries")
+                                        if (tryNextChannelVariant(currentServer)) break  // nouveau getVideo → nouveau listener/loop
+                                        val nxBuf = nextNonDeadServer(currentServer)
+                                        if (nxBuf != null) { viewModel.getVideo(nxBuf); break }
+                                        // plus aucun serveur → on retombe sur le re-prepare ci-dessous
                                     }
 
                                     val nowFlapB = System.currentTimeMillis()
@@ -5929,7 +5937,18 @@ class PlayerMobileFragment : Fragment() {
                     //   après retry. Force le switch même si stream a déjà brièvement
                     //   marché (sinon on retry sticky un server condamné).
                     val isMacBlocked456 = errMsg.contains("response code: 456")
-                    val shouldSwitch = (!iptvCurrentStreamHasWorked || isMacBlocked456) &&
+                    // 2026-09-13 (user « comptes 1 connexion : les gens doivent switcher
+                    //   manuellement ») : un 509 (Bandwidth/quota) ou 429 (Too Many Requests)
+                    //   veut dire « ce compte est occupe MAINTENANT ». Contrairement a une
+                    //   panne, s'entêter dessus ne sert a rien : la place est prise ailleurs.
+                    //   Donc on bascule MEME si le flux avait deja marche — sinon un compte a
+                    //   1 connexion qui se fait prendre la place bloque le spectateur sur un
+                    //   serveur condamne (la coupure/rechargement en boucle constatee). En
+                    //   basculant tout seul vers un autre des ~20 serveurs, l'utilisateur n'a
+                    //   jamais a changer a la main.
+                    val isQuotaBusy = errMsg.contains("response code: 509") ||
+                        errMsg.contains("response code: 429")
+                    val shouldSwitch = (!iptvCurrentStreamHasWorked || isMacBlocked456 || isQuotaBusy) &&
                         (isPermanentHttpError || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
 
                     // 2026-05-10 : cooldown anti-cascade (cf PlayerTvFragment).
@@ -5942,7 +5961,10 @@ class PlayerMobileFragment : Fragment() {
                             .isFavorite(args.id, server.id)
                     } catch (_: Exception) { false }
                     // 2026-07-05 : démarrage + erreur HTTP permanente → pas de cooldown, switch direct.
-                    val bypassCooldown = !iptvCurrentStreamHasWorked && isPermanentHttpError
+                    // 2026-09-13 : un 509/429 (compte occupé) doit basculer VITE, sans les 10 s
+                    //   de cooldown — sinon le spectateur subit 10 s de rechargement avant que
+                    //   l'app tente enfin un autre serveur.
+                    val bypassCooldown = (!iptvCurrentStreamHasWorked && isPermanentHttpError) || isQuotaBusy
                     if (shouldSwitch && isFavoriteServer) {
                         Log.d("PlayerMobileFragment", "IPTV switch demandé mais server est favori — on retry à la place")
                     } else if (shouldSwitch && sinceLastSwitch < switchCooldownMs && !bypassCooldown) {
@@ -7587,6 +7609,11 @@ class PlayerMobileFragment : Fragment() {
             private val estClipVodTransfert: Boolean
                 get() = args.id.startsWith("livehub::rutube::") ||
                     args.id.startsWith("livehub::ytclip::")
+            // 2026-09-13 : compteur d'erreurs de CE listener. 1re erreur = on retente
+            //   (blip réseau), au-delà = serveur vraiment mauvais → on bascule au lieu
+            //   de recharger le même en boucle. Reset a chaque bascule (nouveau listener).
+            private var recErr = 0
+            @Volatile private var recSwitchEnCours = false
 
             override fun onPlaybackStateChanged(state: Int) {
             // ── 2026-08-14 (user : « sur le grand lecteur ça a bouclé sur la même
@@ -7630,6 +7657,10 @@ class PlayerMobileFragment : Fragment() {
                 when (state) {
                     androidx.media3.common.Player.STATE_ENDED,
                     androidx.media3.common.Player.STATE_IDLE -> {
+                        // 2026-09-13 : si une bascule de serveur est en cours (déclenchée par
+                        //   onPlayerError), ne PAS recharger l'ancien serveur — sinon on relance
+                        //   le mort en parallèle de la bascule.
+                        if (recSwitchEnCours) return
                         Log.d("PlayerMobileFragment", "Transfer recovery: STATE=$state → prepare()")
                         try {
                             player.seekToDefaultPosition()
@@ -7651,6 +7682,38 @@ class PlayerMobileFragment : Fragment() {
                         "clip en erreur (${error.errorCodeName}) → clip suivant : $ok")
                     return
                 }
+                // 2026-09-13 (user « comptes 1 connexion : l'app doit basculer toute seule »
+                //   + log : coincé sur un serveur mort — in-addr.arpa / 509 — qui se
+                //   rechargeait EN BOUCLE ~10x avant que le listener complet ne bascule) :
+                //   ce listener minimal du lecteur transféré depuis le mini ne faisait que
+                //   recharger la MÊME URL. Sur une chaîne live, un serveur qui échoue de
+                //   façon persistante (509 compte occupé, adresse interne bidon, manifest
+                //   cassé…) ne se répare pas en rechargeant : il faut BASCULER vers un autre
+                //   des ~20 serveurs. On tolère 1 erreur (blip réseau) puis on bascule, au
+                //   lieu d'attendre 10 rechargements. recSwitchEnCours empêche de sauter
+                //   plusieurs serveurs d'un coup pendant que la bascule se met en place.
+                val isLiveIptvRec = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                    args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                    args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                    args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") ||
+                    args.id.startsWith("myiptv-live::")
+                val srvRec = currentServer
+                if (isLiveIptvRec && srvRec != null && !recSwitchEnCours) {
+                    recErr++
+                    if (recErr >= 2) {
+                        recSwitchEnCours = true
+                        Log.w("PlayerMobileFragment", "Transfer recovery: ${error.errorCodeName} persistant sur ${srvRec.name} → bascule serveur")
+                        if (tryNextChannelVariant(srvRec)) return
+                        val nextRec = nextNonDeadServer(srvRec)
+                        if (nextRec != null) { viewModel.getVideo(nextRec); return }
+                        Log.w("PlayerMobileFragment", "Transfer recovery: aucun autre serveur — reload")
+                        recSwitchEnCours = false
+                    } else {
+                        Log.d("PlayerMobileFragment", "Transfer recovery: 1re erreur (${error.errorCodeName}) → un retry avant bascule")
+                    }
+                }
+                if (recSwitchEnCours) return
                 Log.e("PlayerMobileFragment", "Transfer recovery: error ${error.errorCodeName} → prepare()")
                 try {
                     player.seekToDefaultPosition()

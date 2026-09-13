@@ -6571,8 +6571,13 @@ class PlayerTvFragment : Fragment() {
                         //   blocked / rate-limit serveur — JAMAIS récupérable. Force le
                         //   switch même si stream a déjà brièvement marché.
                         val isMacBlocked456 = errMsg.contains("response code: 456")
-                        val shouldSwitch = (!iptvCurrentStreamHasWorked || isMacBlocked456) &&
-                            (isPermanentHttpError || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
+                        // 2026-09-13 (parité mobile — comptes 1 connexion) : 509/429 = compte
+                        //   occupé MAINTENANT. On bascule même si le flux avait déjà marché
+                        //   (sinon on s'entête sur un serveur dont la place est prise ailleurs).
+                        val isQuotaBusy = errMsg.contains("response code: 509") ||
+                            errMsg.contains("response code: 429")
+                        val shouldSwitch = (!iptvCurrentStreamHasWorked || isMacBlocked456 || isQuotaBusy) &&
+                            (isPermanentHttpError || isQuotaBusy || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
 
                         // 2026-05-10 : cooldown anti-cascade. Si un auto-switch s'est fait
                         // il y a moins de 10s, on ne switch pas encore — on laisse le retry
@@ -6590,7 +6595,8 @@ class PlayerTvFragment : Fragment() {
                         } catch (_: Exception) { false }
                         if (shouldSwitch && isFavoriteServer) {
                             Log.d("PlayerTvFragment", "IPTV switch demandé mais server est favori — on retry à la place")
-                        } else if (shouldSwitch && sinceLastSwitch < switchCooldownMs) {
+                        } else if (shouldSwitch && sinceLastSwitch < switchCooldownMs && !isQuotaBusy) {
+                            // 2026-09-13 : un 509/429 (compte occupé) bascule sans attendre le cooldown.
                             Log.d("PlayerTvFragment", "IPTV switch demandé mais cooldown ${(switchCooldownMs - sinceLastSwitch)/1000}s — on retry à la place")
                         } else if (shouldSwitch) {
                             Log.w("PlayerTvFragment", "IPTV switch on ${server.name} ($errCodeName, retry=$iptvRetryCount, hasWorked=$iptvCurrentStreamHasWorked, permanentHttp=$isPermanentHttpError)")
@@ -9191,12 +9197,31 @@ class PlayerTvFragment : Fragment() {
                                 transferLiveRecoveryActive = true
                                 viewLifecycleOwner.lifecycleScope.launch {
                                     try {
+                                        var initialSwitchTries = 0
                                         while (_binding != null && ::player.isInitialized &&
                                             player.playbackState == androidx.media3.common.Player.STATE_BUFFERING) {
-                                            kotlinx.coroutines.delay(12_000L)
+                                            // 2026-09-13 (parité mobile — user « serveurs noirs
+                                            //   hyper longtemps ») : serveur jamais démarré et noir
+                                            //   ~10 s = muet, on le saute vite ; 12 s pour un stall
+                                            //   en cours de lecture (blip).
+                                            val neverWorked = !iptvCurrentStreamHasWorked
+                                            kotlinx.coroutines.delay(if (neverWorked) 10_000L else 12_000L)
                                             if (_binding == null || !::player.isInitialized) break
                                             if (player.playbackState != androidx.media3.common.Player.STATE_BUFFERING) break
                                             if (preemptiveReloadInFlight) continue
+
+                                            // CAS 1 — jamais démarré (toute chaîne live) : serveur
+                                            //   noir muet → on saute au suivant au lieu de recharger
+                                            //   le même. Sur TV le rebuild complet reste évité (on
+                                            //   passe par getVideo, pas de re-init MediaCodec direct).
+                                            if (!iptvCurrentStreamHasWorked && initialSwitchTries < 6) {
+                                                initialSwitchTries++
+                                                Log.w("PlayerTvFragment", "Transfer-recovery: BUFFERING (jamais READY, serveur noir) → switch serveur #$initialSwitchTries")
+                                                if (tryNextChannelVariant(currentServer)) break
+                                                val nxBuf = nextNonDeadServer(currentServer)
+                                                if (nxBuf != null) { viewModel.getVideo(nxBuf); break }
+                                            }
+
                                             val nowFlapB = System.currentTimeMillis()
                                             recentReloadTimestamps.removeAll { (nowFlapB - it) > RELOAD_FLAP_WINDOW_MS }
                                             if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
@@ -9352,6 +9377,21 @@ class PlayerTvFragment : Fragment() {
                             }
                         }
                         return
+                    }
+
+                    // 2026-09-13 (parité mobile — user « comptes 1 connexion : bascule auto ») :
+                    //   un 509/429 (compte occupé) ou toute erreur HTTP permanente sur un serveur
+                    //   NON-Stalker (panneau Xtream) ne se répare pas en rechargeant la même URL.
+                    //   On bascule vers un autre des serveurs de la chaîne, au lieu du prepare()
+                    //   transitoire ci-dessous qui bouclait sur le serveur mort/occupé.
+                    val isQuotaBusyTv = errMsg.contains("response code: 509") ||
+                        errMsg.contains("response code: 429")
+                    if ((isQuotaBusyTv || isPermanentHttpError) && server != null) {
+                        Log.w("PlayerTvFragment", "Transfer-recovery: ${error.errorCodeName} (occupé/mort) sur ${server.name} → bascule serveur")
+                        if (tryNextChannelVariant(server)) return
+                        val nxTv = nextNonDeadServer(server)
+                        if (nxTv != null) { viewModel.getVideo(nxTv); return }
+                        Log.w("PlayerTvFragment", "Transfer-recovery: aucun autre serveur — reload")
                     }
 
                     // Erreur transitoire : prepare() suffit.
