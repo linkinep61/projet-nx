@@ -219,6 +219,22 @@ object VegetaTvProvider : Provider, IptvProvider {
     private const val REGISTRY_CACHE_FILE = "vegeta_registry.json"
     private const val REGISTRY_CACHE_TTL_MS = 6L * 60 * 60 * 1000L
 
+    // 2026-09-13 (user « fais tout ce qu'il faut pour réparer ») : registre PRÉ-CALCULÉ par
+    //   le cron nx-data (scripts/vegetatv/refresh_vegetatv.py, toutes les 4 h). Il existait
+    //   depuis longtemps mais l'app ne le lisait JAMAIS : chaque appareil refaisait le scan
+    //   des serveurs (m3u de 10-40 Mo, 2-3 min, RAM saturée). Même format que
+    //   saveRegistryCache() à une clé près : "savedAt" (ms) au lieu de "ts".
+    //   Chargé EN PREMIER dans ensureRegistry() → registre instantané ; cache disque puis
+    //   probe live restent en repli, et le top-up arrière-plan continue comme avant.
+    //   Même hôte que VegetaVod.RAW (le runner atteint les panels, pas l'appareil).
+    private const val REMOTE_REGISTRY_URL =
+        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/vegetatv/vegeta-fr.json"
+    /** Au-delà, le JSON distant est considéré périmé (le cron passe toutes les 4 h ;
+     *  24 h tolère une panne de runner sans retomber sur le scan complet). */
+    private const val REMOTE_REGISTRY_MAX_AGE_MS = 24L * 60 * 60 * 1000L
+    /** Sous ce nombre de chaînes, le fichier est suspect (run partiel) → ignoré. */
+    private const val REMOTE_REGISTRY_MIN_CHANNELS = 50
+
     // ───────── Normalization ─────────
 
     private fun norm(raw: String): String {
@@ -1193,35 +1209,113 @@ object VegetaTvProvider : Provider, IptvProvider {
             val ts = obj.optLong("ts", 0)
             if (System.currentTimeMillis() - ts > REGISTRY_CACHE_TTL_MS) return false
 
+            val channels = obj.optJSONObject("channels") ?: return false
             synchronized(registryLock) {
                 channelRegistry.clear()
-                val channels = obj.optJSONObject("channels") ?: return false
-                for (key in channels.keys()) {
-                    val ch = channels.getJSONObject(key)
-                    val info = ChannelInfo(
-                        displayName = ch.getString("displayName"),
-                        category = ch.getString("category"),
-                        logo = ch.getString("logo"),
-                    )
-                    val streams = ch.getJSONArray("streams")
-                    for (i in 0 until streams.length()) {
-                        val s = streams.getJSONObject(i)
-                        info.streams.add(VegetaStreamRef(
-                            serverIdx = s.getInt("serverIdx"),
-                            label = s.getString("label"),
-                            url = s.getString("url"),
-                            baseUrl = s.optString("baseUrl", ""),
-                            mac = s.optString("mac", ""),
-                            cmd = s.optString("cmd", ""),
-                        ))
-                    }
-                    channelRegistry[key] = info
-                }
+                applyRegistryChannels(channels)   // 2026-09-13 : boucle partagée avec le distant
             }
             Log.d(TAG, "Registry loaded from disk: ${channelRegistry.size} channels")
             true
         } catch (e: Exception) {
             Log.w(TAG, "Registry cache load failed: ${e.message}")
+            false
+        }
+    }
+
+    /** 2026-09-13 : remplit channelRegistry depuis un objet "channels" (format commun à
+     *  saveRegistryCache() et à vegeta-fr.json). À appeler SOUS registryLock. Lecture
+     *  tolérante (opt*) : une entrée bancale est ignorée au lieu de faire échouer tout le
+     *  chargement, ce qui compte pour un fichier produit par un runner distant.
+     *  @return nombre de chaînes chargées. */
+    private fun applyRegistryChannels(channels: JSONObject): Int {
+        var n = 0
+        for (key in channels.keys()) {
+            val ch = channels.optJSONObject(key) ?: continue
+            val displayName = ch.optString("displayName", "").ifBlank { key }
+            val info = ChannelInfo(
+                displayName = displayName,
+                // vegeta-fr.json laisse category vide → on la déduit comme à l'ingestion live.
+                category = ch.optString("category", "").ifBlank { guessCategory(displayName) },
+                logo = ch.optString("logo", ""),
+            )
+            val streams = ch.optJSONArray("streams") ?: JSONArray()
+            for (i in 0 until streams.length()) {
+                val s = streams.optJSONObject(i) ?: continue
+                val url = s.optString("url", "")
+                if (url.isBlank()) continue
+                info.streams.add(VegetaStreamRef(
+                    serverIdx = s.optInt("serverIdx", 0),
+                    label = s.optString("label", ""),
+                    url = url,
+                    baseUrl = s.optString("baseUrl", ""),
+                    mac = s.optString("mac", ""),
+                    cmd = s.optString("cmd", ""),
+                ))
+            }
+            if (info.streams.isEmpty()) continue
+            channelRegistry[key] = info
+            n++
+        }
+        return n
+    }
+
+    /** 2026-09-13 : charge le registre PRÉ-CALCULÉ par le cron nx-data (cf. REMOTE_REGISTRY_URL).
+     *  Timeout court (10 s) : GitHub ne doit jamais retarder le lancement ; en cas d'échec on
+     *  retombe sur le cache disque puis sur le probe live, exactement comme avant.
+     *  Succès → le fichier est aussi persisté localement au format cache ("ts" = savedAt),
+     *  ce qui donne un repli hors-ligne cohérent au prochain lancement. */
+    private suspend fun loadRemoteRegistry(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val remoteClient = client.newBuilder()
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(8, TimeUnit.SECONDS)
+                .callTimeout(10, TimeUnit.SECONDS)
+                .build()
+            val req = Request.Builder().url(REMOTE_REGISTRY_URL)
+                .header("User-Agent", USER_AGENT)
+                .header("Cache-Control", "no-cache")
+                .build()
+            val body = remoteClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "Registre distant: HTTP ${resp.code} — repli cache/probe")
+                    return@withContext false
+                }
+                val declared = resp.body?.contentLength() ?: -1L
+                if (declared > 20L * 1024 * 1024) {
+                    Log.w(TAG, "Registre distant trop gros ($declared o) — ignoré")
+                    return@withContext false
+                }
+                resp.body?.string() ?: return@withContext false
+            }
+            if (body.length > 20 * 1024 * 1024) return@withContext false
+            val obj = JSONObject(body)
+            val savedAt = obj.optLong("savedAt", obj.optLong("ts", 0L))
+            val age = System.currentTimeMillis() - savedAt
+            if (savedAt <= 0L || age > REMOTE_REGISTRY_MAX_AGE_MS) {
+                Log.w(TAG, "Registre distant périmé (âge ${age / 60_000} min) — ignoré")
+                return@withContext false
+            }
+            val channels = obj.optJSONObject("channels") ?: return@withContext false
+            if (channels.length() < REMOTE_REGISTRY_MIN_CHANNELS) {
+                Log.w(TAG, "Registre distant suspect (${channels.length()} chaînes) — ignoré")
+                return@withContext false
+            }
+            val n = synchronized(registryLock) {
+                channelRegistry.clear()
+                applyRegistryChannels(channels)
+            }
+            if (n <= 0) return@withContext false
+            try {
+                registryCacheFile().writeText(
+                    JSONObject().apply { put("ts", savedAt); put("channels", channels) }.toString()
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Persistance du registre distant: ${e.message}")
+            }
+            Log.d(TAG, "Registre distant chargé: $n chaînes (généré il y a ${age / 60_000} min)")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Registre distant indisponible (${e.message}) — repli cache/probe")
             false
         }
     }
@@ -1401,11 +1495,13 @@ object VegetaTvProvider : Provider, IptvProvider {
 
             val t0 = System.currentTimeMillis()
 
-            // Try disk cache first
-            if (loadRegistryCache()) {
+            // 2026-09-13 : registre PRÉ-CALCULÉ nx-data EN PREMIER (cf. loadRemoteRegistry),
+            //   cache disque en repli. Dans les deux cas, le top-up live (scanAdditionalServers)
+            //   continue en arrière-plan ci-dessous, exactement comme avant.
+            if (loadRemoteRegistry() || loadRegistryCache()) {
                 registryLoaded = true
                 lastLoadTime = System.currentTimeMillis()
-                Log.d(TAG, "Registry restored from disk in ${System.currentTimeMillis() - t0}ms")
+                Log.d(TAG, "Registry ready (remote/disk) in ${System.currentTimeMillis() - t0}ms")
                 scope.launch {
                     try {
                         if (vegetaServers.isEmpty()) {
