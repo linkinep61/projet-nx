@@ -94,6 +94,14 @@ object VegetaTvProvider : Provider, IptvProvider {
         val streams: MutableList<VegetaStreamRef> = mutableListOf(),
     )
 
+    /** 2026-09-13 : vrai quand le registre en cours vient du JSON nx-data (frais, < 24 h).
+     *  Dans ce cas il contient deja toutes les chaines et plusieurs serveurs par chaine, et
+     *  l'on n'a plus a telecharger les playlists des panels — ce qui consommait leur quota
+     *  de bande passante pendant la lecture et provoquait des 509 (coupure toutes les ~60 s). */
+    @Volatile private var registreDistantUtilise = false
+    /** Vrai une fois le registre COMPLET fusionne dans channelRegistry (une fois par session). */
+    @Volatile private var registreCompletFusionne = false
+
     private val channelRegistry = LinkedHashMap<String, ChannelInfo>()
     private val registryLock = Any()
     private val registryMutex = Mutex()
@@ -229,6 +237,12 @@ object VegetaTvProvider : Provider, IptvProvider {
     //   Même hôte que VegetaVod.RAW (le runner atteint les panels, pas l'appareil).
     private const val REMOTE_REGISTRY_URL =
         "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/vegetatv/vegeta-fr.json"
+    /** 2026-09-13 bis : même registre SANS plafond de flux par chaîne (~5 Mo, 32 800 flux au lieu
+     *  de 20 200). Publié en FICHIER DE RELEASE et non dans le dépôt : une release remplace la
+     *  version précédente, donc zéro octet ajouté à l'historique git. Chargé en arrière-plan,
+     *  seulement quand l'utilisateur entre dans Vegeta TV (cf. fusionnerRegistreComplet). */
+    private const val REMOTE_FULL_URL =
+        "https://github.com/xdata-mix/nx-data/releases/download/vegeta-full/vegeta-fr-full.json"
     /** Au-delà, le JSON distant est considéré périmé (le cron passe toutes les 4 h ;
      *  24 h tolère une panne de runner sans retomber sur le scan complet). */
     private const val REMOTE_REGISTRY_MAX_AGE_MS = 24L * 60 * 60 * 1000L
@@ -1259,6 +1273,88 @@ object VegetaTvProvider : Provider, IptvProvider {
         return n
     }
 
+    /**
+     * 2026-09-13 bis (user « on n'était pas censé avoir un 2nd chargement avec les autres serveurs
+     * après ? J'ai 4 serveurs affichés mais un seul qui fonctionne ») : COMPLÉMENT du registre
+     * léger. Le même cron publie un second fichier SANS plafond de 4 flux par chaîne (TF1 : 97
+     * serveurs, Canal+ Cinéma : 33), déposé en fichier de release — donc téléchargé chez GitHub,
+     * jamais chez les panels : contrairement à l'ancien scan, il ne consomme pas leur quota et ne
+     * peut pas provoquer de coupure pendant la lecture.
+     *
+     * Il est chargé EN ARRIÈRE-PLAN, après que le registre léger a rendu la main : le démarrage
+     * reste inchangé, et les serveurs supplémentaires viennent enrichir les chaînes déjà en place.
+     * Ceux qui sont déjà connus (même URL) ne sont pas dupliqués ; les nouveaux sont ajoutés en
+     * queue, donc derrière ceux qui ont déjà fait leurs preuves. Le guetteur de registre
+     * (spawnLateRegistryWatcher) les émet ensuite au sélecteur de la chaîne ouverte, sans couper.
+     */
+    private suspend fun fusionnerRegistreComplet(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val clientComplet = client.newBuilder()
+                .connectTimeout(6, TimeUnit.SECONDS)
+                .readTimeout(25, TimeUnit.SECONDS)
+                .callTimeout(40, TimeUnit.SECONDS)
+                .build()
+            val req = Request.Builder().url(REMOTE_FULL_URL)
+                .header("User-Agent", USER_AGENT)
+                .build()
+            val body = clientComplet.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.d(TAG, "Registre complet: HTTP ${resp.code} — on garde le registre léger")
+                    return@withContext false
+                }
+                val declared = resp.body?.contentLength() ?: -1L
+                if (declared > 40L * 1024 * 1024) {
+                    Log.w(TAG, "Registre complet trop gros ($declared o) — ignoré")
+                    return@withContext false
+                }
+                resp.body?.string() ?: return@withContext false
+            }
+            val obj = JSONObject(body)
+            val savedAt = obj.optLong("savedAt", obj.optLong("ts", 0L))
+            if (savedAt <= 0L || System.currentTimeMillis() - savedAt > REMOTE_REGISTRY_MAX_AGE_MS) {
+                Log.d(TAG, "Registre complet périmé — ignoré")
+                return@withContext false
+            }
+            val channels = obj.optJSONObject("channels") ?: return@withContext false
+            var ajoutes = 0
+            var chainesTouchees = 0
+            synchronized(registryLock) {
+                for (cle in channels.keys()) {
+                    val ch = channels.optJSONObject(cle) ?: continue
+                    val flux = ch.optJSONArray("streams") ?: continue
+                    val info = channelRegistry[cle] ?: ChannelInfo(
+                        displayName = ch.optString("displayName", "").ifBlank { cle },
+                        category = ch.optString("category", "")
+                            .ifBlank { guessCategory(ch.optString("displayName", cle)) },
+                        logo = ch.optString("logo", ""),
+                    ).also { channelRegistry[cle] = it }
+                    val connues = info.streams.mapTo(HashSet()) { it.url }
+                    var avant = info.streams.size
+                    for (i in 0 until flux.length()) {
+                        val s = flux.optJSONObject(i) ?: continue
+                        val url = s.optString("url", "")
+                        if (url.isBlank() || !connues.add(url)) continue
+                        info.streams.add(VegetaStreamRef(
+                            serverIdx = s.optInt("serverIdx", 0),
+                            label = s.optString("label", ""),
+                            url = url,
+                            baseUrl = s.optString("baseUrl", ""),
+                            mac = s.optString("mac", ""),
+                            cmd = s.optString("cmd", ""),
+                        ))
+                        ajoutes++
+                    }
+                    if (info.streams.size > avant) chainesTouchees++
+                }
+            }
+            Log.d(TAG, "Registre complet fusionné : +$ajoutes flux sur $chainesTouchees chaînes")
+            ajoutes > 0
+        } catch (e: Exception) {
+            Log.d(TAG, "Registre complet indisponible (${e.message}) — on garde le registre léger")
+            false
+        }
+    }
+
     /** 2026-09-13 : charge le registre PRÉ-CALCULÉ par le cron nx-data (cf. REMOTE_REGISTRY_URL).
      *  Timeout court (10 s) : GitHub ne doit jamais retarder le lancement ; en cas d'échec on
      *  retombe sur le cache disque puis sur le probe live, exactement comme avant.
@@ -1496,21 +1592,47 @@ object VegetaTvProvider : Provider, IptvProvider {
             val t0 = System.currentTimeMillis()
 
             // 2026-09-13 : registre PRÉ-CALCULÉ nx-data EN PREMIER (cf. loadRemoteRegistry),
-            //   cache disque en repli. Dans les deux cas, le top-up live (scanAdditionalServers)
-            //   continue en arrière-plan ci-dessous, exactement comme avant.
-            if (loadRemoteRegistry() || loadRegistryCache()) {
+            //   cache disque en repli.
+            val registreDistantFrais = loadRemoteRegistry()
+            if (registreDistantFrais || loadRegistryCache()) {
                 registryLoaded = true
                 lastLoadTime = System.currentTimeMillis()
                 Log.d(TAG, "Registry ready (remote/disk) in ${System.currentTimeMillis() - t0}ms")
-                scope.launch {
-                    try {
-                        if (vegetaServers.isEmpty()) {
-                            vegetaServers = parseVegetaServerList()
+                // 2026-09-13 bis (user « ça coupe et ça recharge à la fin de chaque minute »,
+                //   log Oppo du 13/09) : CAUSE TROUVÉE. scanAdditionalServers() télécharge la
+                //   playlist ENTIÈRE de chaque panel — 14 en parallèle, 34 937 lignes pour un
+                //   seul d'entre eux — et il le faisait pendant la lecture, y compris sur LE
+                //   panel dont on lit la chaîne. Ces comptes Xtream ont un quota de bande
+                //   passante : quelques mégaoctets tirés en parallèle du direct et le serveur
+                //   répond 509 au rafraîchissement du manifeste, d'où la coupure toutes les
+                //   ~60 s. Mesuré : m3u lancés à 15:48:38, lecture à 15:48:42, 509 à 15:49:43.
+                //   Ce scan n'a plus de raison d'être quand le registre distant est frais : il
+                //   contient déjà toutes les chaînes et plusieurs serveurs pour chacune, calculés
+                //   côté GitHub. On ne le garde que si l'on a dû se rabattre sur le cache disque.
+                registreDistantUtilise = registreDistantFrais
+                if (registreDistantFrais) {
+                    Log.d(TAG, "Registre nx-data frais → pas de scan des panels (on ne consomme pas leur quota pendant la lecture)")
+                    // Le « 2e chargement » : les serveurs supplémentaires arrivent du registre
+                    //   complet, chez GitHub, sans toucher au quota des panels (cf. la fonction).
+                    if (!registreCompletFusionne) {
+                        scope.launch {
+                            if (fusionnerRegistreComplet()) {
+                                registreCompletFusionne = true
+                                try { saveRegistryCache() } catch (_: Exception) {}
+                            }
                         }
-                        scanAdditionalServers()
-                        saveRegistryCache()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Background refresh: ${e.message}")
+                    }
+                } else {
+                    scope.launch {
+                        try {
+                            if (vegetaServers.isEmpty()) {
+                                vegetaServers = parseVegetaServerList()
+                            }
+                            scanAdditionalServers()
+                            saveRegistryCache()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Background refresh: ${e.message}")
+                        }
                     }
                 }
                 return@withLock
@@ -2022,11 +2144,24 @@ object VegetaTvProvider : Provider, IptvProvider {
             //   les serveurs équivalents, on auto-joue la qualité la PLUS LÉGÈRE d'abord (HD 720p =
             //   sweet spot). Le lastGood reste épinglé en tête ; FHD/4K restent en choix manuel.
             val lastGood = lastGoodStreamUrl[key]
+            // 2026-09-13 ter (user « j'ai 4 serveurs affichés mais qu'un qui fonctionne ») : quand
+            //   le registre vient de nx-data, son ORDRE est deja le bon et il est le fruit d'un
+            //   calcul : serveurs FR d'abord, puis globaux, puis etrangers, puis les panels
+            //   supplementaires, le tout en round-robin pour la diversite ; le registre complet
+            //   fusionne ensuite ses serveurs EN QUEUE, derriere ceux-la. Re-trier tout ce monde
+            //   par le libelle de qualite detruisait cet ordre : sur TF1, apres fusion, la lecture
+            //   demarrait sur un serveur jamais eprouve (92 manifestes invalides d'affilee au lieu
+            //   du serveur qui marchait). On ne retrie donc plus dans ce cas ; le dernier serveur
+            //   qui a fonctionne reste epingle en tete, comme avant.
+            val ordreDuRegistre = registreDistantUtilise
+            val resteTrie: (List<VegetaStreamRef>) -> List<VegetaStreamRef> = { l ->
+                if (ordreDuRegistre) l else l.sortedBy { qualityWeight(it.label) }
+            }
             val sortedStreams = if (lastGood != null) {
                 val pinned = aliveStreams.firstOrNull { it.url == lastGood }
-                if (pinned != null) listOf(pinned) + aliveStreams.filter { it.url != lastGood }.sortedBy { qualityWeight(it.label) }
-                else aliveStreams.sortedBy { qualityWeight(it.label) }
-            } else aliveStreams.sortedBy { qualityWeight(it.label) }
+                if (pinned != null) listOf(pinned) + resteTrie(aliveStreams.filter { it.url != lastGood })
+                else resteTrie(aliveStreams)
+            } else resteTrie(aliveStreams)
 
             // Build display labels with auto-disambiguation: when multiple streams
             // share the same base label (e.g. all "Server 39"), append #1, #2, etc.
@@ -2060,7 +2195,13 @@ object VegetaTvProvider : Provider, IptvProvider {
             val nonBannedCount = servers.count { srv ->
                 !com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedServers.isBanned(id, srv.id)
             }
-            if (nonBannedCount < 5) {
+            // 2026-09-13 : avec le registre nx-data, une chaine a au plus MAX_STREAMS_PER_CHANNEL
+            //   serveurs (4), donc « moins de 5 » etait TOUJOURS vrai : le backfill se declenchait
+            //   a CHAQUE ouverture de chaine et retelechargeait les playlists des panels pendant
+            //   la lecture — meme cause que le 509 ci-dessus. Quand le registre distant est frais,
+            //   on ne relance le scan que si la chaine est reellement depourvue (moins de 2).
+            val seuilBackfill = if (registreDistantUtilise) 2 else 5
+            if (nonBannedCount < seuilBackfill) {
                 // 2026-05-17 v15 : check si le favori est DÉJÀ dans servers actuels.
                 //   Si non, on demande au backfill de le scanner en priorité.
                 val favoriteAlreadyPresent = favoriteServerIdx?.let { favIdx ->
