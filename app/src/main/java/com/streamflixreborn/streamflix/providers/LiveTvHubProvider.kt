@@ -1077,6 +1077,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
             FolderDef("tf1plus", "Replay TF1+", Regex("^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries) - .*$")),
             FolderDef("m6plus", "Replay M6+", Regex("^Replay (M6|W9|6ter|Gulli|Paris Première|Téva)(\\s.*)?$")),
             FolderDef("bfmplay", "Replay BFM Play", Regex("^Replay (BFM TV|RMC Story|RMC Découverte|BFM Business|RMC Life)(\\s.*)?$")),
+            // 2026-09-12 (user « Option A » : un bon dossier « Mix FR » rangé) :
+            //   dossier dédié pour des sources ParaTV que nx-data ne tirait pas
+            //   (famille TF1+ + famille RMC/BFM, pointeurs github auto-rafraîchis).
+            //   group-title data.m3u = "Mix FR - TF1+" / "Mix FR - RMC/BFM".
+            //   On N'AJOUTE QUE — aucune entrée existante touchée.
+            FolderDef("mixfr", "Mix FR", Regex("^Mix FR - .*$")),
             // 2026-06-22 (user "fais des bons dossiers pour pas que ça soit
             //   trop mélangé, comme l'exemple du site") : les thématiques
             //   transverses sont regroupées dans des dossiers dédiés, séparés

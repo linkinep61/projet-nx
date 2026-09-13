@@ -4267,8 +4267,25 @@ class PlayerMobileFragment : Fragment() {
             if (_binding != null) binding.settings.refreshChannelVariantList()
         }
 
-        // Find the first untried variant
-        val nextVariant = variants.firstOrNull { it.id !in triedChannelVariantIds }
+        // 2026-09-13 (user « un bug en cache qui reprend France TV quand il trouve rien ») :
+        //   ChannelVariant.list est GLOBALE et n'est vidée que sur SuccessLoadingServers.
+        //   Quand la nouvelle chaîne n'a aucun serveur, la liste contient encore les
+        //   variantes de la chaîne PRÉCÉDENTE → ce repli jouait France 2 sous la carte
+        //   Canal+. On ne retient que les variantes étiquetées pour CETTE chaîne
+        //   (channelKey, normalisé comme dans le CLEAR de SuccessLoadingServers) ; une
+        //   variante sans clé n'est jamais un repli. Le picker, lui, n'est pas touché.
+        fun cleNorm(k: String): String = k
+            .removePrefix("ch::").removePrefix("sport::")
+            .removePrefix("ola_ep::").removePrefix("ola::")
+            .removePrefix("vegeta_ep::").removePrefix("vegeta::")
+        val cleCourante = cleNorm(args.id)
+        val nextVariant = variants.firstOrNull {
+            it.id !in triedChannelVariantIds &&
+                it.channelKey.isNotEmpty() && cleNorm(it.channelKey) == cleCourante
+        }
+        if (nextVariant == null && variants.any { it.id !in triedChannelVariantIds }) {
+            Log.w("PlayerMobileFragment", "Fallback refusé : variantes restantes d'une AUTRE chaîne (${variants.firstOrNull()?.channelKey} ≠ ${args.id})")
+        }
         if (nextVariant != null) {
             triedChannelVariantIds.add(nextVariant.id)
             Log.d("PlayerMobileFragment", "Fallback → trying channel variant: ${nextVariant.name}")
