@@ -1257,10 +1257,12 @@ object LiveHubFolderDialog {
     // 2026-06-20 v5 : sous-catégories ("Replay TF1 - Séries U.S", etc.)
     // 2026-06-23 : élargi pour englober les sections thématiques "Replay TF1+ Films - <section>"
     // et "Replay TF1+ Séries - <section>" scrapées du site (Top 10, Action, etc.).
+    // 2026-09-14 : 3e axe « Émissions ». DOIT rester identique aux FolderDef
+    //   tf1plus / m6plus de groupSectionsIntoFolders (LiveTvHubProvider).
     private val tf1PlusRegex = Regex(
-        "^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries) - .*$"
+        "^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries|Émissions) - .*$"
     )
-    private val m6PlusRegex = Regex("^Replay (M6|W9|6ter|Gulli|Paris Première|Téva)(\\s.*)?$")
+    private val m6PlusRegex = Regex("^Replay (M6|W9|6ter|Gulli|Paris Première|Téva)(\\s.*)?$|^Thématique M6\\+ - .*$")
     private val francetvRegex = Regex(
         "^Replay (France ?[2-5]|France ?24|france ?info|France ?info|France ô|FranceTV|Slash).*",
         RegexOption.IGNORE_CASE,
@@ -1993,15 +1995,17 @@ object LiveHubFolderDialog {
         val subCatOrder = mapOf(
             "Séries" to 1,
             "Films" to 2,
-            "Divertissement" to 3,
-            "Téléfilms" to 4,
-            "Info" to 5,
-            "Docs" to 6,
-            "Sport" to 7,
-            "Jeunesse" to 8,
-            "Impact" to 9,
-            "Programmes" to 10,
-            "Direct" to 11,
+            // 2026-09-14 : 3e axe, juste après Films (les suivants sont décalés de +1).
+            "Émissions" to 3,
+            "Divertissement" to 4,
+            "Téléfilms" to 5,
+            "Info" to 6,
+            "Docs" to 7,
+            "Sport" to 8,
+            "Jeunesse" to 9,
+            "Impact" to 10,
+            "Programmes" to 11,
+            "Direct" to 12,
         )
         // Agrège : extrait la partie après " - " comme clé de sous-catégorie.
         // Les cartes login/status (__login_) sont filtrées → une seule sera
@@ -2037,6 +2041,23 @@ object LiveHubFolderDialog {
             val themedPrefix: Pair<String, String>? = when {
                 cat.name.startsWith("Replay TF1+ Films - ") -> "Films" to cat.name.removePrefix("Replay TF1+ Films - ")
                 cat.name.startsWith("Replay TF1+ Séries - ") -> "Séries" to cat.name.removePrefix("Replay TF1+ Séries - ")
+                // 2026-09-14 : 3e axe TF1+ — rails de /programmes-tv/divertissement
+                //   ("Replay TF1+ Émissions - Top 10", "- Télé-réalité", etc.).
+                cat.name.startsWith("Replay TF1+ Émissions - ") -> "Émissions" to cat.name.removePrefix("Replay TF1+ Émissions - ")
+                // 2026-09-14 : M6+ — les thématiques du m3u deviennent les 3 axes du
+                //   dossier Replay M6+. Le nom de la thématique sert de sous-section,
+                //   donc on garde le 2-niveaux : M6+ → Émissions → Divertissement.
+                //   Tout ce qui n'est ni cinéma ni série est une émission (Divertissement,
+                //   Infos & Société, Jeunesse, Sport, Podcasts, Séries réalité…).
+                cat.name.startsWith("Thématique M6+ - ") -> {
+                    val theme = cat.name.removePrefix("Thématique M6+ - ")
+                    val axe = when (theme) {
+                        "Cinéma", "Téléfilms" -> "Films"
+                        "Séries" -> "Séries"
+                        else -> "Émissions"
+                    }
+                    axe to theme
+                }
                 // 2026-06-23 (user "il faudrait faire un sous-dossier Musique
                 //   sur Arte comme sur le site") : regroupe TOUS les
                 //   "Arte Concert - X" (Classique, Jazz, Metal, etc.) dans un
