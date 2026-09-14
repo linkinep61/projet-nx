@@ -1085,7 +1085,16 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //     absorbe ici dans le dossier Replay M6+ ; le mapping thématique→axe
             //     (Cinéma/Téléfilms→Films, Séries→Séries, reste→Émissions) est fait par
             //     themedPrefix dans LiveHubFolderDialog.
-            FolderDef("tf1plus", "Replay TF1+", Regex("^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries|Émissions) - .*$")),
+            // 2026-09-14 (2) : "Replay TF1+ Complement - <CHAÎNE>" AJOUTÉ au motif.
+            //   Ces sections viennent de scripts/refresh_tf1_sitemap.py (2e script du
+            //   workflow refresh_tf1, qui complète le catalogue via les sitemaps TF1).
+            //   Elles ne matchaient AUCUNE des deux alternatives : la 1re exige un blanc
+            //   après le nom de chaîne (ici c'est « + »), la 2e ne listait que
+            //   Films/Séries/Émissions. Résultat : 1541 programmes TF1+ — soit PLUS que
+            //   les 1422 correctement rangés — tombaient dans le catch-all
+            //   « Autres Replays ». Ce n'est PAS du contenu payant : le a-la-carte
+            //   (TF1+ Premium) est exclu en amont par KEEP_CHANNELS dans le script.
+            FolderDef("tf1plus", "Replay TF1+", Regex("^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries|Émissions|Complement) - .*$")),
             FolderDef("m6plus", "Replay M6+", Regex("^Replay (M6|W9|6ter|Gulli|Paris Première|Téva)(\\s.*)?$|^Thématique M6\\+ - .*$")),
             FolderDef("bfmplay", "Replay BFM Play", Regex("^Replay (BFM TV|RMC Story|RMC Découverte|BFM Business|RMC Life)(\\s.*)?$")),
             // 2026-09-12 (user « Option A » : un bon dossier « Mix FR » rangé) :
