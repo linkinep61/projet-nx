@@ -1074,8 +1074,19 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   Replay TF1+ existant (= pas dans 2 nouveaux folders séparés).
             //   Le regex est élargi pour capter aussi "Replay TF1+ Films - X"
             //   et "Replay TF1+ Séries - X" en plus des chaînes individuelles.
-            FolderDef("tf1plus", "Replay TF1+", Regex("^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries) - .*$")),
-            FolderDef("m6plus", "Replay M6+", Regex("^Replay (M6|W9|6ter|Gulli|Paris Première|Téva)(\\s.*)?$")),
+            // 2026-09-14 (user « ramener les émissions dans le bon dossier, en faisant
+            //   un 3e dossier avec les catégories, pour TF1 et M6 ») : 3e axe « Émissions »
+            //   à côté de Films et Séries.
+            //   - TF1+ : nouvelles sections "Replay TF1+ Émissions - <rail>" produites par
+            //     scripts/refresh_tf1.py (scrape par rails de /programmes-tv/divertissement).
+            //   - M6+ : les émissions existaient DÉJÀ en données ("Thématique M6+ -
+            //     Divertissement/Infos & Société/Jeunesse/Sport", ~620 programmes) mais
+            //     étaient rangées dans un dossier séparé « Thématiques M6+ ». On les
+            //     absorbe ici dans le dossier Replay M6+ ; le mapping thématique→axe
+            //     (Cinéma/Téléfilms→Films, Séries→Séries, reste→Émissions) est fait par
+            //     themedPrefix dans LiveHubFolderDialog.
+            FolderDef("tf1plus", "Replay TF1+", Regex("^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries|Émissions) - .*$")),
+            FolderDef("m6plus", "Replay M6+", Regex("^Replay (M6|W9|6ter|Gulli|Paris Première|Téva)(\\s.*)?$|^Thématique M6\\+ - .*$")),
             FolderDef("bfmplay", "Replay BFM Play", Regex("^Replay (BFM TV|RMC Story|RMC Découverte|BFM Business|RMC Life)(\\s.*)?$")),
             // 2026-09-12 (user « Option A » : un bon dossier « Mix FR » rangé) :
             //   dossier dédié pour des sources ParaTV que nx-data ne tirait pas
@@ -1094,6 +1105,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   - M6+ : 9 thématiques (Divertissement, Séries réalité, Séries,
             //     Sport, Infos & Société, Cinéma, Téléfilms, Jeunesse, Podcasts)
             FolderDef("bfmthemes", "Thématiques BFM Play", Regex("^Thématique BFM Play - .*$")),
+            // 2026-09-14 : INERTE depuis que "m6plus" (plus haut dans `defs`) capte aussi
+            //   "^Thématique M6\+ - .*$". Le premier def qui matche gagne (cf. la boucle
+            //   `for (def in defs) { … break }`), donc ces sections partent désormais dans
+            //   Replay M6+ et ce dossier ne reçoit plus rien → il n'apparaît plus au home.
+            //   Laissé en place volontairement : le jour où l'on voudrait re-séparer les
+            //   thématiques M6+, il suffit de retirer l'alternative ajoutée sur m6plus.
             FolderDef("m6themes", "Thématiques M6+", Regex("^Thématique M6\\+ - .*$")),
             // 2026-06-26 : FUSION — un seul dossier "France TV" qui contient les
             //   CHAÎNES (Replay France 2/3/...) ET les CATÉGORIES thématiques
