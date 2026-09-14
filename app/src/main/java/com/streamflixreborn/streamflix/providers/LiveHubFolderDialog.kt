@@ -1260,7 +1260,7 @@ object LiveHubFolderDialog {
     // 2026-09-14 : 3e axe « Émissions ». DOIT rester identique aux FolderDef
     //   tf1plus / m6plus de groupSectionsIntoFolders (LiveTvHubProvider).
     private val tf1PlusRegex = Regex(
-        "^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries|Émissions) - .*$"
+        "^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries|Émissions|Complement) - .*$"
     )
     private val m6PlusRegex = Regex("^Replay (M6|W9|6ter|Gulli|Paris Première|Téva)(\\s.*)?$|^Thématique M6\\+ - .*$")
     private val francetvRegex = Regex(
@@ -1997,15 +1997,17 @@ object LiveHubFolderDialog {
             "Films" to 2,
             // 2026-09-14 : 3e axe, juste après Films (les suivants sont décalés de +1).
             "Émissions" to 3,
-            "Divertissement" to 4,
-            "Téléfilms" to 5,
-            "Info" to 6,
-            "Docs" to 7,
-            "Sport" to 8,
-            "Jeunesse" to 9,
-            "Impact" to 10,
-            "Programmes" to 11,
-            "Direct" to 12,
+            // 2026-09-14 (2) : complément sitemap TF1+, rangé par chaîne.
+            "Chaînes" to 4,
+            "Divertissement" to 5,
+            "Téléfilms" to 6,
+            "Info" to 7,
+            "Docs" to 8,
+            "Sport" to 9,
+            "Jeunesse" to 10,
+            "Impact" to 11,
+            "Programmes" to 12,
+            "Direct" to 13,
         )
         // Agrège : extrait la partie après " - " comme clé de sous-catégorie.
         // Les cartes login/status (__login_) sont filtrées → une seule sera
@@ -2044,6 +2046,22 @@ object LiveHubFolderDialog {
                 // 2026-09-14 : 3e axe TF1+ — rails de /programmes-tv/divertissement
                 //   ("Replay TF1+ Émissions - Top 10", "- Télé-réalité", etc.).
                 cat.name.startsWith("Replay TF1+ Émissions - ") -> "Émissions" to cat.name.removePrefix("Replay TF1+ Émissions - ")
+                // 2026-09-14 (2) : complément sitemap — "Replay TF1+ Complement - TF1",
+                //   "- TMC", "- TF1-SERIES-FILMS"… Ce sont des programmes de chaîne que
+                //   le scrape par rails n'avait pas vus (1541 au total). On les range
+                //   sous un axe « Chaînes », section = nom de chaîne remis au propre.
+                cat.name.startsWith("Replay TF1+ Complement - ") -> {
+                    val brut = cat.name.removePrefix("Replay TF1+ Complement - ")
+                    val chaine = when (brut.uppercase()) {
+                        "TF1" -> "TF1"
+                        "TMC" -> "TMC"
+                        "TFX" -> "TFX"
+                        "TF1-SERIES-FILMS" -> "TF1 Séries Films"
+                        "LCI" -> "LCI"
+                        else -> brut.replace('-', ' ')
+                    }
+                    "Chaînes" to chaine
+                }
                 // 2026-09-14 : M6+ — les thématiques du m3u deviennent les 3 axes du
                 //   dossier Replay M6+. Le nom de la thématique sert de sous-section,
                 //   donc on garde le 2-niveaux : M6+ → Émissions → Divertissement.
