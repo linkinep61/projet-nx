@@ -67,6 +67,14 @@ class FranimeExtractor : Extractor() {
         "weneverbeenfree",
         // VidMoLy (toutes variations)
         "vidmoly", "vmoly",
+        // 2026-09-15 : ansembed.net EST un mirror Vidmoly (déjà alias de VidMoLyExtractor
+        //   depuis le 2026-07-29, même JWPlayer, même CDN vmwesa.online). Il manquait
+        //   seulement ICI, dans la liste de RECONNAISSANCE de l'iframe : sans ce jeton le
+        //   WebView ne voyait jamais passer le lecteur, donc aucune capture, donc échec —
+        //   alors que l'extracteur savait parfaitement le traiter ensuite.
+        //   ⚠ « vidmoly »/« vmoly » ne le rattrapent pas : aucune sous-chaîne commune.
+        //   Relevé sur l'API FRAnime : 1680 épisodes concernés sur 56 348.
+        "ansembed",
         // Uqload
         "uqload", "ulto",
         // MixDrop
@@ -75,6 +83,10 @@ class FranimeExtractor : Extractor() {
         "vidhide", "minochinos", "dhtpre", "peytonepre", "vidhideplus",
         "dingtezuni", "dintezuvio", "moflix-stream.click", "filelions",
         "streamhide",
+        // 2026-09-15 : même cas qu'ansembed — morencius.com est déjà alias de
+        //   VidHideExtractor (mirror EarnVids du player RNVIDS), mais il manquait dans
+        //   cette liste de reconnaissance. 11 épisodes FRAnime concernés.
+        "morencius",
         // Smoothpre
         "smoothpre",
         // Doodstream

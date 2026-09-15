@@ -524,6 +524,42 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         var play: org.json.JSONObject? = null
         var download: org.json.JSONObject? = null
         for (front in orderedFronts()) {
+            // ⚠ 2026-09-15 (user : « le site a un choix de langue, si on choisit Français
+            //   on est sûr d'avoir du doublage français ») — LE REFERER PORTE LA LANGUE.
+            //   Relevé en direct dans le Chrome du user sur officialmoviebox.com :
+            //     · le sélecteur de langue propose English / العربية / Français /
+            //       Bahasa Indonesia / हिन्दी / اردو / Filipino ;
+            //     · il n'agit NI par cookie, NI par en-tête, NI par paramètre — vérifié,
+            //       `/detail?subjectId=…` rend le même detailPath avec ou sans `lang=fr`,
+            //       `Accept-Language`, `locale=fr`… ;
+            //     · la langue est UNIQUEMENT dans l'URL DE PAGE, et cette page est
+            //       précisément le Referer exigé par `/subject/play` :
+            //         /fr/moviesDetail/<detailPath>  → « Regardez … en streaming »
+            //         /en/moviesDetail/<detailPath>  → « Watch … Streaming Online »
+            //         /movies/<detailPath>           → route héritée, SANS locale  ← on était là
+            //   Les trois répondent 200, d'où le fonctionnement apparent : on obtenait des
+            //   flux, mais jamais en déclarant le français, donc la langue par défaut du
+            //   backend (anglais / doublage du marché local).
+            //   Sans Referer de page détail, `/subject/play` rend `hasResource:false` et
+            //   `streams:0` — vérifié aussi. Le Referer n'est donc pas décoratif.
+            //
+            // ⛔ 2026-09-15, MÊME JOUR — TENTATIVE ANNULÉE, NE PAS LA REFAIRE.
+            //   J'ai remplacé ce Referer par `$front/fr/moviesDetail/$detailPath`, en me
+            //   fiant au fait que cette URL répond 200 dans un navigateur. RÉSULTAT MESURÉ
+            //   sur l'Oppo (Kick-Ass, sid=2799000366845677360) :
+            //     · plus AUCUN « front OK = … » → les 3 fronts rendent 0 stream / 0 dash /
+            //       hasResource=false ;
+            //     · `h5ResolvePlay : fallback TV-BFF utilise (2)` → on ne vivait plus que
+            //       sur la sonde TV de secours ;
+            //     · `0 sous-titre(s) FR` au lieu de 1 (les captions viennent de la réponse
+            //       `download` du chemin web, perdue avec lui) ;
+            //     · `emit 1` au lieu de `emit 2`, et le serveur restant en échec de lecture.
+            //   Le backend VALIDE donc le chemin du Referer, et il n'accepte que la route
+            //   héritée `/movies/<detailPath>`. Qu'une URL réponde 200 au navigateur ne dit
+            //   RIEN de ce que cette API accepte comme Referer — c'est le piège dans lequel
+            //   je suis tombé.
+            //   La piste « déclarer le français » reste ouverte, mais elle devra être
+            //   prouvée par le logcat AVANT d'être posée ici, pas l'inverse.
             val referer = "$front/movies/$detailPath"
             val p = h5Get(front, "/wefeed-h5api-bff/subject/play?$params", referer)
             val d = p?.optJSONObject("data")
@@ -881,9 +917,15 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             return null
         }
 
+        // 2026-09-15 : `rawTitle` AJOUTÉ — on conserve le titre AVANT nettoyage.
+        //   `cleanIt` retire le suffixe de langue via LANG_SUFFIX_REGEX ; c'est
+        //   indispensable au matching (« Kick-Ass [Hindi] » doit matcher « Kick-Ass »),
+        //   mais ça DÉTRUIT la seule information qui dit quel doublage on regarde.
+        //   Sans le brut, impossible de préférer la version française : voir la
+        //   priorité de langue plus bas.
         data class Candidate(
             val sid: String, val cleanTitle: String, val normTitle: String,
-            val year: Int, val subjectType: Int,
+            val year: Int, val subjectType: Int, val rawTitle: String,
         )
         val candidates = mutableListOf<Candidate>()
         for (s in items) {
@@ -893,7 +935,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             val itYear = s.optString("releaseDate").take(4).toIntOrNull() ?: 0
             // 0 = type absent de la réponse → inconnu, on ne l'écarte pas.
             val itType = if (s.has("subjectType")) s.optInt("subjectType", 0) else 0
-            candidates.add(Candidate(sid, cleanIt, normalizeForMatch(cleanIt), itYear, itType))
+            candidates.add(Candidate(sid, cleanIt, normalizeForMatch(cleanIt), itYear, itType, itTitle.trim()))
         }
 
         // ⚠ 2026-08-20 (user « t'as récupéré 2 mauvais matchs avec Cloudstream ») —
@@ -935,6 +977,47 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             tmdbToSubjectIdCache[cacheKey] = ""
             Log.d(TAG, "findSubjectId('$cleanQuery' year=$year): 0 candidates")
             return null
+        }
+
+        // ⚠ 2026-09-15 (remontée utilisateurs : « des serveurs non français alors que le
+        //   titre a du français, sauf sur les VO françaises ») — PRIORITÉ DE LANGUE.
+        //   MovieBox+ écrit la langue du doublage DANS LE TITRE, et chaque doublage est
+        //   un sujet séparé. Relevé en direct sur l'Oppo :
+        //     findSubjectId('Kick-Ass' year=2010) → exact+year=Kick-Ass (2010)
+        //     /get → "title":"Kick-Ass [Hindi]"        ← le sujet retenu était le hindi
+        //     → 2 serveurs remontés en [VO], audio hindi
+        //   `normalizeForMatch` gomme les crochets : « Kick-Ass [Hindi] » et « Kick-Ass »
+        //   deviennent le MÊME titre normalisé. Les 5 stratégies ci-dessous prenant toutes
+        //   le PREMIER candidat qui matche, c'est l'ordre de pertinence de MovieBox+ qui
+        //   tranchait — et son catalogue est indien, donc le hindi passait devant.
+        //   On ne filtre PAS (un sujet étranger reste mieux que rien, il remontera en
+        //   [VO] via computeLangSuffix) : on le RELÈGUE simplement en fin de liste.
+        //   Le tri est STABLE, donc à égalité l'ordre MovieBox+ d'origine est préservé.
+        //   Invisible sur un film français (Astérix : un seul sujet, rien à départager)
+        //   — d'où la survie du défaut jusqu'ici.
+        //   ⚠ ON TESTE `rawTitle`, JAMAIS `cleanTitle` : le second a déjà été expurgé
+        //   par LANG_SUFFIX_REGEX quelques lignes plus haut. Première tentative ratée
+        //   pour cette raison exacte — le log montrait « exact+year=Kick-Ass » alors
+        //   que le /get du même sid répondait « Kick-Ass [Hindi] ».
+        //   Règle : si le nettoyage a retiré quelque chose, c'est un doublage étiqueté.
+        //   On garde le français, on relègue le reste. LANG_SUFFIX_REGEX reste ainsi la
+        //   SEULE définition de « qu'est-ce qu'un suffixe de langue » — pas de seconde
+        //   liste à maintenir en parallèle.
+        fun estDoublageEtranger(c: Candidate): Boolean {
+            if (c.rawTitle.equals(c.cleanTitle, ignoreCase = true)) return false
+            val brut = c.rawTitle.lowercase()
+            return !(brut.contains("french") || brut.contains("français") ||
+                brut.contains("francais") || brut.contains("vf"))
+        }
+        val avantTri = candidates.map { it.rawTitle }
+        val (etrangers, neutres) = candidates.partition { estDoublageEtranger(it) }
+        if (etrangers.isNotEmpty()) {
+            candidates.clear()
+            candidates.addAll(neutres)
+            candidates.addAll(etrangers)
+            Log.d(TAG, "findSubjectId('$cleanQuery') : ${etrangers.size} doublage(s) étranger(s) " +
+                "relégué(s) → ${etrangers.joinToString(", ") { it.rawTitle }} " +
+                "(ordre avant : ${avantTri.joinToString(" | ")})")
         }
         // Stratégie de matching, par ordre décroissant de confiance :
         // 1. Match normalisé EXACT + année exacte
@@ -2668,17 +2751,39 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
      *  Format : `dubs: [{subjectId, lanCode, lanName, original, type}]` */
     private fun findFrenchDubSubjectId(getResp: JSONObject): String? {
         val dubs = getResp.optJSONObject("data")?.optJSONArray("dubs") ?: return null
+        // 2026-09-15 (remontée utilisateurs : « des serveurs non français alors que le
+        //   titre a du français, sauf sur les VO françaises ») — ON NE PREND PLUS LA
+        //   PREMIÈRE ENTRÉE FR VENUE.
+        //   `dubs[]` mélange DEUX natures, que `frSignalOf` distingue déjà plus haut :
+        //     type=0 → piste AUDIO doublée   (FR_DUB)
+        //     type=1 → piste SOUS-TITRES     (FR_SUB)
+        //   L'ancienne boucle rendait le subjectId de la première entrée française
+        //   quelle qu'elle soit. Quand MovieBox+ listait le sous-titre FR avant le
+        //   doublage, on basculait sur un sujet dont l'AUDIO est resté en VO : le
+        //   titre « a bien du français », mais l'utilisateur entend du hindi ou du
+        //   coréen. Le défaut était invisible sur un film français d'origine (le sujet
+        //   de base est déjà FR, la bascule ne fait rien) — d'où sa survie.
+        //   On balaie donc TOUT le tableau, le doublage l'emporte toujours, et le
+        //   sous-titre ne sert que de repli faute de doublage.
+        var repliSousTitres: String? = null
         for (i in 0 until dubs.length()) {
             val dub = dubs.optJSONObject(i) ?: continue
             val code = dub.optString("lanCode").lowercase()
             val name = dub.optString("lanName").lowercase()
-            if (code == "fr" || code == "fre" || code == "fra" ||
-                name.contains("french") || name.contains("français") || name.contains("francais")) {
-                val sid = dub.optString("subjectId").takeIf { it.isNotBlank() }
-                if (sid != null) return sid
+            val estFr = code == "fr" || code == "fre" || code == "fra" ||
+                name.contains("french") || name.contains("français") || name.contains("francais")
+            if (!estFr) continue
+            val sid = dub.optString("subjectId").takeIf { it.isNotBlank() } ?: continue
+            if (dub.optInt("type", -1) == 0) {
+                Log.d(TAG, "findFrenchDubSubjectId : doublage FR trouvé (type=0) → $sid")
+                return sid
             }
+            if (repliSousTitres == null) repliSousTitres = sid
         }
-        return null
+        if (repliSousTitres != null) {
+            Log.d(TAG, "findFrenchDubSubjectId : AUCUN doublage FR, repli sous-titres → $repliSousTitres")
+        }
+        return repliSousTitres
     }
 
     /** Cherche dans la JSON `/get` le 1er `resourceId` qui matche l'épisode demandé.
