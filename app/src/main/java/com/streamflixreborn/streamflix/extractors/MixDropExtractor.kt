@@ -26,6 +26,9 @@ class MixDropExtractor : Extractor() {
         "https://mixdrop.sx",
         // 2026-05-14 (dessinanime.cc utilise ce miroir spécifique)
         "https://mxdrop.sx",
+        // 2026-09-15 : miroir servi par vidbasic.top (hub de Dramacool). Vérifié au
+        //   curl le jour même : 200 + page `MDCore` classique, donc même recette.
+        "https://mixdrop.ps",
         // 2026-06-13 (porté upstream v1.7.220-v1.7.221) : miroirs avec typo
         //   (i en plus) — protègent si MixDrop change pour ces variantes.
         "https://miixdrop.net",

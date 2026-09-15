@@ -47,6 +47,11 @@ open class DoodLaExtractor : Extractor() {
         "https://doods.pro",
         "https://dood.yt",
         "https://dood.re",
+        // 2026-09-15 (audit des hôtes Dramacool) : `dood.wf` n'était pas reconnu, donc le
+        //   lien mourait en « HOTE NON COUVERT » AVANT même qu'on tente quoi que ce soit.
+        //   Or il redirige vers playmogo.com, déjà dans cette liste — l'ID est portable,
+        //   il suffisait donc de nommer le domaine d'entrée.
+        "https://dood.wf",
         // 2026-06-02 : kokoflix.lol RETIRÉ — c'est un proxy multi-host de FS
         //   qui route selon le suffix /<XXX>_go.php : osaka_go.php = VOE (pas
         //   Dood !), grandline_go.php = autre host.
