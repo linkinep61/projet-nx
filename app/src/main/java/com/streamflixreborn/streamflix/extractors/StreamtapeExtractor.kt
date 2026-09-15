@@ -29,6 +29,11 @@ class StreamtapeExtractor : Extractor() {
         "https://stape.fun",
         "https://shavetape.cash",
         "https://advtpe.com",
+        // 2026-09-15 : miroir listé par vidbasic.top (hub de Dramacool). ⚠ NON ÉPROUVÉ :
+        //   au jour de l'ajout l'embed testé répondait 404, l'hôte semble en perte de
+        //   vitesse. Ajouté quand même pour que le lien parte chez Streamtape au lieu
+        //   de tomber en « HOTE NON COUVERT » si l'hôte revient.
+        "https://watchadsontape.com",
     )
 
 

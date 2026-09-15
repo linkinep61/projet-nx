@@ -58,6 +58,11 @@ class VidaraExtractor : Extractor() {
         // 2026-08-07 (audit DNS) : `vidara.cc` et `vidara.net` retirés — plus d'enregistrement A.
         //   `vidaraa.com` répond, on le prend au passage : même famille, même /api/stream.
         "https://vidaraa.com",
+        // 2026-09-15 (logcat Oppo, film Movix) : « HOTE NON COUVERT: vidvara.site ».
+        //   Noter le « v » à la place du deuxième « a » — encore une variante d'écriture.
+        //   Confirmé : la page se revendique elle-même comme Vidara, son jwplayer porte
+        //   `abouttext:"Vidara"` et `aboutlink:"https://vidara.so/"`, même schéma `/e/<id>`.
+        "https://vidvara.site",
     )
 
     /**

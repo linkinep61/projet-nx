@@ -395,6 +395,17 @@ abstract class Extractor {
             //   Coflix Boston). Page video.js + crypto-js qui déchiffre un .mp4 rumble.cloud
             //   côté client → WebView headless capte le mp4.
             EmmmmbedExtractor(),
+            // 2026-09-15 : les DEUX lecteurs de Dramacool (source complémentaire de
+            //   VoirDrama). Relevé logcat sur l'Oppo : « HOTE NON COUVERT:
+            //   kisskh.megaplay.su » → le serveur « Fast Server (DC) » remontait dans
+            //   la liste mais mourait toujours à l'extraction. Dramacool sert l'un ou
+            //   l'autre selon le titre, il faut donc les deux.
+            MegaplayExtractor(),
+            VidbasicExtractor(),
+            // 2026-09-15 : TokyVideo — serveur proposé par Movix sur CHAQUE film, et
+            //   échouant sur chaque film (« HOTE NON COUVERT: www.tokyvideo.com »).
+            //   Le .mp4 est en clair dans le HTML, rien à déchiffrer.
+            TokyvideoExtractor(),
             // 2026-07-13 : Streamhg (EarnVids) = Cloudflare Turnstile non passable en headless
             //   depuis l'IP courante → serveur MASQUÉ à la source (CoflixSourceProvider) et
             //   extracteur RETIRÉ (inutile d'appeler un truc qui échoue). Fichier gardé pour ref.

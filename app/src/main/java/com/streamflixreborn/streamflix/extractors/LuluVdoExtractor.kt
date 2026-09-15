@@ -34,7 +34,15 @@ class LuluVdoExtractor : Extractor() {
     override val name = "LuluVdo"
     // 2026-06-02 : luluvdo.com redirige vers lulustream.com (rename).
     override val mainUrl = "https://lulustream.com/"
-    override val aliasUrls = listOf("https://luluvdo.com", "https://luluvdoo.com", "https://luluvid.com")
+    override val aliasUrls = listOf(
+        "https://luluvdo.com", "https://luluvdoo.com", "https://luluvid.com",
+        // 2026-09-15 (logcat Oppo, film Movix) : « HOTE NON COUVERT: livavid.sbs ».
+        //   Ce n'est pas un nouvel hébergeur — la page se présente elle-même comme
+        //   LuluStream (`<title>…  - LuluStream</title>`) et sert le même JS packé
+        //   jwplayer + m3u8, sur le même schéma d'URL `/e/<id>`. Il manquait juste
+        //   le domaine dans cette liste.
+        "https://livavid.sbs",
+    )
 
     companion object {
         private const val TAG = "LuluVdoExtractor"
