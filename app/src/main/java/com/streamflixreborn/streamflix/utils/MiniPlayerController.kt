@@ -2183,6 +2183,18 @@ object MiniPlayerController {
      */
     private val HOTES_REFUSANT_PILE_ANDROID = listOf(
         "rtp.pt",
+        // 2026-09-16 (user « la chaîne Fun Radio n'est pas lue ») : CDN Dailymotion.
+        //   Le jeton `sec=` du manifeste est signé sur la route IP/DNS de l'appel
+        //   JSON d'extraction, qui passe par OkHttp + DoH. `DefaultHttpDataSource`
+        //   (HttpURLConnection + DNS système) résout sur un autre edge et se fait
+        //   refuser en HTTP 403 — mesuré sur l'Oppo : extraction à 20:16:12.260,
+        //   lecture 47 ms plus tard, 403. Ce n'est donc ni l'expiration du jeton ni
+        //   les en-têtes (Referer/Origin/User-Agent bien présents, cf. le log DIAG).
+        //   `PlayerMobileFragment.needsDoH()` connaissait déjà ce piège depuis le
+        //   04/05 et forçait OkHttp+DoH pour le grand lecteur ; le mini-player, lui,
+        //   ne l'avait jamais su et retombait sur DefaultHttpDataSource. On l'aligne.
+        "cdndirector.dailymotion.com",
+        "dmcdn.net",
     )
 
     fun initPlayer(context: Context) {
@@ -3489,13 +3501,32 @@ object MiniPlayerController {
                     // Le User-Agent de la playlist doit suivre sur cette pile aussi : sans
                     //   lui le CDN de la RTP répond 204 avec un corps vide (mesuré).
                     val ua = perVideoHeaders["User-Agent"]
-                    if (ua != null) runCatching {
-                        (httpDataSourceFactory as? androidx.media3.datasource.okhttp.OkHttpDataSource.Factory)
-                            ?.setUserAgent(ua)
+                    // ⚠ 2026-09-16 — CE BLOC NE FAISAIT RIEN QUAND CRONET EST DISPONIBLE.
+                    //   `httpDataSourceFactory` est construite UNE SEULE FOIS dans
+                    //   initPlayer(), et c'est une CronetDataSource.Factory dès que le
+                    //   moteur Cronet est là (log « Using CronetDataSource (BoringSSL
+                    //   TLS) for streams »). Le cast `as? OkHttpDataSource.Factory`
+                    //   renvoyait donc null, le User-Agent n'était même pas posé, et on
+                    //   retournait quand même Cronet — qui a SON PROPRE résolveur DNS.
+                    //   Pour Dailymotion c'est rédhibitoire : le jeton `sec=` est signé
+                    //   sur la route DNS de l'extraction (OkHttp + DoH dot.sb), donc
+                    //   Cronet tombe sur un autre edge → HTTP 403. Symptôme rapporté :
+                    //   « la lecture fonctionne dans le grand lecteur mais pas dans le
+                    //   mini » — le grand lecteur, lui, passe par needsDoH().
+                    //   On construit donc ICI une vraie fabrique OkHttp sur
+                    //   NetworkClient.default, LE client qui a fait l'extraction.
+                    val fabriqueOkHttp = androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(
+                        com.streamflixreborn.streamflix.utils.NetworkClient.default
+                    ).apply {
+                        if (ua != null) setUserAgent(ua)
+                        val autres = perVideoHeaders.filterKeys { it != "User-Agent" }
+                        if (autres.isNotEmpty()) setDefaultRequestProperties(autres)
                     }
-                    Log.d(TAG, "Using OkHttpDataSource (hôte $hoteFlux refuse la pile Android) ua=$ua")
+                    Log.d(TAG, "OkHttpDataSource sur NetworkClient.default (hôte $hoteFlux refuse la pile Android) ua=$ua")
+                    fabriqueOkHttp
+                } else {
+                    httpDataSourceFactory
                 }
-                httpDataSourceFactory
             }
             // 2026-08-11 — JOURNAL DE COMPARAISON ENTRE PROVIDERS.
             //   RTP Notícias lit depuis Mon IPTV et pas depuis World Live, avec la même URL,

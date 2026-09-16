@@ -42,9 +42,23 @@ class DailymotionExtractor : Extractor() {
             ?.get("url")?.asString
             ?: throw Exception("Manifest URL not found")
 
+        // 2026-09-16 (user « la chaîne Fun Radio n'est pas lue ») : ExoPlayer se
+        //   prenait un HTTP 403 sur le manifeste ALORS QUE QualityProbe, lui, le
+        //   lisait très bien 2 secondes plus tôt (2179 kb/s, 720p). Ce n'est donc
+        //   ni l'URL ni le jeton qui sont en cause, mais l'identité de l'appelant :
+        //   la sonde passe par OkHttp (User-Agent de l'app), le lecteur par
+        //   DefaultHttpDataSource, qui n'envoyait QUE le Referer. Le CDN
+        //   Dailymotion refuse une requête sans User-Agent navigateur ni Origin.
+        //   On fournit les trois, pour que le lecteur se présente comme la sonde.
         return Video(
             source = manifestUrl,
-            headers = mapOf("Referer" to aliasUrls[0])
+            headers = mapOf(
+                "Referer" to "${aliasUrls[0]}/",
+                "Origin" to aliasUrls[0],
+                "User-Agent" to
+                    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+            )
         )
     }
 

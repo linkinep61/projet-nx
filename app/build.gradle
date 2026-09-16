@@ -5,12 +5,12 @@ plugins {
     id 'kotlin-parcelize'
     id 'com.google.devtools.ksp'
     id 'org.jetbrains.kotlin.plugin.serialization'
-    // 2026-06-02 : Firebase complètement retiré.
-    //   - RatingService.kt + LanguageReportService.kt déjà migrés vers
+    // 2026-06-02 : Firebase complÃ¨tement retirÃ©.
+    //   - RatingService.kt + LanguageReportService.kt dÃ©jÃ  migrÃ©s vers
     //     Cloudflare Workers (streamflix-api.logami61250.workers.dev)
-    //   - IptvChannelIndexService.kt supprimé (orphelin, ne servait plus
+    //   - IptvChannelIndexService.kt supprimÃ© (orphelin, ne servait plus
     //     depuis suppression de WiTV)
-    //   - google-services.json + plugin gms retirés.
+    //   - google-services.json + plugin gms retirÃ©s.
 }
 
 android {
@@ -33,9 +33,9 @@ android {
     properties.load(project.rootProject.file('local.properties').newDataInputStream())
 
     // 2026-05-05 : alignement 16 KB pour les libs natives (Pixel 10 Pro,
-    // Android 16+ utilise des pages 16 KB). Sans ça, le système affiche un
-    // popup "Android App Compatibility" au démarrage (libconscrypt_jni.so).
-    // useLegacyPackaging=false force AGP à compresser les .so avec
+    // Android 16+ utilise des pages 16 KB). Sans Ã§a, le systÃ¨me affiche un
+    // popup "Android App Compatibility" au dÃ©marrage (libconscrypt_jni.so).
+    // useLegacyPackaging=false force AGP Ã  compresser les .so avec
     // l'alignement requis par les nouvelles versions d'Android.
     packaging {
         jniLibs {
@@ -47,12 +47,12 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10950
-        versionName "1.7.250"
+        versionCode 10951
+        versionName "1.7.251"
 
-        // ABI pilotée par la propriété ABI_TARGET (local.properties, posée par la CI).
-        //   APK par défaut = ARM (armeabi-v7a + arm64-v8a).
-        //   ABI_TARGET=x86 → APK dédié émulateurs / TV Intel Atom (x86 + x86_64).
+        // ABI pilotÃ©e par la propriÃ©tÃ© ABI_TARGET (local.properties, posÃ©e par la CI).
+        //   APK par dÃ©faut = ARM (armeabi-v7a + arm64-v8a).
+        //   ABI_TARGET=x86 â†’ APK dÃ©diÃ© Ã©mulateurs / TV Intel Atom (x86 + x86_64).
         ndk {
             def abiTarget = properties.getProperty("ABI_TARGET") ?: "arm"
             if (abiTarget == "x86") {
@@ -67,13 +67,13 @@ android {
         buildConfigField "String", "SUBDL_API_KEY", "\"${properties.getProperty("SUBDL_API_KEY")}\""
         buildConfigField "String", "RABBITSTREAM_SOURCE_API", "\"${properties.getProperty("RABBITSTREAM_SOURCE_API")}\""
         buildConfigField "String", "OPENSUBTITLES_API_KEY", "\"${properties.getProperty("OPENSUBTITLES_API_KEY") ?: ""}\""
-        // 2026-08-21 : GITHUB_CRASH_TOKEN / GITHUB_CRASH_REPO supprimés avec le rapporteur
-        //   automatique. Plus aucun jeton GitHub n'est compilé dans l'application.
-        // 2026-08-17 : clé API VOE (bibliothèque perso). Onglet COMPTE du site, section
-        //   « Détails de l'API ». Vide = provider inactif, aucun appel réseau.
+        // 2026-08-21 : GITHUB_CRASH_TOKEN / GITHUB_CRASH_REPO supprimÃ©s avec le rapporteur
+        //   automatique. Plus aucun jeton GitHub n'est compilÃ© dans l'application.
+        // 2026-08-17 : clÃ© API VOE (bibliothÃ¨que perso). Onglet COMPTE du site, section
+        //   Â« DÃ©tails de l'API Â». Vide = provider inactif, aucun appel rÃ©seau.
         buildConfigField "String", "VOE_API_KEY", "\"${properties.getProperty("VOE_API_KEY") ?: ""}\""
-        // 2026-09-02 : clé API Vidara (même bibliothèque perso, serveur supplémentaire).
-        //   api.vidara.so, onglet compte. Vide = source Vidara inactive, aucun appel réseau.
+        // 2026-09-02 : clÃ© API Vidara (mÃªme bibliothÃ¨que perso, serveur supplÃ©mentaire).
+        //   api.vidara.so, onglet compte. Vide = source Vidara inactive, aucun appel rÃ©seau.
         buildConfigField "String", "VIDARA_API_KEY", "\"${properties.getProperty("VIDARA_API_KEY") ?: ""}\""
     }
 
@@ -110,9 +110,9 @@ android {
     buildTypes {
         debug {
             // 2026-06-02 : suffix .debug pour permettre l'installation
-            //   côte-à-côte avec la version release (com.streamfr.app).
+            //   cÃ´te-Ã -cÃ´te avec la version release (com.streamfr.app).
             //   La debug devient com.streamfr.app.debug + suffix "-debug"
-            //   au versionName. Long-press icône → "App info" affiche
+            //   au versionName. Long-press icÃ´ne â†’ "App info" affiche
             //   "com.streamfr.app.debug" pour distinction claire.
             applicationIdSuffix ".debug"
             versionNameSuffix "-debug"
@@ -166,19 +166,19 @@ dependencies {
     implementation 'androidx.media3:media3-session:1.8.0'
     implementation 'androidx.media3:media3-ui:1.8.0'
     // 2026-06-04 (user OTF "garde le pattern OTF comme l'application originelle
-    //   jusqu'à l'ExoPlayer de la vidéo") : Embarquement d'ExoPlayer 2.19.1 EN
+    //   jusqu'Ã  l'ExoPlayer de la vidÃ©o") : Embarquement d'ExoPlayer 2.19.1 EN
     //   PLUS de Media3 1.8.0. Packages distincts (com.google.android.exoplayer2
-    //   vs androidx.media3) → coexistent dans le même APK sans conflit.
-    //   Usage : strictement OTF (livehub::otf::*) via OtfPlayerActivity dédiée.
+    //   vs androidx.media3) â†’ coexistent dans le mÃªme APK sans conflit.
+    //   Usage : strictement OTF (livehub::otf::*) via OtfPlayerActivity dÃ©diÃ©e.
     //   Le reste de Streamflix (Vavoo/Ola/Vegeta/Movix/Wiflix/etc.) continue
-    //   d'utiliser Media3 1.8.0 inchangé. Media3 1.8.0 a un AudioSink strict
+    //   d'utiliser Media3 1.8.0 inchangÃ©. Media3 1.8.0 a un AudioSink strict
     //   qui rejette les discontinuities timestamp audio (flux OTF en a), 2.19.1
-    //   est laxiste → reproduit l'exact comportement de l'app OTF TV V3.2 officielle.
+    //   est laxiste â†’ reproduit l'exact comportement de l'app OTF TV V3.2 officielle.
     implementation 'com.google.android.exoplayer:exoplayer-core:2.19.1'
     implementation 'com.google.android.exoplayer:exoplayer-hls:2.19.1'
     implementation 'com.google.android.exoplayer:exoplayer-ui:2.19.1'
-    // 2026-05-09 v15 : nextlib via JitPack — codec pack FFmpeg pour Media3.
-    // Permet de décoder AC3, E-AC3, MP2, FLAC, et tous les codecs exotiques que
+    // 2026-05-09 v15 : nextlib via JitPack â€” codec pack FFmpeg pour Media3.
+    // Permet de dÃ©coder AC3, E-AC3, MP2, FLAC, et tous les codecs exotiques que
     // ExoPlayer ne supporte pas en natif. Active via EXTENSION_RENDERER_MODE_PREFER.
     implementation 'io.github.anilbeesetti.nextlib:nextlib-media3ext:0.8.4'
 
@@ -196,8 +196,8 @@ dependencies {
     implementation 'androidx.fragment:fragment-ktx:1.8.6'
     implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.8.7'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7' // lifecycleScope (écrans Android Auto)
-    // Android Auto — Car App Library (projection vidéo sur l'écran voiture + templates)
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7' // lifecycleScope (Ã©crans Android Auto)
+    // Android Auto â€” Car App Library (projection vidÃ©o sur l'Ã©cran voiture + templates)
     implementation 'androidx.car.app:app:1.4.0'
     implementation 'androidx.car.app:app-projected:1.4.0'
     implementation 'androidx.preference:preference-ktx:1.2.1'
@@ -209,7 +209,7 @@ dependencies {
     implementation "androidx.room:room-ktx:2.7.0-rc01"
     implementation 'com.google.android.material:material:1.12.0'
 
-    // 2026-05-31 : Google Cast SDK pour envoyer le flux vidéo à la Chromecast
+    // 2026-05-31 : Google Cast SDK pour envoyer le flux vidÃ©o Ã  la Chromecast
     implementation 'com.google.android.gms:play-services-cast-framework:22.0.0'
     implementation 'androidx.mediarouter:mediarouter:1.7.0'
     // 2026-06-09 : MediaStyle pour la notif RadioPlaybackService
@@ -217,23 +217,23 @@ dependencies {
     ksp 'androidx.room:room-compiler:2.7.0-rc01'
 
     implementation("org.mozilla:rhino:1.8.0")
-    // 2026-07-24 : NewPipeExtractor — recherche + extraction AUDIO YouTube (2e source musique,
-    //   complément de FileSearch). Extrait en natif JVM, sans instance tierce (contrairement à Piped).
+    // 2026-07-24 : NewPipeExtractor â€” recherche + extraction AUDIO YouTube (2e source musique,
+    //   complÃ©ment de FileSearch). Extrait en natif JVM, sans instance tierce (contrairement Ã  Piped).
     implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.26.4') {
-        // NewPipe tire protobuf-javalite 4.x → « Duplicate class com.google.protobuf » avec le
-        //   protobuf repackagé de Firebase (protolite-well-known-types). On exclut celui de NewPipe ;
+        // NewPipe tire protobuf-javalite 4.x â†’ Â« Duplicate class com.google.protobuf Â» avec le
+        //   protobuf repackagÃ© de Firebase (protolite-well-known-types). On exclut celui de NewPipe ;
         //   les classes com.google.protobuf viennent de Firebase.
         exclude group: 'com.google.protobuf', module: 'protobuf-javalite'
     }
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
-    // 2026-05-07 : conscrypt 2.5.3 — libs natives 16 KB-aligned (fix popup
+    // 2026-05-07 : conscrypt 2.5.3 â€” libs natives 16 KB-aligned (fix popup
     // "Android App Compatibility" sur Android 16+ avec page size 16 KB).
     implementation 'org.conscrypt:conscrypt-android:2.5.3'
     implementation "androidx.browser:browser:1.7.0"
     implementation "org.nanohttpd:nanohttpd:2.3.1"
     implementation "com.google.zxing:core:3.5.1"
 
-    // Firebase — système de notes/ratings communautaire
+    // Firebase â€” systÃ¨me de notes/ratings communautaire
     implementation platform('com.google.firebase:firebase-bom:34.13.0')
     implementation 'com.google.firebase:firebase-firestore'
     implementation("org.java-websocket:Java-WebSocket:1.5.3")
