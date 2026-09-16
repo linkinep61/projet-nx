@@ -137,6 +137,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
         HubChannel("BFM Paris Île-de-France", "bfmparisidf", "bfmparisidf", "Info"),
         HubChannel("BFM Régions", "bfmregions", "bfmregions", "Info"),
         // ─── Sport (= Vegeta) ───
+        // 2026-09-16 (user « supprime l'onglet Sport ET les liens ») : 19 chaînes retirées.
+        /*
         HubChannel("Canal+ Sport", "canalsport", "canalplussport", "Sport"),
         HubChannel("Canal+ Sport 360", "canalsport360", "canalplussport360", "Sport"),
         HubChannel("Canal+ Foot", "canalfoot", "canalplusfoot", "Sport"),
@@ -158,6 +160,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         HubChannel("AB Moteurs", "abmoteurs", "abmoteurs", "Sport"),
         HubChannel("Auto Moto La Chaîne", "automotolachaine", "automotolachaine", "Sport"),
         HubChannel("Motorvision TV", "motorvisiontv", "motorvisiontv", "Sport"),
+        */
         // ─── Musique (= Vegeta) ───
         HubChannel("MTV", "mtv", "mtv", "Musique"),
         HubChannel("MCM", "mcm", "mcm", "Musique"),
@@ -300,12 +303,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
         )
     }
 
-    private fun dailymotionChannelToTvShow(): TvShow {
-        val logo = "https://ui-avatars.com/api/?name=SF&background=0EA5E9&color=fff&size=128&bold=true&format=png"
+    /** 2026-09-16 : prend l'id Dailymotion en paramètre. Avant, cette fonction
+     *  renvoyait « Sport en France » EN DUR quel que soit l'id — sans conséquence
+     *  tant qu'il n'y avait qu'une chaîne DM, mais Fun Radio Vidéo se serait
+     *  affichée sous ce nom-là. */
+    private fun dailymotionChannelToTvShow(dmId: String = DAILYMOTION_SPORT_EN_FRANCE_ID): TvShow {
+        val connues = mapOf(
+            "xxtuy6" to Triple(
+                "Fun Radio Vidéo",
+                "Fun Radio en direct — diffusion Dailymotion.",
+                "https://www.funradio.fr/apple-touch-icon.png",
+            ),
+        )
+        val (titre, resume, logoConnu) = connues[dmId] ?: Triple(
+            "Sport en France", "Sport en France — diffusion Dailymotion.", null,
+        )
+        val logo = logoConnu
+            ?: "https://ui-avatars.com/api/?name=SF&background=0EA5E9&color=fff&size=128&bold=true&format=png"
         return TvShow(
-            id = "livehub::dailymotion::$DAILYMOTION_SPORT_EN_FRANCE_ID",
-            title = "Sport en France",
-            overview = "Sport en France — diffusion Dailymotion.",
+            id = "livehub::dailymotion::$dmId",
+            title = titre,
+            overview = resume,
             quality = "Live",
             poster = logo,
             banner = logo,
@@ -499,8 +517,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
             .filterNot { bonusBanned("livehub::bonus::${it.id}") }
             .groupBy { it.category }
         // Sport bonus : on append à la section Sport existante OU on crée si absente.
+        // 2026-09-16 (user « supprime l'onglet Sport ET les liens ») : plus injecté.
         val sportBonus = bonusByCat["Sport"].orEmpty().map { bonusToTvShow(it) }
-        if (sportBonus.isNotEmpty()) {
+        if (false && sportBonus.isNotEmpty()) {
             val existingIdx = sections.indexOfFirst { it.name == "Sport" }
             if (existingIdx >= 0) {
                 val merged = sections[existingIdx].list + sportBonus
@@ -510,8 +529,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
         }
         // Dailymotion Sport en France dans Sport
+        // 2026-09-16 (user « supprime l'onglet Sport ET les liens ») : plus injecté.
         val dmShow = dailymotionChannelToTvShow()
-        if (!bonusBanned(dmShow.id)) {
+        if (false && !bonusBanned(dmShow.id)) {
             val existingIdx = sections.indexOfFirst { it.name == "Sport" }
             if (existingIdx >= 0) {
                 sections[existingIdx] = Category(
@@ -1241,7 +1261,26 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 }
             }
         }
-        if (sectionToFolder.isEmpty()) return sections
+        // ⚠ 2026-09-16 — CE RETOUR ANTICIPÉ FAISAIT DISPARAÎTRE TOUTE LA RANGÉE
+        //   « 📁 Dossiers ». NE PAS LE REMETTRE.
+        //   Il partait du principe que « aucune section à ranger » = « rien à
+        //   afficher ». C'est faux depuis `alwaysShowKeys` : les cartes Replay
+        //   TF1+/M6+/BFM/France TV/Arte, Musique, Autres Replays, OTF, RénéVéo,
+        //   Bowd, Stream4Free, Ciné Films… sont affichées SANS section source,
+        //   leur contenu étant chargé au clic. Ce `return` les sautait toutes.
+        //   Pourquoi ça ne se voyait pas avant : au démarrage à froid en mode
+        //   lazy, la seule section non-« visible directe » était « Sport » (les
+        //   17 chaînes bonus bolaloca + Dailymotion). Elle suffisait à rendre
+        //   `sectionToFolder` non vide. En retirant l'onglet Sport, il ne restait
+        //   que Live TF1+/M6+/France TV/BFM Play — toutes `isVisibleDirect` —
+        //   donc `sectionToFolder` vide, retour anticipé, plus aucun dossier, et
+        //   Rutube ajouté seul en bas par la branche de secours de getHome
+        //   (repère du user : « dès que Rutube est en bas, c'est pas bon »).
+        //   On continue donc toujours : `kept` vaudra simplement toutes les
+        //   sections, et `folderShows` sera construit depuis `alwaysShowKeys`.
+        if (sectionToFolder.isEmpty()) {
+            Log.d(TAG, "aucune section à ranger — on construit quand même les cartes alwaysShow")
+        }
         // Populate folderContents (= cache pour LiveHubFolderDialog)
         // 2026-06-27 (user "des dossiers disparaissent pendant la navigation et
         //   réapparaissent si on recharge") : NE PAS faire folderContents.clear()
@@ -1350,6 +1389,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 }
             }
         }
+        Log.d(TAG, "dossiers construits : ${folderShows.size} cartes " +
+            "(folderContents=${folderContents.keys.size} clés)")
         // Reconstruit la liste des sections : on garde les sections non
         //   regroupées, puis on insère la section "📁 Dossiers" en TÊTE après
         //   Favoris (si présent).
@@ -1756,7 +1797,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 val num = id.removePrefix("livehub::bonus::").toIntOrNull()
                 bonusChannels.firstOrNull { it.id == num }?.let { bonusToTvShow(it) }
             }
-            id.startsWith("livehub::dailymotion::") -> dailymotionChannelToTvShow()
+            id.startsWith("livehub::dailymotion::") -> dailymotionChannelToTvShow(
+                id.removePrefix("livehub::dailymotion::").substringBefore("::")
+            )
             id.startsWith("livehub::freeshot::") -> {
                 // freeshot.live retired (all 48 channels CF-blocked); kept for old favorites compat
                 null
@@ -5039,6 +5082,45 @@ object LiveTvHubProvider : Provider, IptvProvider {
                         added++
                     }
                     Log.w(TAG, "MUSIQ: +$added radios/custom Dric4rTv injectées")
+                }
+                // 2026-09-16 (user « la chaîne Fun Radio n'est pas lue ») : le dépôt
+                //   github Sibprod/streams a disparu — toutes ses URL renvoient 404.
+                //   Constaté sur l'Oppo : « FUN Radio » (livehub::fast::de55beed)
+                //   pointait sur .../Sibprod/streams/.../hls/funradiofr.m3u8, l'app
+                //   faisait un pass-through direct et se prenait un 404. On retire
+                //   toutes les entrées issues de ce dépôt, quel qu'en soit le nom.
+                run {
+                    var mortes = 0
+                    for ((_, liste) in groups) {
+                        liste.removeAll { tv ->
+                            val u = fastChannelUrls[tv.id] ?: return@removeAll false
+                            if (u.contains("Sibprod/streams", ignoreCase = true)) {
+                                fastChannelUrls.remove(tv.id); mortes++; true
+                            } else false
+                        }
+                    }
+                    if (mortes > 0) Log.w(TAG, "Musique : -$mortes chaîne(s) du dépôt mort Sibprod/streams")
+                }
+                // 2026-09-16 (user « ajoute ça dans Musique » + « mets-la avec 90 Is
+                //   Good, même méthode ») : Fun Radio Vidéo en remplacement.
+                //   La page funradio.fr/evenements/suivez-et-regardez-fun-radio-en-direct
+                //   n'expose aucun m3u8 : son lecteur est une iframe
+                //   geo.dailymotion.com/player.html?video=xxtuy6. On passe donc par
+                //   `livehub::dailymotion::<id>`, déjà câblé dans getTvShow/getServers —
+                //   DailymotionExtractor résout le flux à la lecture. Rangée dans
+                //   "International" comme les extras curés (90 Is Good & co).
+                run {
+                    val funId = "livehub::dailymotion::xxtuy6"
+                    if (groups.values.none { l -> l.any { it.id == funId } }) {
+                        val logoFun = "https://www.funradio.fr/apple-touch-icon.png"
+                        val tvFun = TvShow(id = funId, title = "Fun Radio Vidéo").apply {
+                            providerName = "TV Hub"; poster = logoFun; banner = logoFun
+                        }
+                        groups.getOrPut("International") { mutableListOf() }.add(tvFun)
+                        fastChannelNames[funId] = "Fun Radio Vidéo"
+                        fastChannelLogos[funId] = logoFun
+                        Log.d(TAG, "Musique : + Fun Radio Vidéo (dailymotion xxtuy6)")
+                    }
                 }
                 // 2026-07-05 (user "pourquoi 1 chaîne toute seule dans Français
                 //   au lieu d'être avec les autres") : fusionner les catégories

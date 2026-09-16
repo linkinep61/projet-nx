@@ -50,9 +50,12 @@ object VegetaTvProvider : Provider, IptvProvider {
     //   sur io.kodular.vegetatvoficial) utilise désormais
     //   "vegetatv.duckdns.org/data/server_status.json" qui retourne un JSON avec
     //   les 63 serveurs + leur statut UP/DOWN + flag + latence checked toutes
-    //   les 120s. On garde l'URL legacy en fallback si le JSON tombe.
+    //   les 120s.
+    // 2026-09-16 (user « si elle est morte tu supprimes ») : le fallback legacy
+    //   http://212.47.64.168/serveurs.txt est SUPPRIMÉ — testé ce jour depuis le
+    //   navigateur du user : plus aucune réponse, l'hôte est mort. Il ne servait
+    //   qu'à faire patienter 15 s de timeout avant d'échouer quand même.
     private const val VEGETA_SERVERS_URL = "http://vegetatv.duckdns.org/data/server_status.json"
-    private const val VEGETA_SERVERS_URL_LEGACY = "http://212.47.64.168/serveurs.txt"
 
     // ───────── HTTP ─────────
 
@@ -599,16 +602,13 @@ object VegetaTvProvider : Provider, IptvProvider {
     /** 2026-06-15 : parse vegetatv.duckdns.org/data/server_status.json.
      *  Format : {ok, count, up_count, servers: {url: {url,name,flag,up,status,response_time_ms,...}}, list:[...]}.
      *  On garde uniquement up=true avec flag contenant 🇫🇷 ou 🌐 ; tri par
-     *  response_time_ms croissant (= rapides en 1er). Fallback ancien
-     *  serveurs.txt si JSON tombe.
+     *  response_time_ms croissant (= rapides en 1er).
+     *  2026-09-16 : plus de fallback legacy (hôte 212.47.64.168 mort).
      *  Format StalkerServer inchangé pour ne rien casser ailleurs. */
     private fun parseVegetaServerList(): List<StalkerServer> {
-        // Tentative JSON moderne d'abord
         val fromJson = tryParseVegetaJson()
-        if (fromJson.isNotEmpty()) return fromJson
-        // Sinon fallback sur l'ancien parser texte
-        Log.w(TAG, "JSON server_status vide → fallback serveurs.txt legacy")
-        return parseVegetaServerListLegacy()
+        if (fromJson.isEmpty()) Log.w(TAG, "JSON server_status vide → aucun serveur Vegeta")
+        return fromJson
     }
 
     private fun tryParseVegetaJson(): List<StalkerServer> {
@@ -619,32 +619,56 @@ object VegetaTvProvider : Provider, IptvProvider {
                 .header("User-Agent", USER_AGENT).build()
             val body = probeClient.newCall(req).execute().body?.string() ?: return emptyList()
             val root = org.json.JSONObject(body)
-            val list = root.optJSONArray("list") ?: return emptyList()
-            val raw = mutableListOf<Triple<Int /*pos*/, Int /*ping*/, StalkerServer>>()
-            for (i in 0 until list.length()) {
-                val o = list.optJSONObject(i) ?: continue
+            // 2026-09-16 : on accepte les DEUX formes du fichier. `list` est un
+            //   tableau ; `servers` est un objet {url: {…}}. Le lecteur web
+            //   officiel lit `servers`, donc si `list` disparaît un jour on ne
+            //   se retrouve pas à zéro serveur.
+            val entrees = mutableListOf<org.json.JSONObject>()
+            root.optJSONArray("list")?.let { arr ->
+                for (i in 0 until arr.length()) arr.optJSONObject(i)?.let { entrees.add(it) }
+            }
+            if (entrees.isEmpty()) {
+                root.optJSONObject("servers")?.let { obj ->
+                    obj.keys().forEach { k -> obj.optJSONObject(k)?.let { entrees.add(it) } }
+                }
+            }
+            if (entrees.isEmpty()) return emptyList()
+            val raw = mutableListOf<Pair<Int /*ping*/, StalkerServer>>()
+            var pos = 0
+            for (o in entrees) {
+                pos++
                 val up = o.optBoolean("up", false) || o.optString("status") == "up"
                 if (!up) continue
                 val flag = o.optString("flag", "")
-                val pos = o.optInt("pos", i + 1)
-                // 2026-06-15 user "sur la liste officielle les serveurs français
-                //   sont du 32 au 37" → on force isFr sur ces 6 positions au cas
-                //   où le flag disparaît (= notre fenêtre confirmée).
-                val flagFr = flag.contains("🇫🇷")
-                val isFr = flagFr || pos in 32..37
+                // 2026-09-16 (user « fais le meilleur correctif possible ») :
+                //   l'ancienne règle `isFr = flagFr || pos in 32..37` est SUPPRIMÉE.
+                //   Elle venait d'une observation de juin (« les FR sont du 32 au
+                //   37 »), figée dans le code. Vérifié ce jour dans le lecteur web
+                //   officiel (vegetatv.duckdns.org, « VEGETA TV PLAYER live ») :
+                //   il lit le même server_status.json et n'a AUCUNE notion de
+                //   position — il ne se sert que du drapeau. Le JSON ne contient
+                //   d'ailleurs pas de champ `pos` : on numérotait par ordre
+                //   d'apparition, donc la fenêtre se déplaçait à chaque fois que
+                //   Vegeta réordonnait son fichier. Au 16/09 elle marquait comme
+                //   « français » du 🇧🇷 et du 🇭🇷 et les plaçait DEVANT les vrais
+                //   panels FR (descendus aux positions 23-26). D'où des chaînes
+                //   absentes ou non françaises. On ne se fie plus qu'au drapeau.
+                val isFr = flag.contains("🇫🇷")
                 val hasGlobal = flag.contains("🌐")
                 if (!isFr && !hasGlobal) continue
                 val url = o.optString("url", "")
                 if (!url.startsWith("http")) continue
                 val baseUrl = url.substringBefore("/get.php").trimEnd('/')
                 if (!baseUrl.startsWith("http")) continue
+                // Un panel peut apparaître deux fois dans le fichier (doublons
+                //   constatés le 16/09) : on ne le garde qu'une fois.
+                if (raw.any { it.second.baseUrl == baseUrl }) continue
                 val ping = o.optInt("response_time_ms", 9999)
-                val srv = StalkerServer(pos, baseUrl, isFr, xtreamUrl = url)
-                raw.add(Triple(pos, ping, srv))
+                raw.add(ping to StalkerServer(pos, baseUrl, isFr, xtreamUrl = url))
                 Log.d(TAG, "JSON Server[pos=$pos isFr=$isFr global=$hasGlobal ping=${ping}ms] → $baseUrl")
             }
             // Tri : FR d'abord, puis ping asc
-            raw.sortedBy { it.second }.forEach { (_, _, s) ->
+            raw.sortedBy { it.first }.forEach { (_, s) ->
                 if (s.isFr) frFirst.add(s) else globalOnly.add(s)
             }
             Log.d(TAG, "tryParseVegetaJson: ${frFirst.size} FR + ${globalOnly.size} GLOBAL (sorted by ping)")
@@ -655,48 +679,9 @@ object VegetaTvProvider : Provider, IptvProvider {
         return frFirst + globalOnly
     }
 
-    /** Ancien parser texte conservé en fallback. */
-    private fun parseVegetaServerListLegacy(): List<StalkerServer> {
-        val frFirst = mutableListOf<StalkerServer>()
-        val globalOnly = mutableListOf<StalkerServer>()
-        try {
-            val req = Request.Builder().url(VEGETA_SERVERS_URL_LEGACY)
-                .header("User-Agent", USER_AGENT).build()
-            val body = probeClient.newCall(req).execute().body?.string() ?: return emptyList()
-            val rawLines = body.split("\n").map { it.trim() }
-
-            var pos = 0
-            for (line in rawLines) {
-                if (line.isBlank()) continue
-                val parts = line.split(Regex("\\s+"))
-                if (parts.isEmpty() || !parts[0].startsWith("http")) continue
-
-                pos++
-                val url = parts[0]
-                val flags = parts.drop(1).joinToString("")
-
-                val flagFr = flags.contains("🇫🇷") || flags.contains(" FR") || flags.endsWith("FR")
-                val hasGlobal = flags.contains("🌐")
-                // 2026-06-15 (user) : fenêtre confirmée 32..37 dans la liste officielle.
-                val isFrByPosition = pos in 32..37
-                val isFr = flagFr || isFrByPosition
-
-                if (!isFr && !hasGlobal) continue
-
-                val baseUrl = url.substringBefore("/get.php").trimEnd('/')
-                if (!baseUrl.startsWith("http")) continue
-
-                val server = StalkerServer(pos, baseUrl, isFr, xtreamUrl = url)
-                if (isFr) frFirst.add(server) else globalOnly.add(server)
-                Log.d(TAG, "Legacy Server[pos=$pos isFr=$isFr global=$hasGlobal] → $baseUrl")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "parseVegetaServerListLegacy failed: ${e.message}")
-        }
-        val all = frFirst + globalOnly
-        Log.d(TAG, "parseVegetaServerListLegacy: ${frFirst.size} FR + ${globalOnly.size} GLOBAL = ${all.size} servers")
-        return all
-    }
+    // 2026-09-16 (user " si elle est morte tu supprimes ") : la fonction
+    //   parseVegetaServerListLegacy() est SUPPRIMEE avec son URL. Elle lisait
+    //   http://212.47.64.168/serveurs.txt, hote mort (teste ce jour).
 
     // ───────── Stalker MAC protocol ─────────
 

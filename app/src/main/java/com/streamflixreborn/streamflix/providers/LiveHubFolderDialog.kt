@@ -529,14 +529,15 @@ object LiveHubFolderDialog {
                 "autres_replay" -> {
                     val mixC = LiveTvHubProvider.folderContents["__ar_mix"] ?: emptyList()
                     val wwC = LiveTvHubProvider.folderContents["__ar_ww"] ?: emptyList()
-                    val sportC = LiveTvHubProvider.folderContents["__ar_sport"] ?: emptyList()
+                    // 2026-09-16 (user « supprime l'onglet Sport ET les liens ») :
+                    //   plus de __ar_sport — le sous-dossier « 🏆 Sport » est retiré.
                     val rakC = LiveTvHubProvider.folderContents["__ar_rak"] ?: emptyList()
                     val sonyC = LiveTvHubProvider.folderContents["__ar_sony"] ?: emptyList()
                     val hasExtras = mixC.isNotEmpty() || wwC.isNotEmpty() ||
-                        sportC.isNotEmpty() || rakC.isNotEmpty() || sonyC.isNotEmpty()
+                        rakC.isNotEmpty() || sonyC.isNotEmpty()
                     if (hasExtras) {
                         displayCategoriesWithMixFr(ctx, folderName, cached, mixC,
-                            onChannelSelected, wwC, sportC, rakC, sonyC)
+                            onChannelSelected, wwC, rakC, sonyC)
                         return
                     }
                     // Pas d'extras en cache → fall through au lazy fetch ci-dessous
@@ -601,10 +602,10 @@ object LiveHubFolderDialog {
                         try { LiveTvHubProvider.fetchWorldwideCategoriesPublic() }
                         catch (_: Throwable) { emptyList() }
                     } else emptyList()
-                    // 2026-06-27 : Sport (Vegeta) + Rakuten TV + Sony One déplacés
-                    //   dans Autres Replays comme sous-dossiers.
-                    val sportCats = if (folderKey == "autres_replay")
-                        (LiveTvHubProvider.folderContents["sport"] ?: emptyList()) else emptyList()
+                    // 2026-06-27 : Rakuten TV + Sony One déplacés dans Autres Replays
+                    //   comme sous-dossiers.
+                    // 2026-09-16 (user « supprime l'onglet Sport ET les liens ») :
+                    //   Sport (Vegeta) RETIRÉ — plus de folderContents["sport"].
                     var rakCats: List<Category> = emptyList()
                     var sonyCats: List<Category> = emptyList()
                     if (folderKey == "autres_replay") {
@@ -615,16 +616,15 @@ object LiveHubFolderDialog {
                         } catch (_: Throwable) {}
                     }
                     val hasExtras = mixCats.isNotEmpty() || wwCats.isNotEmpty() ||
-                        sportCats.isNotEmpty() || rakCats.isNotEmpty() || sonyCats.isNotEmpty()
+                        rakCats.isNotEmpty() || sonyCats.isNotEmpty()
                     // 2026-06-30 : cacher les extras pour que le 2ème clic sur
                     //   "Autres Replays" retrouve la vue complète (avec Mix FR,
-                    //   WorldWide, Sport, Rakuten, Sony) au lieu des replays bruts.
+                    //   WorldWide, Rakuten, Sony) au lieu des replays bruts.
                     //   Les clés __ar_* ne sont PAS dans sectionKeys de
                     //   groupSectionsIntoFolders → préservées lors du refresh home.
                     if (folderKey == "autres_replay" && hasExtras) {
                         if (mixCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_mix"] = mixCats
                         if (wwCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_ww"] = wwCats
-                        if (sportCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_sport"] = sportCats
                         if (rakCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_rak"] = rakCats
                         if (sonyCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_sony"] = sonyCats
                     }
@@ -639,7 +639,7 @@ object LiveHubFolderDialog {
                             ).show()
                         } else if (hasExtras) {
                             displayCategoriesWithMixFr(ctx2, folderName, filtered, mixCats,
-                                onChannelSelected, wwCats, sportCats, rakCats, sonyCats)
+                                onChannelSelected, wwCats, rakCats, sonyCats)
                         } else {
                             displayCategories(ctx2, folderName, filtered, onChannelSelected)
                         }
@@ -1504,7 +1504,7 @@ object LiveHubFolderDialog {
         mixCategories: List<Category>,
         onChannelSelected: (TvShow) -> Unit,
         worldwideCategories: List<Category> = emptyList(),
-        sportCategories: List<Category> = emptyList(),
+        // 2026-09-16 : paramètre `sportCategories` SUPPRIMÉ (onglet Sport retiré).
         rakutenCategories: List<Category> = emptyList(),
         sonyCategories: List<Category> = emptyList(),
     ) {
@@ -1542,8 +1542,8 @@ object LiveHubFolderDialog {
             displayCategories(ctx, "Live MIX", liveMixCategories, onChannelSelected) })
         if (worldwideCategories.isNotEmpty()) folders.add("🌍 WorldWide" to {
             displayCategories(ctx, "WorldWide", worldwideCategories, onChannelSelected) })
-        if (sportCategories.isNotEmpty()) folders.add("🏆 Sport" to {
-            displayCategories(ctx, "Sport", sportCategories, onChannelSelected) })
+        // 2026-09-16 (user « l'onglet Sport, tout ce qui est dedans ne fonctionne
+        //   plus — supprime l'onglet ET les liens ») : entrée « 🏆 Sport » RETIRÉE.
         if (rakutenCategories.isNotEmpty()) folders.add("🎬 Rakuten TV" to {
             displayCategories(ctx, "Rakuten TV", rakutenCategories, onChannelSelected) })
         if (sonyCategories.isNotEmpty()) folders.add("📡 Sony One" to {
@@ -1609,7 +1609,7 @@ object LiveHubFolderDialog {
         val allChannels = ArrayList<TvShow>()
         val seenIds = HashSet<String>()
         for (cat in (baseCategories + mixCategories + worldwideCategories +
-                sportCategories + rakutenCategories + sonyCategories)) {
+                rakutenCategories + sonyCategories)) {
             (cat.list as? List<*>)?.filterIsInstance<TvShow>()?.forEach {
                 if (seenIds.add(it.id)) allChannels.add(it)
             }
