@@ -484,13 +484,58 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
     private suspend fun h5DetailPath(subjectId: String): String? {
         detailPathCache[subjectId]?.let { return it.ifBlank { null } }
         for (front in orderedFronts()) {
-            val resp = h5Get(front, "/wefeed-h5api-bff/detail?subjectId=$subjectId") ?: continue
+            // ⚠ 2026-09-17 — `/detail` EXIGE LUI AUSSI LE REFERER. Mesuré sur
+            //   « La Fin d'Oak Street » (sid=2302011306217569984) : l'appel NU renvoie 404
+            //   sur les trois fronts, le MÊME appel avec `Referer: <front>/` renvoie 200 sur
+            //   movieboxhd.net avec `detailPath=the-end-of-oak-street-6ridhYDe3K2`.
+            //   Le commentaire de 2026-08-30 disait « detailPath s'obtient sans token » — vrai
+            //   pour le token, faux pour le Referer, et c'est ce raccourci qui a coûté le bug :
+            //   pas de detailPath → pas de Referer pour /subject/play → 0 stream, « serveur
+            //   non trouvé », alors que le sujet existe et a des flux.
+            //   Ne PAS retirer le Referer en croyant simplifier : le repli /subject/play sans
+            //   Referer répond bien 200 mais avec hasResource=false et 0 stream.
+            val resp = h5Get(front, "/wefeed-h5api-bff/detail?subjectId=$subjectId", "$front/") ?: continue
             val data = resp.optJSONObject("data")
             val dp = data?.optJSONObject("subject")?.optString("detailPath")?.takeIf { it.isNotBlank() }
                 ?: data?.optString("detailPath")?.takeIf { it.isNotBlank() }
             // Repli : chercher "detailPath":"…" n'importe où dans la réponse.
             ?: Regex("\"detailPath\"\\s*:\\s*\"([^\"]+)\"").find(resp.toString())?.groupValues?.get(1)
             if (!dp.isNullOrBlank()) { detailPathCache[subjectId] = dp; return dp }
+        }
+        return null
+    }
+
+    /** 2026-09-17 — le doublage FR est listé par le h5, PAS par l'API mobile.
+     *  Mesuré sur The Runner (sid 715214082269397240), même sid, même instant :
+     *    /wefeed-mobile-bff/subject-api/get (signé) → 8 dubs : en,hi,kn,ml,ta,te,esla,ptbr
+     *    /wefeed-h5api-bff/detail           (nu)    → 11 dubs, dont « French dub » (fr, type=0)
+     *  L'arabe et le russe manquent aussi côté mobile : c'est un filtrage serveur.
+     *  NE PAS REFAIRE : j'ai cru que le client déclaré le commandait et j'ai testé
+     *  version_name 3.0.03 ET 4.0.02 (celle installée aujourd'hui), region FR et US,
+     *  system_language fr et en — les 4 combinaisons rendent les mêmes 8 doublages.
+     *  Maquiller X-Client-Info ne sert donc à rien, il faut demander au h5.
+     *  On amorce au passage detailPathCache avec le slug du sujet FR : /subject/play
+     *  l'exige en Referer, et il diffère de celui du sujet original
+     *  (the-runner-version-francaise-… vs the-runner-…). */
+    private suspend fun h5FrenchDubSubjectId(subjectId: String): String? {
+        for (front in orderedFronts()) {
+            // Referer obligatoire, même raison que dans h5DetailPath (cf. son commentaire).
+            val resp = h5Get(front, "/wefeed-h5api-bff/detail?subjectId=$subjectId", "$front/") ?: continue
+            val dubs = resp.optJSONObject("data")?.optJSONObject("subject")?.optJSONArray("dubs")
+                ?: continue
+            for (i in 0 until dubs.length()) {
+                val dub = dubs.optJSONObject(i) ?: continue
+                if (dub.optString("lanCode").lowercase() != "fr") continue
+                // type=0 → piste AUDIO doublée ; type=1 → sous-titres (cf. findFrenchDubSubjectId)
+                if (dub.optInt("type", -1) != 0) continue
+                val sid = dub.optString("subjectId").takeIf { it.isNotBlank() } ?: continue
+                dub.optString("detailPath").takeIf { it.isNotBlank() }
+                    ?.let { detailPathCache[sid] = it }
+                Log.d(TAG, "h5FrenchDubSubjectId : doublage FR trouvé côté h5 → $sid")
+                return sid
+            }
+            // Le front a répondu : sa liste fait foi, inutile d'interroger les suivants.
+            return null
         }
         return null
     }
@@ -2276,7 +2321,12 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         if (!subjectId.isNullOrBlank()) {
             try {
                 initialGetCached = apiGet(SUBJECT_GET_PATH, mapOf("subjectId" to subjectId!!))
+                // 2026-09-17 : le dubs[] mobile est amputé du français (voir
+                //   h5FrenchDubSubjectId). On garde la route mobile en premier — elle
+                //   est déjà en main et ne coûte rien — et on interroge le h5 seulement
+                //   quand elle ne rend pas de doublage FR.
                 val frSid = initialGetCached?.let { findFrenchDubSubjectId(it) }
+                    ?: h5FrenchDubSubjectId(subjectId!!)
                 if (frSid != null && frSid != subjectId) {
                     Log.d(TAG, "Auto-switch vers dub FR : sid=$subjectId → $frSid")
                     subjectId = frSid
