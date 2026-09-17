@@ -106,6 +106,7 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
                         items.add(browsable(FOLDER_MUSIC, "Playlist", com.streamflixreborn.streamflix.R.drawable.ic_favorite_enable))
                         items.add(browsable(FOLDER_PHONE, "Local", com.streamflixreborn.streamflix.R.drawable.ic_downloads))
                         items.add(browsable(FOLDER_RADIO, "Favoris", com.streamflixreborn.streamflix.R.drawable.ic_radio))
+                        items.add(browsable(FOLDER_AUDIOPHILE, "Audiophile", com.streamflixreborn.streamflix.R.drawable.ic_radio))
                         items.add(browsable(FOLDER_ALL_RADIOS, "Radios", com.streamflixreborn.streamflix.R.drawable.ic_radio))
                     }
                     // 2026-07-25 (demande user) : musiques stockées SUR LE TÉLÉPHONE, accessibles
@@ -180,6 +181,15 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
                             .map { groupLetter(it.name) }
                             .distinct().sorted()
                         letters.forEach { l -> items.add(browsable("$GRP_PREFIX$l", l)) }
+                    }
+                    // 2026-09-17 : dossier audiophile.fm (radios FLAC) — liste directe des
+                    //   stations (79, gérable d'un coup, pas besoin de grouper par lettre).
+                    FOLDER_AUDIOPHILE -> {
+                        val stations = audiophileStations().filter { !it.streamUrl.isNullOrBlank() }
+                        lastRadioList = stations.map { it.streamUrl!! to it.name }
+                        stations.forEach { s ->
+                            items.add(playable("radio::${s.streamUrl}::${s.name}", s.name, s.poster))
+                        }
                     }
                     // ── Profondeur 1 : discographie d'un ARTISTE ──────────────────────
                     else -> if (parentId.startsWith(ZF_ARTIST_PREFIX)) {
@@ -326,6 +336,13 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
         cachedStations ?: runCatching {
             kotlinx.coroutines.runBlocking { RadioCatalog.list() }
         }.getOrDefault(emptyList()).also { if (it.isNotEmpty()) cachedStations = it }
+    }
+
+    // 2026-09-17 : catalogue audiophile.fm (FLAC), mis en cache comme les autres.
+    private fun audiophileStations() = synchronized(CACHE_LOCK) {
+        cachedAudiophile ?: runCatching {
+            kotlinx.coroutines.runBlocking { RadioCatalog.audiophileStations() }
+        }.getOrDefault(emptyList()).also { if (it.isNotEmpty()) cachedAudiophile = it }
     }
 
     /** 1re lettre pour le groupement (A-Z, sinon « # »). */
@@ -650,11 +667,14 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
         private const val ACTION_SHUFFLE = "onyx_shuffle_toggle" // bouton 🔀 (musique uniquement)
         private const val FOLDER_ALL_RADIOS = "onyx_all_radios" // toutes les stations, groupées par lettre
         private const val GRP_PREFIX = "onyx_radiogrp::"       // + lettre → stations de cette lettre
+        // 2026-09-17 : dossier dédié audiophile.fm (radios FLAC lossless), à part du gros catalogue.
+        private const val FOLDER_AUDIOPHILE = "onyx_audiophile"
         // Styles d'affichage Android Auto : 1 = liste, 2 = grille (vignettes façon Spotify).
         private const val CONTENT_STYLE_LIST = 1
         private const val CONTENT_STYLE_GRID = 2
         private val CACHE_LOCK = Any()
         @Volatile private var cachedStations: List<com.streamflixreborn.streamflix.utils.RadioCatalog.RadioStation>? = null
+        @Volatile private var cachedAudiophile: List<com.streamflixreborn.streamflix.utils.RadioCatalog.RadioStation>? = null // audiophile.fm (FLAC)
         @Volatile private var lastMusicSearch: List<Pair<String, String>> = emptyList() // résultats musique de la dernière recherche
         @Volatile private var lastPhoneTracks: List<Pair<String, String>> = emptyList() // musiques locales listées dans la voiture
         @Volatile private var phoneArt: Map<String, String> = emptyMap() // uri morceau → pochette d'album
