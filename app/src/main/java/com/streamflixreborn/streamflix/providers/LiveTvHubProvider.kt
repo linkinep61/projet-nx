@@ -4255,7 +4255,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 }
                 if (body.isBlank() || "#EXTM3U" !in body) {
                     Log.w(TAG, "Replay M3U empty or invalid")
-                    return@withContext emptyList<Category>()
+                    // 2026-09-17 : fetch raté → NE PAS renvoyer une liste vide,
+                    //   sinon toute la grille replay (TBT9 & co) disparaît le temps
+                    //   d'un hoquet réseau puis « réapparaît » au fetch suivant.
+                    //   On retombe sur le dernier catalogue connu (RAM, puis disque
+                    //   même périmé).
+                    return@withContext replayStaleFallback(diskFile)
                 }
                 val parsed = parseReplayM3u(body)
                 replayCacheSections = parsed
@@ -4271,11 +4276,39 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 parsed
             } catch (e: Throwable) {
                 Log.w(TAG, "Replay fetch failed: ${e.message}")
-                emptyList()
+                // 2026-09-17 : idem — sur exception réseau, on garde le dernier
+                //   catalogue connu au lieu de vider la grille replay.
+                replayStaleFallback(diskFile)
             } finally {
                 replayFetchInProgress = false
             }
         }
+    }
+
+    /** 2026-09-17 : dernier recours quand le fetch réseau du M3U replay échoue
+     *  (corps vide/invalide ou exception). Renvoie le dernier catalogue connu
+     *  plutôt qu'une liste vide, pour que les émissions (TBT9 & co) ne
+     *  clignotent pas hors de la grille sur un simple hoquet réseau.
+     *  Ordre : cache RAM, puis cache DISQUE même périmé (le TTL ne s'applique
+     *  qu'au rafraîchissement, pas au repli). */
+    private fun replayStaleFallback(diskFile: java.io.File?): List<Category> {
+        if (replayCacheSections.isNotEmpty()) {
+            Log.d(TAG, "Replay fallback → cache RAM (${replayCacheSections.size} cats)")
+            return replayCacheSections
+        }
+        if (diskFile != null && diskFile.exists()) {
+            try {
+                val parsed = parseReplayM3u(diskFile.readText())
+                if (parsed.isNotEmpty()) {
+                    replayCacheSections = parsed
+                    Log.d(TAG, "Replay fallback → cache DISQUE périmé (${parsed.size} cats)")
+                    return parsed
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Replay stale fallback read failed: ${e.message}")
+            }
+        }
+        return emptyList()
     }
 
     /** 2026-06-18 (user "ça met du temps à charger Le replay" + "Là j'ai
