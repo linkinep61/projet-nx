@@ -154,6 +154,13 @@ object RadioPickerDialog {
         var currentQuery = ""
         var loadJob: Job? = null
 
+        // 2026-09-17 : dossier « Audiophile.fm » (radios FLAC), placé EN TÊTE de la
+        //   liste radio, juste au-dessus de Canal B. `audiophile` = son contenu
+        //   (chargé en direct), `dansAudiophile` = on est entré dedans (affiche son
+        //   contenu + une ligne « ⬅ Retour »).
+        var audiophile: List<RadioCatalog.RadioStation> = emptyList()
+        var dansAudiophile = false
+
         var musicMode = false
         var musicShuffle = false
         var musicResults: List<RadioCatalog.RadioStation> = emptyList()
@@ -449,6 +456,19 @@ object RadioPickerDialog {
                     }
                     return musicResults
                 }
+                // 2026-09-17 : à l'intérieur du dossier Audiophile.fm → son contenu
+                //   (filtrable) précédé d'une ligne « ⬅ Retour ».
+                if (dansAudiophile) {
+                    var l = audiophile
+                    if (currentQuery.isNotBlank()) {
+                        val q = currentQuery.lowercase().trim()
+                        l = l.filter { it.name.lowercase().contains(q) }
+                    }
+                    return listOf(
+                        RadioCatalog.RadioStation(
+                            id = "audioback::", name = "⬅ Retour", poster = null, streamUrl = null)
+                    ) + l
+                }
                 var list = if (showOnlyFavorites) {
                     val favIds = RadioFavoritesStore.all()
                     all.filter { it.id in favIds }
@@ -456,6 +476,17 @@ object RadioPickerDialog {
                 if (currentQuery.isNotBlank()) {
                     val q = currentQuery.lowercase().trim()
                     list = list.filter { it.name.lowercase().contains(q) }
+                }
+                // 2026-09-17 : ligne-dossier Audiophile.fm en TÊTE (au-dessus de Canal B),
+                //   uniquement en vue normale (pas en recherche, pas en favoris) et si le
+                //   catalogue FLAC est chargé.
+                if (!showOnlyFavorites && currentQuery.isBlank() && audiophile.isNotEmpty()) {
+                    return listOf(
+                        RadioCatalog.RadioStation(
+                            id = "folder::audiophile",
+                            name = "🎧 Audiophile.fm — HiFi (${audiophile.size})",
+                            poster = null, streamUrl = null)
+                    ) + list
                 }
                 return list
             }
@@ -571,6 +602,7 @@ object RadioPickerDialog {
                     musicMode && showOnlyFavorites -> "Ma playlist"
                     musicMode && titreNiveau != null -> titreNiveau!!
                     musicMode -> "Musique"
+                    dansAudiophile -> "Audiophile.fm"
                     else -> "Radios"
                 }
                 countPill.text = radios.size.toString()
@@ -1095,6 +1127,13 @@ object RadioPickerDialog {
                     }?.start()
                 }
                 try {
+                    // 2026-09-17 : dossier Audiophile.fm (mode radio) — ouvrir / revenir.
+                    if (!musicMode && r.id == "folder::audiophile") {
+                        dansAudiophile = true; refresh(); return@setOnItemClickListener
+                    }
+                    if (!musicMode && r.id == "audioback::") {
+                        dansAudiophile = false; refresh(); return@setOnItemClickListener
+                    }
                     if (musicMode) {
                         if (r.id == "histclear::") { SearchHistory.clear(ctx, "music"); refresh(); return@setOnItemClickListener }
                         if (r.id.startsWith("hist::")) {
@@ -1255,6 +1294,7 @@ object RadioPickerDialog {
                 val r = adapter.getItem(position) ?: return@setOnItemLongClickListener false
                 if (r.id.startsWith("hist")) return@setOnItemLongClickListener false
                 if (r.id == "zfback::") return@setOnItemLongClickListener false
+                if (r.id == "folder::audiophile" || r.id == "audioback::") return@setOnItemLongClickListener false
                 val added: Boolean
                 val label: String
                 if (musicMode) {
@@ -1323,6 +1363,18 @@ object RadioPickerDialog {
                         Toast.makeText(ctx,
                             "Aucune radio disponible (vérifie la connexion)",
                             Toast.LENGTH_LONG).show()
+                    }
+                } catch (_: Throwable) {}
+            }
+
+            // 2026-09-17 : charge le catalogue audiophile.fm (FLAC) en fond → dès
+            //   qu'il est là, la ligne-dossier « 🎧 Audiophile.fm » apparaît en tête.
+            lifecycleOwner.lifecycleScope.launch {
+                try {
+                    val a = RadioCatalog.audiophileStations()
+                    if (a.isNotEmpty()) {
+                        audiophile = a
+                        if (!musicMode) refresh()
                     }
                 } catch (_: Throwable) {}
             }

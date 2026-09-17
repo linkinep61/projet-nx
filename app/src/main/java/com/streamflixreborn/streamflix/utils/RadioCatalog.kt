@@ -571,4 +571,25 @@ object RadioCatalog {
         if (favIds.isEmpty()) return emptyList()
         return list().filter { it.id in favIds }
     }
+
+    // 2026-09-17 : catalogue audiophile.fm (radios FLAC lossless), gardé À PART
+    //   du gros catalogue RadioBrowser. Exposé comme un dossier dédié (picker +
+    //   Android Auto), PAS fusionné dans la liste plate. id `radio::audiophile::<slug>`
+    //   → traité comme radio par MiniPlayerController.isRadioChannel (préfixe radio::).
+    //   flux principal = FLAC ; fallbackUrls = [MP3] → bascule auto si le FLAC coupe.
+    @Volatile private var audiophileCache: List<RadioStation> = emptyList()
+
+    suspend fun audiophileStations(): List<RadioStation> {
+        val fresh = AudiophileFmClient.fetch().map { s ->
+            RadioStation(
+                id = "radio::audiophile::${s.slug}",
+                name = s.title,
+                poster = s.logo,
+                streamUrl = s.flacUrl,
+                fallbackUrls = listOfNotNull(s.mp3Url),
+            )
+        }
+        if (fresh.isNotEmpty()) audiophileCache = fresh
+        return audiophileCache
+    }
 }
