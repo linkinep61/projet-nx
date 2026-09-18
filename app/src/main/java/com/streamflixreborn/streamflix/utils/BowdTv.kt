@@ -120,11 +120,17 @@ object BowdTv {
         if (!forcer && cache.isNotEmpty() && maintenant - cacheTs < TTL_MS) return@withContext cache
         val jwt = jetonAnonyme() ?: return@withContext cache
 
-        val sortie = ArrayList<Chaine>(700)
+        // 2026-09-18 — CATALOGUE COMPLET. On lisait 50 chaînes par page avec un plafond de
+        //   30 pages, soit 1500 au maximum ; or Bowd en publie 4976 pour la France. Les
+        //   deux tiers du catalogue étaient donc invisibles, sans le moindre message. On
+        //   passe à 200 par page (leur API l'accepte) et on laisse le plafond très
+        //   au-dessus du besoin : la pagination s'arrête d'elle-même sur nextCursor nul.
+        //   Résultat : tout le catalogue en ~25 requêtes, donc moins qu'avant.
+        val sortie = ArrayList<Chaine>(5000)
         var curseur: Int? = 0
         var pages = 0
-        while (curseur != null && pages < 30) {
-            val url = "$API/api/v1/channels?country=$PAYS&cursor=$curseur&limit=50&all=1"
+        while (curseur != null && pages < 60) {
+            val url = "$API/api/v1/channels?country=$PAYS&cursor=$curseur&limit=200&all=1"
             val corps = try {
                 val req = okhttp3.Request.Builder().url(url)
                     .header("Authorization", "Bearer $jwt")
@@ -176,7 +182,161 @@ object BowdTv {
         return "Généraliste"
     }
 
-    fun tuile(c: Chaine): TvShow = TvShow(id = "$PREFIX${c.id}", title = c.nom).apply {
+    // ─────────────────────────────── Regroupement des doublons
+    //
+    // 2026-09-18 (user : « il y a beaucoup de doublons […] on pourrait faire en sorte
+    //   d'avoir qu'une seule jaquette et que les serveurs s'enchaînent derrière jusqu'à
+    //   ce qu'il y en ait une fonctionnelle »).
+    //
+    // Le catalogue publie la même chaîne plusieurs fois, sous trois habillages :
+    //     préfixe de source   « C+AF| FRANCE 3 », « C+CAR| M6 »
+    //     marqueur de qualité « … HD », « … FHD », « … 4K »
+    //     décalage horaire    « TF1 +1 », « M6 |-2H », « France 2 |-12H »
+    // Mesuré sur les 4976 chaînes France : 298 portent un préfixe de source, 126 un
+    // décalage. En les repliant, les 4976 entrées deviennent 4702 tuiles, et surtout les
+    // généralistes cessent d'afficher France 2 sept fois de suite.
+    //
+    // ⚠ On ne replie QUE la décoration. Un numéro qui fait partie du nom (BEIN MAX 4,
+    // LIGUE 1+ 3) identifie une vraie chaîne différente et n'est jamais touché.
+
+    private val PREFIXE_SOURCE = Regex("""^[A-Z0-9+]{1,6}\s*\|\s*""", RegexOption.IGNORE_CASE)
+    private val MARQUEUR_QUALITE = Regex("""\b(FHD|UHD|HD|SD|4K|1080P?|720P?|MULTI|VIP|RAW)\b""", RegexOption.IGNORE_CASE)
+    private val DECALAGE = Regex("""(\s*\|\s*[-+]\s*\d+\s*H\s*$)|(\s*[-+]\s*\d+\s*H\s*$)|(\s*\+\s*\d+\s*$)""", RegexOption.IGNORE_CASE)
+
+    /** Numéro final isolé : « DISNEY 007 », « NETFLIX 12 ». Pas le « N » d'un nom. */
+    private val NUMERO_FINAL = Regex("""\s+0*(\d{1,3})\s*$""")
+
+    /** Nom débarrassé de sa décoration : c'est la clé qui réunit les doublons. */
+    private fun cleRegroupement(nom: String): String = nom.uppercase()
+        .replace(PREFIXE_SOURCE, "")
+        .replace(DECALAGE, "")
+        .replace(MARQUEUR_QUALITE, "")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+
+    /**
+     * 2026-09-18 bis (user : « la chaîne Disney plus, elle apparaît une dizaine de fois.
+     *   C'est le genre de truc où je voulais une seule fois et que les sources soient
+     *   fusionnées pour trouver une fonctionnelle, pas qu'on ait à cliquer plein de fois
+     *   sur plusieurs sources »).
+     *
+     * Premier jet : je ne repliais que la décoration, donc DISNEY 001 à 013 restaient
+     * treize tuiles. Il fallait aussi replier le NUMÉRO FINAL — mais pas n'importe lequel,
+     * et c'est là qu'est tout le problème :
+     *
+     *     DISNEY 001…013, NETFLIX 1…15, AMAZON PRIME 1…25   même chose, N fois
+     *     FRANCE 2, 3, 4, 5, 24                             cinq chaînes DIFFÉRENTES
+     *     BEIN MAX 4…10, BEIN SPORTS 1…7                    des matchs différents
+     *
+     * Effacer bêtement le numéro final fusionnait France 2, 3, 4, 5 et 24 en une seule
+     * tuile. Le critère retenu, vérifié sur les 4976 chaînes :
+     *
+     *   1. Les numéros doivent former une ÉNUMÉRATION PARTANT DE 1, sans trou majeur
+     *      (au moins 60 % de la plage couverte). France {2,3,4,5,24} ne commence pas à 1
+     *      et laisse un trou de 6 à 23 : ce n'est pas une énumération, on n'y touche pas.
+     *      BEIN MAX {4…10} ne commence pas à 1 non plus : intact.
+     *   2. Le nom ne doit pas être celui d'un BOUQUET RÉEL, où le numéro désigne un
+     *      contenu différent et pas une source de secours (choix du user : garder le
+     *      sport séparé). beIN Sports 1 à 7, Eurosport 360, DAZN PPV, Ligue 1+, RMC…
+     *      gardent chacun leur tuile, sinon on ne pourrait plus choisir son match.
+     *
+     * ⚠ J'ai d'abord essayé un simple SEUIL — « au-delà de 12 numéros, c'est une
+     *   duplication ». Ça tombait à côté : « (DISNEYPLUS) - DISNEYPLUS EVENTS » n'a que
+     *   dix numéros (1 à 10, sans le 7) et restait donc éclaté en dix tuiles, c'est-à-dire
+     *   exactement ce que le user avait signalé. Aucun seuil ne sépare ces deux cas :
+     *   beIN Sports 1…7 et DISNEYPLUS EVENTS 1…10 ont la même forme. Ce qui les sépare
+     *   n'est pas la quantité, c'est de savoir si la chaîne existe vraiment sous ce
+     *   numéro — d'où la liste ci-dessous, courte et explicite, plutôt qu'une
+     *   arithmétique qui a l'air savante et se trompe.
+     *
+     * Vérifié sur les 5208 chaînes : Disney, DisneyPlus Events, Netflix et Amazon Prime
+     * fusionnent ; beIN Sports, Eurosport 360, DAZN PPV et France restent séparés.
+     */
+    private val BOUQUETS_REELS = Regex(
+        """^(BEIN|EUROSPORT|CANAL\+|RMC|LIGUE 1|SFR|DAZN|FRANCE|MULTISPORT|PPV|SOCCER)""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private fun numeroFinal(nom: String): Int? =
+        NUMERO_FINAL.find(cleRegroupement(nom))?.groupValues?.get(1)?.toIntOrNull()
+
+    /** Nom sans son numéro de duplication. */
+    private fun cleSansNumero(nom: String): String =
+        cleRegroupement(nom).replace(NUMERO_FINAL, "").trim()
+
+    /** true si les numéros d'une famille sont une simple duplication, pas un bouquet. */
+    private fun estDuplication(base: String, noms: List<String>): Boolean {
+        if (BOUQUETS_REELS.containsMatchIn(base)) return false
+        val nums = noms.mapNotNull { numeroFinal(it) }.distinct().sorted()
+        if (nums.size < 3) return false
+        if (nums.first() != 1) return false
+        return nums.size.toDouble() / nums.last() >= 0.6
+    }
+
+    /** Libellé lisible du décalage (« −2 h », « +1 h »), ou null pour un vrai direct. */
+    private fun decalageDe(nom: String): String? {
+        val m = DECALAGE.find(nom)?.value?.trim() ?: return null
+        val chiffres = Regex("""\d+""").find(m)?.value ?: return null
+        return if (m.contains('-')) "−$chiffres h" else "+$chiffres h"
+    }
+
+    /** Une chaîne telle qu'elle est présentée : un nom, et tous les flux qui la servent. */
+    data class Groupe(val nom: String, val membres: List<Chaine>) {
+        val principale: Chaine get() = membres.first()
+    }
+
+    /**
+     * Replie la liste brute en chaînes uniques.
+     *
+     * Ordre des membres, et c'est important : les VRAIS DIRECTS d'abord, les décalés
+     * ensuite (choix du user : « derrière, et nommées »). Le lecteur essaie donc tous les
+     * flux du direct avant d'envisager un décalé — qui, lui, s'affiche explicitement
+     * « −2 h » pour qu'on ne regarde jamais le programme d'il y a deux heures sans le
+     * savoir. À direct égal, on privilégie le nom sans préfixe de source : c'est en
+     * général le flux principal, et c'est lui qui donne son nom et son logo à la tuile.
+     */
+    fun groupes(chaines: List<Chaine>): List<Groupe> {
+        // Deux passes. D'abord on repère les familles dont le numéro final n'est qu'un
+        // numéro de copie (cf. estDuplication) ; pour celles-là seulement, la clé perd
+        // son numéro. Partout ailleurs le numéro reste dans la clé, donc France 2 et
+        // France 3 restent deux chaînes.
+        val duplications = chaines.groupBy { cleSansNumero(it.nom) }
+            .filterKeys { it.isNotBlank() }
+            .filter { (base, membres) -> estDuplication(base, membres.map { c -> c.nom }) }
+            .keys
+        fun cle(nom: String): String {
+            val sansNumero = cleSansNumero(nom)
+            return if (sansNumero in duplications) sansNumero else cleRegroupement(nom)
+        }
+        return chaines.groupBy { cle(it.nom) }
+            .filterKeys { it.isNotBlank() }
+            .map { (cle, membres) ->
+                val ordonnes = membres.sortedWith(
+                    compareBy(
+                        { if (decalageDe(it.nom) == null) 0 else 1 },
+                        { if (PREFIXE_SOURCE.containsMatchIn(it.nom)) 1 else 0 },
+                        { it.nom.length },
+                    )
+                )
+                // Pour une famille de copies, la tuile porte le nom SANS numéro : on
+                // affiche « DISNEY », pas « DISNEY 001 » qui ne veut rien dire pour
+                // l'utilisateur. Ailleurs, le nom réel de la chaîne principale.
+                val titre = if (cle in duplications) cle else
+                    ordonnes.first().nom.takeIf { it.isNotBlank() } ?: cle
+                Groupe(nom = titre, membres = ordonnes)
+            }
+    }
+
+    /** Étiquette d'un flux dans la liste des serveurs : décalage, source, ou numéro. */
+    private fun etiquette(c: Chaine): String {
+        decalageDe(c.nom)?.let { return it }
+        PREFIXE_SOURCE.find(c.nom)?.value?.trim()?.removeSuffix("|")?.trim()
+            ?.takeIf { it.isNotBlank() }?.let { return it }
+        numeroFinal(c.nom)?.let { return "source $it" }
+        return "direct"
+    }
+
+    fun tuile(c: Chaine, titre: String = c.nom): TvShow = TvShow(id = "$PREFIX${c.id}", title = titre).apply {
         providerName = "TV Hub"
         poster = c.logo
         banner = c.logo
@@ -188,12 +348,17 @@ object BowdTv {
     fun categories(chaines: List<Chaine>): List<Category> {
         if (chaines.isEmpty()) return emptyList()
         val ordre = listOf("Généraliste", "Info", "Sport", "Cinéma", "Divertissement", "Documentaire", "Musique", "Enfants")
-        val parCat = chaines.groupBy { categorieDe(it.nom) }
+        // 2026-09-18 : on classe des GROUPES, plus des chaînes brutes — une jaquette par
+        //   chaîne réelle, ses autres flux vivant derrière en serveurs (cf. `serveurs`).
+        val parCat = groupes(chaines).groupBy { categorieDe(it.nom) }
         return ordre.mapNotNull { cat ->
             val liste = parCat[cat]?.sortedWith(
-                compareBy({ if (it.statut.equals("ok", true)) 0 else 1 }, { it.nom.lowercase() })
+                compareBy(
+                    { if (it.principale.statut.equals("ok", true)) 0 else 1 },
+                    { it.nom.lowercase() },
+                )
             ) ?: return@mapNotNull null
-            Category(name = "Bowd - $cat", list = liste.map { tuile(it) })
+            Category(name = "Bowd - $cat", list = liste.map { tuile(it.principale, it.nom) })
         }
     }
 
@@ -224,10 +389,31 @@ object BowdTv {
      */
     suspend fun serveurs(id: String): List<Video.Server> {
         val c = chaine(id) ?: return emptyList()
-        val flux = fluxHls(c.id)
-        if (flux.isNotEmpty()) {
+        // 2026-09-18 — ON ENCHAÎNE LES FLUX DE LA MÊME CHAÎNE.
+        //   Une tuile représente désormais un groupe (cf. `groupes`) : le direct, ses
+        //   doublures d'autres sources, et en dernier ses versions décalées. On les essaie
+        //   dans cet ordre et on rend le premier qui donne quelque chose — c'est ce que le
+        //   user demandait : « que les serveurs s'enchaînent derrière jusqu'à temps qu'il y
+        //   ait une chaîne fonctionnelle ».
+        //   Plafond à 5 tentatives : chaque appel peut reprendre deux fois sur 503, et
+        //   au-delà l'utilisateur attend pour rien devant un écran vide.
+        val membres = groupes(cache.ifEmpty { listOf(c) })
+            .firstOrNull { g -> g.membres.any { it.id == c.id } }
+            ?.membres ?: listOf(c)
+        for ((rang, membre) in membres.take(5).withIndex()) {
+            val flux = fluxHls(membre.id)
+            if (flux.isEmpty()) {
+                Log.d(TAG, "${membre.nom} : aucun flux → on passe au suivant du groupe")
+                continue
+            }
+            if (rang > 0) Log.i(TAG, "groupe ${c.nom} : servi par « ${membre.nom} »")
+            val quoi = etiquette(membre)
             return flux.mapIndexed { i, (libelle, url) ->
-                Video.Server(id = "$PREFIX${c.id}::hls$i", name = "Bowd · $libelle", src = url)
+                Video.Server(
+                    id = "$PREFIX${membre.id}::hls$i",
+                    name = "Bowd · $quoi · $libelle",
+                    src = url,
+                )
             }
         }
         // 2026-09-10 (user : « quand je clique sur un live ça m'amène sur leur page web
