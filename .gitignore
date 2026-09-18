@@ -14,6 +14,19 @@ local.properties
 # Providers archivés (non-français, gardés en local uniquement)
 app/archived_providers/
 
+# 2026-09-19 — SAUVEGARDES .bak : le piège du « git add -A ».
+#   Ces fichiers n'étaient ignorés nulle part : deux commits (v1.7.251 puis
+#   l'écrasement du 17/09) ont ainsi avalé 46 fichiers et ~110 000 lignes.
+#   Ignorés ici, l'accident ne peut plus se reproduire, même par inadvertance.
+*.bak
+*.bak.*
+*.bak-*
+*.bak2.*
+
+# Journaux de build écrits par l'outillage local
+build-honor.log
+build-honor.err
+
 # Scripts locaux (tous les .bat sauf gradlew.bat)
 push_to_github.bat
 push_test_update.bat

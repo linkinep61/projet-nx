@@ -17,6 +17,9 @@ class CloseloadExtractor : Extractor() {
     override val name = "Closeload"
     override val mainUrl = "https://closeload.top/"
 
+    // 2026-09-19 (repris de streamflix-reborn2, commit 840c5b9) : miroir servi par Ridomovies.
+    override val aliasUrls = listOf("https://ridorapid.closeload.top/")
+
     override suspend fun extract(link: String): Video {
         val retrofit = Retrofit.Builder()
             .baseUrl(mainUrl)
@@ -78,9 +81,144 @@ class CloseloadExtractor : Extractor() {
                 .firstOrNull { it.startsWith("http") }
         }
 
+        // E. 2026-09-19 — NOUVELLE FABRICATION DE CLOSELOAD (repris de streamflix-reborn2,
+        //    commit 840c5b9). Le site ne cache plus l'URL derrière `dc_hello` et un simple
+        //    décalage : il publie une fonction `dc_<aléatoire>(value_parts)` dont la suite
+        //    d'opérations (atob / reverse / rotation) CHANGE d'une page à l'autre, puis
+        //    mélange les octets avec un accumulateur. La force brute ci-dessus ne peut donc
+        //    plus tomber juste. On lit ici la fonction elle-même et on rejoue ses opérations
+        //    dans l'ordre. Ajouté EN DERNIER : l'ancien chemin reste prioritaire, rien de ce
+        //    qui marche aujourd'hui ne change.
+        if (source == null) {
+            val parFonction = extraireParFonctionDc(html)
+            if (parFonction != null) {
+                // Le CDN vérifie le référent de la page qui l'a servi (closeload OU ridorapid).
+                val u = android.net.Uri.parse(link)
+                val referer = "${u.scheme}://${u.host}/"
+                return Video(
+                    parFonction,
+                    headers = mapOf("Referer" to referer),
+                    type = MimeTypes.APPLICATION_M3U8,
+                )
+            }
+        }
+
         if (source == null) throw Exception("No video found")
 
         return Video(source, headers = mapOf("Referer" to mainUrl), type = MimeTypes.APPLICATION_M3U8)
+    }
+
+    /**
+     * Lit la fonction de déchiffrement publiée dans la page et la rejoue.
+     *
+     * 1. chaque bloc `eval(function(p,a,c,k,e…))` est dépaqueté et ajouté au texte cherché ;
+     * 2. on repère `function dc_xxx(value_parts) { … return unmix }` ;
+     * 3. on relève, DANS L'ORDRE, ses opérations : `atob(`, `reverse()`, rotation `%26` ;
+     * 4. on relève les deux constantes de la boucle de mélange (`acc`) ;
+     * 5. pour chaque appel `dc_xxx([ "…", "…" ])`, on recolle les morceaux, on applique les
+     *    opérations, puis on démêle : `acc = (acc+pas)%256`, `clair = octet XOR acc`,
+     *    `acc = (acc+octet)%256`.
+     *
+     * Renvoie null (sans jamais lever) si la page n'est pas de cette génération.
+     */
+    private fun extraireParFonctionDc(html: String): String? = try {
+        var texte = html
+        Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e""")
+            .findAll(html).forEach { m ->
+                val fin = (m.range.first + 5000).coerceAtMost(html.length)
+                val morceau = html.substring(m.range.first, fin)
+                val up = JsUnpacker(morceau)
+                if (up.detect()) up.unpack()?.let { texte += "\n" + it }
+            }
+
+        val fonction = Regex(
+            """function\s+(dc_[a-zA-Z0-9_]+)\(value_parts\)\s*\{(.*?return unmix;?)\s*\}""",
+            RegexOption.DOT_MATCHES_ALL,
+        ).find(texte)
+
+        if (fonction == null) null else {
+            val nom = fonction.groupValues[1]
+            val corps = fonction.groupValues[2]
+
+            val operations = mutableListOf<Pair<String, Int?>>()
+            Regex(
+                """(atob\()|(reverse\(\))|(replace\(\/\[a-zA-Z\]\/g.*?o\s*-\s*base\s*\+\s*(\d+)\s*\)\s*%\s*26)""",
+                RegexOption.DOT_MATCHES_ALL,
+            ).findAll(corps).forEach { m ->
+                when {
+                    m.groupValues[1].isNotEmpty() -> operations.add("atob" to null)
+                    m.groupValues[2].isNotEmpty() -> operations.add("reverse" to null)
+                    m.groupValues[3].isNotEmpty() -> operations.add("rot" to m.groupValues[4].toInt())
+                }
+            }
+
+            var accInit = 2
+            var accPas = 9
+            Regex("""var\s+acc\s*=\s*(\d+)""").find(corps)?.let { accInit = it.groupValues[1].toInt() }
+            Regex("""acc\s*=\s*\(\s*acc\s*\+\s*(\d+)\s*\)\s*%\s*256""").find(corps)
+                ?.let { accPas = it.groupValues[1].toInt() }
+
+            fun decoder64(s: String): ByteArray {
+                val propre = s.replace(Regex("""\s+"""), "")
+                val reste = propre.length % 4
+                val complet = if (reste > 0) propre + "=".repeat(4 - reste) else propre
+                return Base64.decode(complet, Base64.DEFAULT)
+            }
+
+            var trouve: String? = null
+            for (appel in Regex("""$nom\(\s*\[\s*((?:"[^"]+",?\s*)+)\s*\]\s*\)""").findAll(texte)) {
+                val morceaux = Regex(""""([^"]+)"""").findAll(appel.groupValues[1])
+                    .map { it.groupValues[1] }.toList()
+                var chaine: String? = morceaux.joinToString("").replace("\\/", "/")
+                var octets: ByteArray? = null
+                var ok = true
+
+                for ((op, param) in operations) {
+                    when (op) {
+                        "atob" -> try {
+                            octets = if (chaine != null) decoder64(chaine!!)
+                            else decoder64(String(octets!!, Charsets.ISO_8859_1))
+                            chaine = String(octets!!, Charsets.ISO_8859_1)
+                        } catch (_: Exception) { ok = false }
+                        "reverse" -> {
+                            chaine = (chaine ?: String(octets!!, Charsets.ISO_8859_1)).reversed()
+                            octets = null
+                        }
+                        "rot" -> {
+                            val d = param!!
+                            val depart = chaine ?: String(octets!!, Charsets.ISO_8859_1)
+                            val sb = StringBuilder()
+                            for (c in depart) sb.append(
+                                when (c) {
+                                    in 'a'..'z' -> (((c - 'a') + d) % 26 + 'a'.code).toChar()
+                                    in 'A'..'Z' -> (((c - 'A') + d) % 26 + 'A'.code).toChar()
+                                    else -> c
+                                }
+                            )
+                            chaine = sb.toString()
+                            octets = null
+                        }
+                    }
+                    if (!ok) break
+                }
+                if (!ok) continue
+
+                val finaux = octets ?: chaine!!.toByteArray(Charsets.ISO_8859_1)
+                var acc = accInit
+                val demele = StringBuilder()
+                for (b in finaux) {
+                    val o = b.toInt() and 0xFF
+                    acc = (acc + accPas) % 256
+                    demele.append((o xor acc).toChar())
+                    acc = (acc + o) % 256
+                }
+                val url = demele.toString().trim()
+                if (url.startsWith("http")) { trouve = url; break }
+            }
+            trouve
+        }
+    } catch (_: Throwable) {
+        null
     }
 
     /**

@@ -741,6 +741,36 @@ abstract class Extractor {
             return false
         }
 
+        /**
+         * 2026-09-19 — L'erreur est-elle un SIMPLE DÉLAI DÉPASSÉ ?
+         *
+         * Distinction volontairement plus fine que [isDomainError] : un DNS introuvable ou
+         * une connexion refusée disent « ce domaine n'existe plus » — inutile de réessayer,
+         * les miroirs sont la bonne réponse. Un délai dépassé, lui, ne dit rien sur le
+         * domaine : le serveur peut très bien répondre à la requête suivante, et c'est
+         * exactement ce qui a été mesuré sur `serix.upns.live` (30 s de silence, puis
+         * 104 ms au coup d'après).
+         */
+        private fun estTimeout(e: Throwable): Boolean {
+            var cur: Throwable? = e
+            var profondeur = 0
+            while (cur != null && profondeur < 6) {
+                when (cur) {
+                    is java.net.SocketTimeoutException -> return true
+                    is kotlinx.coroutines.TimeoutCancellationException -> return true
+                    // callTimeout d'OkHttp : InterruptedIOException « timeout » / « Canceled ».
+                    is java.io.InterruptedIOException -> return true
+                }
+                val msg = cur.message?.lowercase().orEmpty()
+                // Un hôte introuvable ou une connexion refusée ne sont PAS des accrocs.
+                if (msg.contains("unable to resolve host") || msg.contains("failed to connect")) return false
+                if (msg.contains("timeout") || msg.contains("timed out")) return true
+                cur = cur.cause
+                profondeur++
+            }
+            return false
+        }
+
         /** Applique les redirections domaine mémorisées sur un lien.
          *  Si le host du lien a un redirect connu (succès précédent sur un alias),
          *  on réécrit directement le lien pour éviter de retenter le domaine mort. */
@@ -987,6 +1017,42 @@ abstract class Extractor {
                     // providers envoient encore l'ancien domaine dans les embeds.
                     // Le fallback est transparent : l'extracteur reçoit l'URL
                     // réécrite et fonctionne normalement.
+                    // 2026-09-19 (user, Rpmvid rouge sur « The Last Sunrise ») — UN SEUL
+                    //   NOUVEL ESSAI SUR LE MÊME DOMAINE, AVANT LES MIROIRS.
+                    //   Relevé dans le log : `serix.upns.live` a résolu son DNS en 158 ms puis
+                    //   n'a plus rien dit pendant 30 s (notre callTimeout), après quoi les 12
+                    //   miroirs ont été interrogés en vain — l'identifiant `#6kz6qz` n'existe
+                    //   que sur serix. Total : 44 s pour un échec. Or la même requête,
+                    //   rejouée aussitôt depuis le PC, répond **200 en 104 ms**, et le user
+                    //   relançant à la main a obtenu la lecture du premier coup.
+                    //   C'était donc un accroc passager, pas un domaine mort. On rejoue donc
+                    //   UNE fois le domaine d'origine avant de partir dans les alias.
+                    //   ⚠ On ne touche PAS aux délais : l'avertissement du 11/09 sur les
+                    //     hébergeurs lents mais vivants (vidzy à 54 s) reste entièrement valable.
+                    val estAccrocPassager = estTimeout(e)
+                    if (estAccrocPassager) {
+                        Log.w("Extractor", "${foundExtractor.name} : délai dépassé sur ${extractHost(finalLink)} → un nouvel essai avant les miroirs")
+                        try {
+                            val videoRejouee = foundExtractor.extract(finalLink)
+                            val dureeRejeu = System.currentTimeMillis() - extractStartMs
+                            com.streamflixreborn.streamflix.utils.ExtractorLatencyTracker
+                                .recordExtraction(name, dureeRejeu)
+                            Log.i("StreamFlixES", "[VIDEO] -> Extracted (2e essai): ${videoRejouee.source}")
+                            recordSuccess(name)
+                            // Même traitement final que les autres chemins de succès :
+                            //   filtrage des sous-titres puis mise en cache.
+                            val filtree = enforceFrenchSubtitlesOnly(videoRejouee)
+                            if (foundExtractor.cacheTtlMs > 0L) {
+                                extractionCache[link] = CachedExtraction(
+                                    video = filtree,
+                                    expiresAtMillis = System.currentTimeMillis() + foundExtractor.cacheTtlMs,
+                                )
+                            }
+                            return filtree
+                        } catch (_: Exception) {
+                            Log.w("Extractor", "${foundExtractor.name} : 2e essai KO → miroirs")
+                        }
+                    }
                     if (isDomainError(e) && foundExtractor.aliasUrls.isNotEmpty()) {
                         val linkHost = extractHost(finalLink)
                         if (linkHost != null) {

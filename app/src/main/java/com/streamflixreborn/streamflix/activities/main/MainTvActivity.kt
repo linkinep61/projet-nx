@@ -327,6 +327,16 @@ class MainTvActivity : FragmentActivity() {
         } else savedInstanceState
 
         super.onCreate(etatRestaurable)
+
+        // 2026-09-19 — INTERRUPTEUR GÉNÉRAL. Le manifeste TV (`src/main/tv/`)
+        //   démarre DIRECTEMENT ici : SplashActivity, seul endroit où l'état
+        //   était consulté, n'existe pas dans cette variante. L'app coupée
+        //   depuis /admin démarrait donc normalement sur les box TV. Le garde
+        //   est maintenant posé au point d'entrée réel. finish() est appelé
+        //   dans onCreate → Android n'enchaîne que onDestroy, rien n'est
+        //   initialisé à moitié.
+        if (com.streamflixreborn.streamflix.utils.EtatApp.garder(this)) return
+
         savedStateForDeferredInit = etatRestaurable
 
         // 2026-05-12 (user "fameux changement de profil TV", inflate fail

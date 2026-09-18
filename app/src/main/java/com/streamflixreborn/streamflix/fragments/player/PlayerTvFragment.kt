@@ -2219,8 +2219,10 @@ class PlayerTvFragment : Fragment() {
          * par `livehub::`, que le lecteur classe comme du DIRECT, ce qui relançait
          * le film en boucle à la fin et bloquait l'enchaînement automatique.
          */
+        // 2026-09-19 : VOE **et** Vidara — les fichiers migrés chez Vidara portent
+        //   `livehub::vidara::` et n'enchaînaient donc pas. Test unique côté MiniPlayerController.
         private val estFichierBibliotheque: Boolean
-            get() = args.id.startsWith("livehub::voe::")
+            get() = com.streamflixreborn.streamflix.utils.MiniPlayerController.estIdBibliotheque(args.id)
 
         /**
          * FIN DE LECTURE d'un fichier de la bibliothèque = APPUI SUR « SUIVANT ».
@@ -8665,7 +8667,41 @@ class PlayerTvFragment : Fragment() {
                     Log.w("PlayerNetwork", "$h → OkHttp+DoT pour forcer la branche CloudFront (anti-428)")
                     usingCronet = false
                     usingDoH = true
-                    return createDoHOkHttpDataSourceFactory()
+                    val okDoT = createDoHOkHttpDataSourceFactory()
+                    // 2026-09-18 (user : « les serveurs sont rouges sur la TV, verts sur l'Oppo »)
+                    //   — DEUX CONTOURNEMENTS QUI S'ANNULENT, encore, exactement comme Uqload
+                    //   plus bas.
+                    //   La règle ci-dessus force OkHttp+DoT pour que DnsResolver aiguille vers la
+                    //   branche CloudFront (sans quoi : 428 sur tout). Mais sur la TCL Smart TV Pro
+                    //   (armeabi-v7a), `bcdnxw.hakunaymatata.com` REFUSE le ClientHello de
+                    //   Conscrypt : SSLV3_ALERT_HANDSHAKE_FAILURE, poignée de main jamais établie,
+                    //   donc ni code HTTP ni réponse. Même APK, même réseau, même seconde : l'Oppo
+                    //   et le Honor (arm64-v8a) passent. Ce n'est donc pas une question de version
+                    //   de TLS mais d'EMPREINTE du ClientHello — la lib native de Conscrypt n'est
+                    //   pas la même selon l'architecture, et une seule des deux est acceptée.
+                    //   Parade : on garde OkHttp+DoT en premier (l'anti-428 reste acquis), et si
+                    //   la poignée de main est refusée on rejoue la requête en Cronet, qui présente
+                    //   l'empreinte d'un vrai Chrome. C'est déjà le remède retenu pour le WAF
+                    //   CloudFront de M6 (CronetPost) et pour Vavoo.
+                    //   Le repli ne s'arme QUE sur échec TLS : là où ça marche déjà, rien ne change.
+                    val cronetSecours = runCatching {
+                        val moteurSecours =
+                            com.streamflixreborn.streamflix.StreamFlixApp.getCronetEngine(requireContext())
+                                ?: throw IllegalStateException("CronetEngine not available")
+                        CronetDataSource.Factory(moteurSecours as CronetEngine, cronetExecutor)
+                            .setUserAgent(NetworkClient.USER_AGENT)
+                            .setConnectionTimeoutMs(30_000)
+                            .setReadTimeoutMs(30_000)
+                    }.getOrNull()
+                    return if (cronetSecours != null) {
+                        com.streamflixreborn.streamflix.utils.TlsFallbackHttpDataSource.Factory(
+                            okDoT,
+                            cronetSecours,
+                        )
+                    } else {
+                        Log.w("PlayerNetwork", "$h : Cronet indisponible, pas de repli TLS possible")
+                        okDoT
+                    }
                 }
             // 2026-07-29 : hôte de flux dont le DNS FAI a échoué (UnknownHost) → DoT-OkHttp
             //   d'office (résout via dot.sb), même si needsCronet=true. Sinon Cronet (DNS
@@ -9041,7 +9077,22 @@ class PlayerTvFragment : Fragment() {
             // (Xtream-codes Vegeta/Ola/WiTv qui envoient Connection: close après
             // chaque chunk). Pour les segments HLS/VOD, le wrapper laisse l'EOF
             // passer normalement (détection URL au runtime).
-            return com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
+            val avecReconnexion =
+                com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
+            // 2026-09-18 (user : « ça doit pas être que ici ») — REPLI TLS GÉNÉRAL.
+            //   Sur la TCL Smart TV Pro (Android 14 armeabi-v7a), les flux Cloudstream
+            //   mouraient en SSLV3_ALERT_HANDSHAKE_FAILURE / HANDSHAKE_FAILURE_ON_CLIENT_HELLO
+            //   alors que les mêmes URLs passaient sur l'Oppo et le Honor, même réseau, même
+            //   APK : DefaultHttpDataSource sort par HttpURLConnection, donc par la pile TLS
+            //   DU SYSTÈME, que ce téléviseur a trop vieille pour ce CDN. Les appels d'API,
+            //   eux, passaient — ils sortent par OkHttp, donc par le Conscrypt de l'app.
+            //   On n'aiguille rien de nouveau : la voie normale garde la main, et le repli
+            //   OkHttp/Conscrypt ne sert QUE là où il y avait déjà un échec franc.
+            return com.streamflixreborn.streamflix.utils.TlsFallbackHttpDataSource.Factory(
+                avecReconnexion,
+                OkHttpDataSource.Factory(NetworkClient.default)
+                    .setUserAgent(NetworkClient.USER_AGENT),
+            )
         }
 
         /**

@@ -256,6 +256,14 @@
             </intent-filter>
         </receiver>
 
+        <!-- 2026-09-19 : écran de l'interrupteur général à distance (EtatApp).
+             Lancé par MainMobileActivity quand le serveur répond `actif:false`. -->
+        <activity
+            android:name=".activities.BlocageActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
         <!-- 2026-07-07 : Ecran crash — process séparé, survit au kill du main -->
         <activity
             android:name=".CrashActivity"

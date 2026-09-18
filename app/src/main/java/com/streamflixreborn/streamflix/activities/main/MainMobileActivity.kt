@@ -117,6 +117,12 @@ class MainMobileActivity : FragmentActivity() {
 
         super.onCreate(etatRestaurable)
 
+        // 2026-09-19 — INTERRUPTEUR GÉNÉRAL (voir MainTvActivity). Le manifeste
+        //   `src/main/mobile/` démarre lui aussi directement ici, sans passer
+        //   par SplashActivity : sans ce garde, l'APK mobile distribué ignorait
+        //   la coupure exactement comme la version TV.
+        if (com.streamflixreborn.streamflix.utils.EtatApp.garder(this)) return
+
         WiflixProvider.init(this)
         AnimeSamaProvider.init(this)
         // 2026-05-16 : DessinAnime utilise aussi WebViewResolver pour bypass
