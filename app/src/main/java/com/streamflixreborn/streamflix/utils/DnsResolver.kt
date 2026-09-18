@@ -111,6 +111,53 @@ object DnsResolver : Dns {
             !hostname.equals(CLOUDFRONT_HAKUNA, ignoreCase = true)
         ) CLOUDFRONT_HAKUNA else null
 
+    /**
+     * 2026-09-18 — IPv4 D'ABORD, ET COMPLÉTÉE SI ELLE MANQUE.
+     *
+     * Bug user : « je n'arrive plus à synchroniser les données entre appareils », avec
+     * à l'écran `Failed to connect to /[2a06:98c1:3121::3]:443`. Le journal de
+     * l'appareil donne la cause exacte :
+     *
+     *     Resolved streamflix-api.…workers.dev to: 2a06:98c1:3120::3, 2a06:98c1:3121::3
+     *     ConnectException … after 30000ms: ENETUNREACH (Network is unreachable)
+     *
+     * Deux choses, pas une :
+     *  1. La réponse ne contenait QUE de l'IPv6 — alors que l'hôte publie bien des A
+     *     (vérifié auprès de Cloudflare : 188.114.96.2 et 188.114.97.2). Le DoH interroge
+     *     A et AAAA en parallèle et rend ce qui revient ; quand la branche A se perd, il
+     *     ne reste que des adresses v6.
+     *  2. Le réseau de l'appareil n'a aucune route IPv6 : chaque tentative meurt en
+     *     ENETUNREACH au bout de 30 s. Deux adresses = 60 s, et l'appel est abandonné.
+     *
+     * D'où un service parfaitement joignable, déclaré injoignable.
+     *
+     * Correctif : si la réponse ne contient aucune IPv4, on redemande les A au DoH de
+     * SECOURS (dns.sb) et on les ajoute. Puis on met les IPv4 devant. Rien n'est retiré :
+     * sur un réseau IPv6 les adresses v6 restent dans la liste, simplement après, et le
+     * tri est stable donc l'ordre du résolveur est conservé dans chaque famille.
+     *
+     * ⚠ On complète avec le DoH de secours et JAMAIS avec le DNS système : un FAI qui
+     * détourne un domaine bloqué renverrait une fausse A, qu'on placerait alors en tête.
+     * C'est précisément ce que le DoH est là pour éviter.
+     *
+     * Ça dépasse la synchronisation : tout hôte à double pile était exposé au même
+     * blocage d'une minute sur un réseau sans IPv6.
+     */
+    private fun ipv4Dabord(hostname: String, adresses: List<InetAddress>): List<InetAddress> {
+        val complet = if (adresses.isNotEmpty() && adresses.none { it is java.net.Inet4Address }) {
+            val v4 = runCatching {
+                backupDoh().lookup(hostname).filterIsInstance<java.net.Inet4Address>()
+            }.getOrDefault(emptyList())
+            if (v4.isNotEmpty()) {
+                Log.i(TAG, "$hostname : réponse sans IPv4 → ${v4.size} adresse(s) IPv4 " +
+                    "récupérée(s) via le DoH de secours (${v4.joinToString { it.hostAddress ?: "" }})")
+            }
+            v4 + adresses
+        } else adresses
+        return if (complet.size < 2) complet
+        else complet.sortedBy { if (it is java.net.Inet4Address) 0 else 1 }
+    }
+
     override fun lookup(hostname: String): List<InetAddress> {
         // Check cache d'abord
         val now = System.currentTimeMillis()
@@ -123,7 +170,7 @@ object DnsResolver : Dns {
         // Renvoi vers la branche CloudFront (voir le commentaire de cibleContournement).
         cibleContournement(hostname)?.let { cible ->
             try {
-                val addrs = currentDoh().lookup(cible)
+                val addrs = ipv4Dabord(cible, currentDoh().lookup(cible))
                 if (addrs.isNotEmpty()) {
                     Log.i(TAG, "hakunaymatata : $hostname → branche CloudFront ($cible) = " +
                         addrs.joinToString { it.hostAddress ?: "" })
@@ -138,7 +185,7 @@ object DnsResolver : Dns {
         val providerName = if (_url.isEmpty()) "SYSTEM" else _url
         Log.d(TAG, "Resolving host: $hostname using provider: $providerName")
         return try {
-            val addresses = currentDoh().lookup(hostname)
+            val addresses = ipv4Dabord(hostname, currentDoh().lookup(hostname))
             Log.d(TAG, "Resolved $hostname to: ${addresses.joinToString { it.hostAddress ?: "" }}")
             cache[hostname] = CachedAddr(addresses, now + CACHE_TTL_MS)
             addresses
@@ -150,7 +197,7 @@ object DnsResolver : Dns {
             //   443 passe presque toujours → on garde un résolveur NON filtré au lieu
             //   de retomber sur le DNS FAI qui bloque justement les domaines visés.
             try {
-                val backup = backupDoh().lookup(hostname)
+                val backup = ipv4Dabord(hostname, backupDoh().lookup(hostname))
                 if (backup.isNotEmpty()) {
                     Log.i(TAG, "Backup DoH (dns.sb) resolved $hostname to: ${backup.joinToString { it.hostAddress ?: "" }}")
                     cache[hostname] = CachedAddr(backup, now + CACHE_TTL_MS)
@@ -165,7 +212,7 @@ object DnsResolver : Dns {
             //   entièrement : catalogue, genres, épisodes, recherche). Si le domaine est
             //   bloqué par le DNS FAI, le système échouera aussi → on relance l'erreur DoH.
             return try {
-                val sys = Dns.SYSTEM.lookup(hostname)
+                val sys = ipv4Dabord(hostname, Dns.SYSTEM.lookup(hostname))
                 Log.i(TAG, "Fallback SYSTEM DNS resolved $hostname to: ${sys.joinToString { it.hostAddress ?: "" }}")
                 cache[hostname] = CachedAddr(sys, now + CACHE_TTL_MS)
                 sys
