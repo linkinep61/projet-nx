@@ -72,9 +72,36 @@ open class FilemoonExtractor : Extractor() {
         "filemoon", "bysebuho", "bysezoxexe", "bysejikuar", "q8y5z", "moflix-stream"
     )
 
+    /**
+     * Hôte de l'iframe de lecture, APPRIS à l'exécution depuis `embed_frame_url`.
+     *
+     * ── 2026-09-18 : NE PLUS CODER CE DOMAINE EN DUR ────────────────────────────────────
+     *   La liste ci-dessus contenait `q8y5z` — c'était l'hôte de l'iframe en août. Mesuré ce
+     *   jour dans le Chrome du user sur `filemoon.sx/e/inm3fx2wrbiy` : l'iframe est passée à
+     *   **`n1mwq.org`**. Conséquence, invisible tant que la voie API marche : le relais DoH ne
+     *   servait plus l'iframe, et `VERIFICATION_DOMAINS` ne la reconnaissait plus — donc la
+     *   WebView de secours ne pouvait plus aboutir.
+     *   Même leçon que VOE : une liste de domaines tenue à la main est périmée d'avance. Or
+     *   `/embed/details` nous DONNE l'hôte courant dans `embed_frame_url` : on le mémorise et
+     *   on s'en sert, sans rien à maintenir au prochain changement.
+     */
+    @Volatile
+    private var hoteIframeAppris: String? = null
+
+    private fun memoriserHoteIframe(embedFrameUrl: String?) {
+        val hote = try {
+            java.net.URL(embedFrameUrl ?: return).host.lowercase().takeIf { it.isNotBlank() }
+        } catch (_: Exception) { null } ?: return
+        if (hote != hoteIframeAppris) {
+            hoteIframeAppris = hote
+            Log.d(TAG, "[Filemoon] hôte d'iframe appris : $hote")
+        }
+    }
+
     private fun estDomaineFilemoon(url: String): Boolean {
         val hote = try { java.net.URL(url).host.lowercase() } catch (_: Exception) { return false }
-        return DOMAINES_A_SERVIR.any { hote.contains(it) }
+        if (DOMAINES_A_SERVIR.any { hote.contains(it) }) return true
+        return hoteIframeAppris?.let { hote == it || hote.endsWith(".$it") } == true
     }
 
     /**
@@ -449,6 +476,8 @@ open class FilemoonExtractor : Extractor() {
             throw e
         }
         val embedFrameUrl = details.embed_frame_url
+        // 2026-09-18 : on apprend l'hôte courant de l'iframe (voir `hoteIframeAppris`).
+        memoriserHoteIframe(embedFrameUrl)
 
         var playbackDomain = ""
         val headers = mutableMapOf<String, String>()
@@ -907,7 +936,12 @@ open class FilemoonExtractor : Extractor() {
 
                         // 2. Intercept verification iframe → inject auto-click
                         val host = request?.url?.host ?: return null
-                        if (!resolved && VERIFICATION_DOMAINS.any { host.contains(it, ignoreCase = true) }) {
+                        // 2026-09-18 : l'hôte appris depuis `embed_frame_url` compte AUSSI comme
+                        //   iframe de vérification — `VERIFICATION_DOMAINS` ne connaît que
+                        //   l'ancien `q8y5z.com`, aujourd'hui remplacé par `n1mwq.org`.
+                        val estIframeVerif = VERIFICATION_DOMAINS.any { host.contains(it, ignoreCase = true) } ||
+                            hoteIframeAppris?.let { host.equals(it, true) || host.endsWith(".$it", true) } == true
+                        if (!resolved && estIframeVerif) {
                             // Only intercept document requests (HTML), not sub-resources
                             val accept = request.requestHeaders?.get("Accept") ?: ""
                             if (accept.contains("text/html") || accept.isEmpty()) {

@@ -160,6 +160,13 @@ class LuluVdoExtractor : Extractor() {
             //     réécriture KVS (master → variante) et on laisse le player faire LA requête.
             val url = rewriteKvsMasterToVariant(master) ?: master
 
+            // 2026-09-19 : j'avais ajouté ici la lecture des sous-titres du JS dépaqué
+            //   (`tracks:[…]`), repris de streamflix-reborn2. RETIRÉ après mesure — c'était
+            //   inutile trois fois : cette fonction n'est plus appelée (voir l'avertissement
+            //   dans extract()), la voie WebView renvoie déjà `result.subtitles`, et surtout
+            //   le manifeste HLS de LuluVdo DÉCLARE LUI-MÊME ses sous-titres
+            //   (`#EXT-X-MEDIA:TYPE=SUBTITLES` anglais + français, relevé le 19/09 sur
+            //   aevrjyewans6) : ExoPlayer les prend donc directement, sans rien parser.
             Video(
                 source = preferVariantPlaylist(url),
                 type = MimeTypes.APPLICATION_M3U8,

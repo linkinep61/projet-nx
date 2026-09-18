@@ -2049,8 +2049,10 @@ class PlayerMobileFragment : Fragment() {
      *   (réservé au non-direct) ne partait jamais, et `seekToDefaultPosition()`
      *   écrasait la reprise. On l'exclut donc explicitement là où ça compte.
      */
+    // 2026-09-19 : VOE **et** Vidara — les fichiers migrés chez Vidara portent
+    //   `livehub::vidara::` et n'enchaînaient donc pas. Test unique côté MiniPlayerController.
     private val estFichierBibliotheque: Boolean
-        get() = args.id.startsWith("livehub::voe::")
+        get() = com.streamflixreborn.streamflix.utils.MiniPlayerController.estIdBibliotheque(args.id)
 
     /**
      * FIN DE LECTURE d'un fichier de la bibliothèque = APPUI SUR « SUIVANT ».
@@ -5218,6 +5220,26 @@ class PlayerMobileFragment : Fragment() {
                         // PAS de player.stop() → l'audio AAC continue de jouer
                         return
                     }
+                    // 2026-09-19 : même repli logiciel que dans onPlayerError. Ici le player
+                    //   n'a même pas levé d'erreur (l'audio joue, l'image manque) : c'est le cas
+                    //   10-bit / HDR10 où AUCUN décodeur matériel n'accepte le track. FFmpeg
+                    //   (nextlib) sait le faire → on retente une fois en logiciel avant de
+                    //   zapper. Un refus DRM est traité plus haut et sort déjà de la fonction.
+                    val serveurSw = currentServer
+                    val videoSw = currentVideo
+                    if (!currentSoftwareDecoder && serveurSw != null && videoSw != null &&
+                        replSoftwareTenteSur != serveurSw.id
+                    ) {
+                        replSoftwareTenteSur = serveurSw.id
+                        PlayerSettingsView.Settings.SoftwareDecoder.selectedValue = true
+                        Log.e(
+                            "PlayerNetwork",
+                            "Aucun track vidéo supporté ($codecLabel) → nouvelle tentative en décodeur logiciel (FFmpeg)",
+                        )
+                        initializePlayer(currentExtraBuffering, true, videoSw.source)
+                        displayVideo(videoSw, serveurSw)
+                        return
+                    }
                     val toastMsg = when {
                         isHdr10 -> "Vidéo HEVC HDR10 (10-bit) non supportée par ce device — essaie un autre serveur si dispo"
                         else -> "Codec vidéo non supporté ($codecLabel) par ce device — essaie un autre serveur si dispo"
@@ -5752,6 +5774,52 @@ class PlayerMobileFragment : Fragment() {
                     val toastMsg = when {
                         isDolbyVision -> "Dolby Vision non supporté sur cet appareil — choisis un autre serveur si dispo"
                         else -> "Format/codec non supporté par ce device — choisis un autre serveur si dispo"
+                    }
+                    // 2026-09-19 (user, Honor ELI-NX9 / Android 16, Vidara #2 : la 1080p passe,
+                    //   la 720p non) — LE DÉCODEUR MATÉRIEL REFUSE, MAIS FFMPEG SAIT LIRE.
+                    //   Relevé : format=video/avc, avc1.6E0020, [1440x720, 10bit Luma/Chroma],
+                    //   format_supported=NO_EXCEEDS_CAPABILITIES, « Decoder failed: c2.qti.avc.decoder ».
+                    //   `6E` = profil 110 = High 10 : c'est du H.264 en 10 BITS. La puce Qualcomm
+                    //   annonce connaître video/avc (donc ExoPlayer la choisit) mais ne sait pas
+                    //   décoder ce profil → échec, puis auto-skip, alors que nextlib/FFmpeg est
+                    //   embarqué et l'avale sans peine. En EXTENSION_RENDERER_MODE_ON le renderer
+                    //   matériel passe d'abord et le logiciel n'est jamais tenté.
+                    //   On retente donc UNE fois en forçant le décodeur logiciel — exactement ce
+                    //   que fait le réglage « Software Decoder » à la main — avant d'abandonner.
+                    //   Jamais deux fois sur le même serveur (anti-boucle), et on ne retente pas
+                    //   pour un refus DRM ni pour du Dolby Vision : là, le logiciel n'y peut rien.
+                    val serveurCourant = currentServer
+                    val videoCourante = currentVideo
+                    val refusDrm = errMsgFull.contains("NO_UNSUPPORTED_DRM")
+                    Log.e(
+                        "PlayerNetwork",
+                        "repli SW ? swDec=$currentSoftwareDecoder drm=$refusDrm dv=$isDolbyVision " +
+                            "srv=${serveurCourant?.id} vid=${videoCourante != null} dejaTente=$replSoftwareTenteSur",
+                    )
+                    if (!isDolbyVision && !refusDrm && !currentSoftwareDecoder &&
+                        serveurCourant != null && videoCourante != null &&
+                        replSoftwareTenteSur != serveurCourant.id
+                    ) {
+                        replSoftwareTenteSur = serveurCourant.id
+                        // 2026-09-19 v2 — POURQUOI LA PREMIÈRE VERSION NE FAISAIT RIEN :
+                        //   je posais seulement `currentSoftwareDecoder = true` avant d'appeler
+                        //   displayVideo(). Or displayVideo() relit le réglage de session
+                        //   (`Settings.SoftwareDecoder.isEnabled`, resté false), voit
+                        //   false != true, se ré-initialise… avec false, et initializePlayer()
+                        //   remet `currentSoftwareDecoder = false`. Le lecteur repartait donc
+                        //   en matériel et échouait à l'identique (3 erreurs dans le log).
+                        //   Il faut poser le RÉGLAGE, pas le drapeau : `selectedValue` est une
+                        //   valeur de session (remise à null par init(false) à chaque ouverture
+                        //   du lecteur), donc rien n'est mémorisé durablement pour l'utilisateur,
+                        //   et le menu Réglages affiche bien « décodeur logiciel : forcé ».
+                        PlayerSettingsView.Settings.SoftwareDecoder.selectedValue = true
+                        Log.e(
+                            "PlayerNetwork",
+                            "Codec refusé par le décodeur matériel → nouvelle tentative en décodeur logiciel (FFmpeg)",
+                        )
+                        initializePlayer(currentExtraBuffering, true, videoCourante.source)
+                        displayVideo(videoCourante, serveurCourant)
+                        return
                     }
                     Log.e("PlayerNetwork", "Codec non supporté ($errMsgFull) — Toast + auto-skip")
                     try {
@@ -7515,11 +7583,28 @@ class PlayerMobileFragment : Fragment() {
             .setReadTimeoutMs(30_000)
             .setAllowCrossProtocolRedirects(true)
         // 2026-05-10 : wrapper auto-reconnect sur EOF pour live MPEG-TS (cf PlayerTvFragment).
-        return com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
+        val avecReconnexion =
+            com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
+        // 2026-09-18 — REPLI TLS GÉNÉRAL (parité PlayerTvFragment, cf. le commentaire détaillé
+        //   là-bas). Le défaut n'est pas propre aux téléviseurs : n'importe quel appareil dont
+        //   la pile TLS système a vieilli se fera refuser le ClientHello par un CDN qui durcit
+        //   sa configuration, alors que les appels d'API continueront de passer par Conscrypt.
+        return com.streamflixreborn.streamflix.utils.TlsFallbackHttpDataSource.Factory(
+            avecReconnexion,
+            OkHttpDataSource.Factory(NetworkClient.default)
+                .setUserAgent(NetworkClient.USER_AGENT),
+        )
     }
 
     // 2026-07-05 : flag pour savoir si le player vient du mini (transfert seamless)
     private var attachedFromMiniPlayer = false
+
+    /**
+     * 2026-09-19 — Serveur pour lequel on a DÉJÀ retenté en décodeur logiciel après un refus du
+     * décodeur matériel. Mémorisé par identifiant de serveur : la tentative est donc rejouable
+     * sur le serveur suivant, mais jamais deux fois sur le même (sinon boucle).
+     */
+    private var replSoftwareTenteSur: String? = null
 
     /**
      * 2026-07-05 : Attache le player ExoPlayer transféré depuis le mini-player

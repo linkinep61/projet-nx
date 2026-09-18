@@ -1,6 +1,8 @@
 package com.streamflixreborn.streamflix.utils
 
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -103,6 +105,65 @@ object EtatApp {
             Log.i(TAG, "injoignable (${e.javaClass.simpleName}) → dernier état connu")
             etatMemorise(context)
         }
+    }
+
+    /**
+     * 2026-09-19 — GARDE À POSER DANS CHAQUE POINT D'ENTRÉE.
+     *
+     * L'interrupteur n'était consulté que par SplashActivity, qui n'est le
+     * lanceur QUE du manifeste par défaut. Les APK distribués (manifestes
+     * `tv/` et `mobile/`) démarrent directement sur MainTvActivity /
+     * MainMobileActivity : l'interrupteur n'y était jamais interrogé, donc
+     * couper l'application ne coupait rien du tout sur ces versions.
+     *
+     * À appeler juste après `super.onCreate(...)`. Renvoie `true` quand
+     * l'appel doit s'arrêter là : l'écran de blocage a été lancé et
+     * l'activité se termine (finish() dans onCreate → Android n'appelle plus
+     * que onDestroy, donc aucune initialisation à moitié faite).
+     *
+     * Comme ailleurs : on ne bloque JAMAIS sur une panne (réseau, DNS,
+     * Cloudflare, JSON illisible) — uniquement sur un `actif:false` lu
+     * correctement, ou déjà mémorisé lors d'un lancement précédent.
+     */
+    fun garder(activite: Activity): Boolean {
+        val memorise = etatMemorise(activite)
+        if (!memorise.actif) {
+            ouvrirBlocage(activite, memorise.message)
+            return true
+        }
+        // Rien de mémorisé : on interroge en fond pour ne pas retarder le
+        // démarrage. Si la réponse est « coupée », on bascule sur le blocage.
+        Thread {
+            val etat = interroger(activite.applicationContext)
+            if (!etat.actif) {
+                try {
+                    activite.runOnUiThread {
+                        if (!activite.isFinishing && !activite.isDestroyed) {
+                            ouvrirBlocage(activite, etat.message)
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "blocage différé impossible : ${e.message}")
+                }
+            }
+        }.apply { isDaemon = true }.start()
+        return false
+    }
+
+    private fun ouvrirBlocage(activite: Activity, message: String?) {
+        try {
+            val intention = Intent(
+                activite,
+                Class.forName("com.streamflixreborn.streamflix.activities.BlocageActivity"),
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                putExtra("message", message)
+            }
+            activite.startActivity(intention)
+        } catch (e: Throwable) {
+            Log.w(TAG, "écran de blocage indisponible (${e.message}) → on ferme")
+        }
+        try { activite.finish() } catch (_: Throwable) {}
     }
 
     private fun memoriser(context: Context, actif: Boolean, message: String?) {

@@ -1425,6 +1425,21 @@ object MiniPlayerController {
      *
      * false = dernier fichier du dossier, on s'arrête là.
      */
+    /**
+     * 2026-09-19 (user : « le dossier clip dans Films/Série, mes vidéos uploadées avec
+     *   Vidara, ne passe pas à la lecture suivante — je l'avais corrigé à l'époque avec
+     *   VOE ») — LA CAUSE : l'enchaînement de MA BIBLIOTHÈQUE était reconnu au seul
+     *   préfixe `livehub::voe::`. Les fichiers migrés chez Vidara portent
+     *   `livehub::vidara::` : ils retombaient donc dans la branche « direct », qui
+     *   recharge le même flux au lieu de passer au suivant. Le mécanisme lui-même
+     *   (LiveTvHubProvider.getNextChannelId) n'a jamais été propre à VOE.
+     *
+     * Un seul endroit décide désormais, pour que l'ajout d'un futur hébergeur ne laisse
+     * plus la moitié des tests derrière.
+     */
+    fun estIdBibliotheque(id: String?): Boolean =
+        id != null && (id.startsWith("livehub::voe::") || id.startsWith("livehub::vidara::"))
+
     private fun lireFichierBibliothequeSuivant(idCourant: String): Boolean {
         val provider = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
         val suivant = provider.getNextChannelId(idCourant) ?: run {
@@ -1443,7 +1458,7 @@ object MiniPlayerController {
         //   BIBLIOTHÈQUE terminé DANS le mini-lecteur. Son id `livehub::…` tombait dans
         //   la branche « direct » plus bas, qui RECHARGE le même flux : il repartait donc
         //   en boucle au lieu de passer au fichier suivant du dossier.
-        if (curChIdForEnd.startsWith("livehub::voe::")) {
+        if (estIdBibliotheque(curChIdForEnd)) {
             if (playbackState == Player.STATE_ENDED && lireFichierBibliothequeSuivant(curChIdForEnd)) return
             return
         }
@@ -1798,7 +1813,7 @@ object MiniPlayerController {
                     //   `handleEndedOrIdle` ne pouvait donc rien déclencher.
                     //   Ces fichiers entrent maintenant dans CE filet-là — le même que les
                     //   clips Rutube/YouTube, qui marche depuis le 2026-08-14.
-                    val estBibliotheque = idClip?.startsWith("livehub::voe::") == true
+                    val estBibliotheque = estIdBibliotheque(idClip)
                     val estClipWeb = idClip != null &&
                         (idClip.startsWith("livehub::rutube::") || idClip.startsWith("livehub::ytclip::"))
                     if (!finClipTraitee && idClip != null && (estClipWeb || estBibliotheque)) {
@@ -3412,7 +3427,7 @@ object MiniPlayerController {
                 channelId.startsWith("livehub::") || channelId.startsWith("sportlive::") ||
                 channelId.startsWith("match::") || channelId.startsWith("vavoo::") ||
                 channelId.startsWith("myiptv-live::")) &&
-                !channelId.startsWith("livehub::voe::")
+                !estIdBibliotheque(channelId)
             val mediaItem = MediaItem.Builder()
                 .setUri(video.source.toUri())
                 .setMimeType(video.type)

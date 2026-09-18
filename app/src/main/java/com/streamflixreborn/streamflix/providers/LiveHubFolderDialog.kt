@@ -1114,6 +1114,9 @@ object LiveHubFolderDialog {
         headerLayout.addView(langBtn)
 
         // ── Liste des chaînes ── (2026-06-22 : ListView custom, pas setItems)
+        // 2026-09-19 : le champ est créé plus bas, mais le clic doit pouvoir le lire pour
+        //   mémoriser la recherche → on passe par un porteur déclaré avant la liste.
+        var champOtf: android.widget.EditText? = null
         val filteredOtf = channels.toMutableList()
         val otfAdapter = android.widget.ArrayAdapter(
             ctx, android.R.layout.simple_list_item_1, channels.map { it.title }.toMutableList(),
@@ -1124,7 +1127,7 @@ object LiveHubFolderDialog {
             isDrawSelectorOnTop = true
             adapter = otfAdapter
             setOnItemClickListener { _, _, idx, _ ->
-                filteredOtf.getOrNull(idx)?.let { onChannelSelected(it) }
+                filteredOtf.getOrNull(idx)?.let { memoriserRecherche(ctx, champOtf); onChannelSelected(it) }
             }
         }
         // 2026-07-23 (user "je veux une recherche à l'ouverture de chaque dossier") :
@@ -1154,7 +1157,7 @@ object LiveHubFolderDialog {
         }
         val otfContent = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
-            addView(otfSearch, android.widget.LinearLayout.LayoutParams(
+            addView(champAvecHistorique(ctx, otfSearch.also { champOtf = it }, folderName, isTV), android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { setMargins((12 * dp).toInt(), (4 * dp).toInt(), (12 * dp).toInt(), (4 * dp).toInt()) })
@@ -1362,6 +1365,9 @@ object LiveHubFolderDialog {
         //   par titre des programmes dedans.
         // Maintenir une liste mutable filtrée affichée à l'écran.
         var displayCats: List<Category> = categories.toList()
+        // 2026-09-19 : porteur du champ de recherche (créé plus bas) pour mémoriser la
+        //   requête au moment où l'utilisateur ouvre un résultat.
+        var champCat: android.widget.EditText? = null
         val labels = displayCats.map { it.name }.toMutableList()
         val adapter = android.widget.ArrayAdapter(
             ctx, android.R.layout.simple_list_item_1, labels,
@@ -1372,6 +1378,7 @@ object LiveHubFolderDialog {
             isDrawSelectorOnTop = true
             this.adapter = adapter
             setOnItemClickListener { _, _, idx, _ ->
+                memoriserRecherche(ctx, champCat)
                 showChannelsList(ctx, displayCats[idx], onChannelSelected)
             }
         }
@@ -1458,7 +1465,7 @@ object LiveHubFolderDialog {
             ).apply {
                 setMargins((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt())
             })
-            addView(searchBox, android.widget.LinearLayout.LayoutParams(
+            addView(champAvecHistorique(ctx, searchBox.also { champCat = it }, folderName, isTV), android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
@@ -1625,6 +1632,8 @@ object LiveHubFolderDialog {
             setOnItemClickListener { _, _, idx, _ -> folders[idx].second.invoke() }
         }
         var results: List<TvShow> = emptyList()
+        // 2026-09-19 : porteur du champ (créé plus bas) → mémorisation à l'ouverture d'un résultat.
+        var champChaines: android.widget.EditText? = null
         val resultsAdapter = android.widget.ArrayAdapter(
             ctx, android.R.layout.simple_list_item_1, ArrayList<String>())
         val resultsList = android.widget.ListView(ctx).apply {
@@ -1635,6 +1644,7 @@ object LiveHubFolderDialog {
             visibility = android.view.View.GONE
             setOnItemClickListener { _, _, idx, _ ->
                 results.getOrNull(idx)?.let { ch ->
+                    memoriserRecherche(ctx, champChaines)
                     if (ch.id == MiniPlayerController.currentChannelId) dismissAllDialogs()
                     onChannelSelected(ch)
                 }
@@ -1698,7 +1708,7 @@ object LiveHubFolderDialog {
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { setMargins((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt()) })
-            addView(searchInput, android.widget.LinearLayout.LayoutParams(
+            addView(champAvecHistorique(ctx, searchInput.also { champChaines = it }, "Chaînes", isTV), android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { setMargins((6 * dp).toInt(), (2 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt()) })
@@ -1824,6 +1834,8 @@ object LiveHubFolderDialog {
         val simpleSearchable = searchItems?.distinctBy { it.id } ?: emptyList()
         var simpleSearchMode = false
         var simpleResults: List<TvShow> = emptyList()
+        // 2026-09-19 : porteur du champ (créé plus bas) → mémorisation à l'ouverture d'un résultat.
+        var champSimple: android.widget.EditText? = null
         val listView = android.widget.ListView(ctx).apply {
             // 2026-07-24 : focus TV visible = liseré blanc par-dessus la ligne sélectionnée.
             selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
@@ -1832,6 +1844,7 @@ object LiveHubFolderDialog {
             setOnItemClickListener { _, _, idx, _ ->
                 if (simpleSearchMode) {
                     val show = simpleResults.getOrNull(idx) ?: return@setOnItemClickListener
+                    memoriserRecherche(ctx, champSimple)
                     onSearchItemSelected?.invoke(show)
                     return@setOnItemClickListener
                 }
@@ -1954,7 +1967,7 @@ object LiveHubFolderDialog {
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { setMargins((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt()) })
             simpleSearchBox?.let {
-                addView(it, android.widget.LinearLayout.LayoutParams(
+                addView(champAvecHistorique(ctx, it.also { c -> champSimple = c }, folderName, isTV), android.widget.LinearLayout.LayoutParams(
                     android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                     android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
                 ).apply { setMargins((8 * dp).toInt(), (2 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt()) })
@@ -2178,6 +2191,8 @@ object LiveHubFolderDialog {
         val aggAllProgs = aggregated.values.flatten().distinctBy { it.id }
         var aggSearchMode = false
         var aggResults: List<TvShow> = emptyList()
+        // 2026-09-19 : porteur du champ (créé plus bas) → mémorisation à l'ouverture d'un résultat.
+        var champAgg: android.widget.EditText? = null
         val aggAdapter = android.widget.ArrayAdapter(
             ctx, android.R.layout.simple_list_item_1, labels.toMutableList()
         )
@@ -2189,6 +2204,7 @@ object LiveHubFolderDialog {
             setOnItemClickListener { _, _, idx, _ ->
                 if (aggSearchMode) {
                     val show = aggResults.getOrNull(idx) ?: return@setOnItemClickListener
+                    memoriserRecherche(ctx, champAgg)
                     if (show.id == com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId) {
                         dismissAllDialogs()
                     }
@@ -2342,7 +2358,7 @@ object LiveHubFolderDialog {
             ).apply {
                 setMargins((6 * dp2).toInt(), (4 * dp2).toInt(), (6 * dp2).toInt(), (2 * dp2).toInt())
             })
-            addView(searchBoxAgg, android.widget.LinearLayout.LayoutParams(
+            addView(champAvecHistorique(ctx, searchBoxAgg.also { champAgg = it }, folderName, isTV2), android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
@@ -2579,6 +2595,134 @@ object LiveHubFolderDialog {
         return { scope.coroutineContext[Job]?.cancel() }
     }
 
+    /**
+     * 2026-09-19 (user : « dans la barre de recherche replay TF1, tout à droite on aurait un
+     *   bouton historique qu'on puisse accéder avec la télécommande, un peu comme ce qu'on a
+     *   déjà en place dans la radio ») — HISTORIQUE DE RECHERCHE, POUR TOUS LES DOSSIERS.
+     *
+     * Enveloppe un champ de recherche dans une ligne « [ champ ][ 🕘 ] » et renvoie cette
+     * ligne, à poser À LA PLACE du champ. Le bouton est focusable, donc atteignable au D-pad
+     * sur box TV, et le champ garde exactement le comportement qu'il avait (filtre en temps
+     * réel, hint, listeners existants).
+     *
+     * Deux choix importants :
+     *  · l'historique est mémorisé QUAND UN RÉSULTAT EST OUVERT (voir `memoriserRecherche`),
+     *    pas à la frappe — qui laisserait « t », « tf », « tf1 »… — ni sur validation, que
+     *    personne ne fait sur un champ qui filtre en direct. La validation au clavier
+     *    mémorise aussi, pour qui tape quand même Entrée ; le listener renvoie `false`
+     *    donc le comportement d'origine du champ est intact.
+     *  · un SEAU PAR DOSSIER (`hub::<nom>`), pour que l'historique du replay TF1 ne se mélange
+     *    pas à celui de la musique. Rutube garde le sien (RutubeFolder.history), déjà en place.
+     */
+
+    /** Seau d'historique associé à chaque champ de recherche enveloppé (clé faible : la vue
+     *  peut être collectée sans fuite quand le dialogue se ferme). */
+    private val seauxRecherche = java.util.WeakHashMap<android.widget.EditText, String>()
+
+    /**
+     * 2026-09-19 v2 (user : « en réalité on ne recherche pas, on tape juste le nom et ça
+     *   trouve — du coup on n'aura jamais d'historique »). Il a raison : ces barres filtrent
+     *   à la frappe, personne ne valide avec OK, donc mémoriser sur validation ne remplissait
+     *   jamais rien. Le VRAI signal qu'une recherche a servi, c'est le moment où on ouvre un
+     *   résultat : on mémorise donc la requête en cours au clic sur un élément.
+     */
+    private fun memoriserRecherche(ctx: Context, champ: android.widget.EditText?) {
+        val seau = seauxRecherche[champ ?: return] ?: return
+        val q = champ.text?.toString()?.trim().orEmpty()
+        if (q.length < 2) return   // « a », « t » : du bruit, pas une recherche
+        com.streamflixreborn.streamflix.utils.SearchHistory.add(ctx, q, seau)
+    }
+
+    private fun champAvecHistorique(
+        ctx: Context,
+        champ: android.widget.EditText,
+        nomDossier: String,
+        isTV: Boolean,
+        appliquer: ((String) -> Unit)? = null,
+    ): android.widget.LinearLayout {
+        val dp = ctx.resources.displayMetrics.density
+        val seau = "hub::" + nomDossier.lowercase()
+            .replace(Regex("[^a-z0-9]+"), "-").trim('-').take(40)
+        seauxRecherche[champ] = seau
+
+        val bouton = android.widget.TextView(ctx).apply {
+            text = "🕘"
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = if (isTV) 15f else 13f
+            gravity = android.view.Gravity.CENTER
+            setPadding((14 * dp).toInt(), (7 * dp).toInt(), (14 * dp).toInt(), (7 * dp).toInt())
+            isFocusable = true
+            isClickable = true
+            contentDescription = "Recherches récentes"
+            background = android.graphics.drawable.StateListDrawable().apply {
+                val actif = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.parseColor("#33FFFFFF"))
+                    setStroke((2 * dp).toInt(), android.graphics.Color.parseColor("#E23B3B"))
+                    cornerRadius = 8 * dp
+                }
+                val repos = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.parseColor("#22FFFFFF"))
+                    cornerRadius = 8 * dp
+                }
+                addState(intArrayOf(android.R.attr.state_focused), actif)
+                addState(intArrayOf(android.R.attr.state_pressed), actif)
+                addState(intArrayOf(), repos)
+            }
+            setOnClickListener {
+                val hist = com.streamflixreborn.streamflix.utils.SearchHistory.getAll(ctx, seau)
+                if (hist.isEmpty()) {
+                    android.widget.Toast.makeText(
+                        ctx, "Aucune recherche récente", android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                    return@setOnClickListener
+                }
+                android.app.AlertDialog.Builder(ctx)
+                    .setTitle("🕘 Recherches récentes")
+                    .setItems(hist.toTypedArray()) { _, i ->
+                        val q = hist[i]
+                        champ.setText(q)          // relance le filtre temps réel du champ
+                        champ.setSelection(q.length)
+                        appliquer?.invoke(q)      // recherche réseau éventuelle
+                    }
+                    // Même garde que pour Rutube : l'historique est le seul moyen de
+                    //   retrouver une requête passée, on ne l'efface pas par mégarde.
+                    .setNeutralButton("🗑 Effacer l'historique") { _, _ ->
+                        android.app.AlertDialog.Builder(ctx)
+                            .setTitle("Effacer l'historique ?")
+                            .setMessage("Les ${hist.size} recherches mémorisées pour « $nomDossier » seront supprimées.")
+                            .setNegativeButton("Annuler", null)
+                            .setPositiveButton("Effacer") { _, _ ->
+                                com.streamflixreborn.streamflix.utils.SearchHistory.clear(ctx, seau)
+                                android.widget.Toast.makeText(
+                                    ctx, "Historique effacé", android.widget.Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                            .show()
+                    }
+                    .show()
+            }
+        }
+
+        champ.setOnEditorActionListener { _, _, _ ->
+            val q = champ.text.toString().trim()
+            if (q.isNotEmpty()) {
+                com.streamflixreborn.streamflix.utils.SearchHistory.add(ctx, q, seau)
+            }
+            false   // on ne consomme pas : le comportement d'origine du champ est préservé
+        }
+
+        return android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            addView(champ, android.widget.LinearLayout.LayoutParams(
+                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f,
+            ))
+            addView(bouton, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = (6 * dp).toInt() })
+        }
+    }
+
     /** Affiche une grille avec jaquettes (posters) pour les films/séries. */
     private fun showPosterGrid(
         ctx: Context,
@@ -2773,6 +2917,9 @@ object LiveHubFolderDialog {
         // v13 : clics via onItemClickListener (D-pad + touch compatible)
         gridView.onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, pos, _ ->
             val ch = filteredChannels[pos]
+            // 2026-09-19 : on ouvre un résultat → la requête tapée a servi, on la mémorise.
+            //   (Rutube garde son propre historique, d'où le garde sur networkSearch.)
+            if (networkSearch == null) memoriserRecherche(ctx, searchInput)
             android.util.Log.d("LiveHubFolderDialog",
                 "Click poster: ${ch.title} (${ch.id}) — currentMini=${MPC.currentChannelId}")
             // 2026-06-22 (user "la page doit se fermer que au 2e clic sur
@@ -3173,10 +3320,16 @@ object LiveHubFolderDialog {
                     android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 ))
             }
-            addView(searchInput, android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            ))
+            // Rutube a déjà son 🕘 dans sa barre d'outils (et son propre listener de
+            //   validation, qui lance la recherche réseau) : on ne l'enveloppe pas.
+            addView(
+                if (networkSearch == null) champAvecHistorique(ctx, searchInput, category.name, isTV)
+                else searchInput,
+                android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                ),
+            )
             addView(gridView, android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 0, 1f
@@ -3373,10 +3526,11 @@ object LiveHubFolderDialog {
                 setMargins((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt())
             })
             if (searchInput != null) {
-                addView(searchInput, android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                ))
+                addView(champAvecHistorique(ctx, searchInput, category.name, isTV),
+                    android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    ))
             }
             addView(listView, android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
@@ -3426,6 +3580,8 @@ object LiveHubFolderDialog {
 
         listView.setOnItemClickListener { _, _, idx, _ ->
             val sel = filteredChannels[idx]
+            // 2026-09-19 : mémorise la recherche qui a mené à ce résultat.
+            memoriserRecherche(ctx, searchInput)
             android.util.Log.d("LiveHubFolderDialog", "Click chaîne: ${sel.title} (${sel.id}) — currentMini=${MPC.currentChannelId}")
             // 2026-06-22 (user "la page doit se fermer que au 2e clic sur
             //   le même épisode, là ça part en plein écran") :

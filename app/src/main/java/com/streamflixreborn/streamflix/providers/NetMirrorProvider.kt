@@ -1353,6 +1353,50 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                     }.getOrNull()?.takeIf { it.isNotBlank() }
                 } else null
 
+            // 2 ter) 2026-09-18 (user : « il devrait même pas y avoir un seul serveur ici ») —
+            //   ÉPISODE INEXISTANT ⇒ AUCUN SERVEUR.
+            //   Relevé sur Lanterns S1E6 « Bad Optics » (pas encore diffusé) : 1Jour1Film et
+            //   FrenchStream s'effaçaient proprement (« no episode E6 in season … (available:
+            //   [E1..E5]) → SKIP »), mais NetMirror publiait quand même Hotstar + Disney+, parce
+            //   que ses serveurs ne dépendaient que de l'identifiant de la SÉRIE (netmirrorId) :
+            //   l'épisode n'était résolu qu'au moment de la lecture, dans getVideo. L'utilisateur
+            //   voyait donc 2 serveurs qui échouaient tous les deux en « playlist.php returned 404 ».
+            //   On résout donc l'épisode AVANT de publier quoi que ce soit : s'il est introuvable
+            //   sur cette plateforme, elle ne propose rien.
+            //   Principe projet : pas de serveur plutôt qu'un serveur menteur.
+            //   NB : coût = un appel post.php de plus par plateforme sur les séries ; c'est le même
+            //   appel que faisait déjà getVideo, simplement avancé.
+            val sNum = ids.seasonNum
+            val eNum = ids.episodeNum
+            val idLecture: String = if (sNum != null && eNum != null) {
+                resolveEpisodeId(platform.ottCookie, netmirrorId, sNum, eNum, titreEpisodeVo)
+                    ?: run {
+                        Log.d(TAG, "${platform.label} : S${sNum}E${eNum} introuvable → aucun serveur")
+                        return@withContext emptyList()
+                    }
+            } else netmirrorId
+
+            // 2 quater) 2026-09-18 (user : « les serveurs sont pas censés s'afficher s'il y a pas
+            //   de contenu ») — LA RECHERCHE NE PROUVE PAS QUE LA PLATEFORME DIFFUSE LE TITRE.
+            //   Relevé sur Lanterns : Netflix et Prime Video répondent honnêtement « No Result
+            //   Found! », mais Disney+ ET Hotstar renvoient le MÊME identifiant au bit près
+            //   (1271680756) — deux catalogues distincts ne peuvent pas partager un id. Leur
+            //   search.php tape donc dans un index général, pas dans l'inventaire de ce qui est
+            //   réellement lisible ; le second résultat rendu était d'ailleurs un PODCAST
+            //   (« Lanterns: The Official Podcast »), ce qu'aucun catalogue vidéo ne référence.
+            //   Vérifié côté site : une recherche « Lantern » sur leur front ne rend que le film
+            //   Green Lantern (2011), aucune série. Les fiches existent dans leur base — assez
+            //   pour que resolveEpisodeId trouve même l'épisode par son titre — mais rien n'est
+            //   lisible, d'où le 404 de playlist.php au moment de lire.
+            //   Le seul signal fiable est donc playlist.php lui-même : on le sonde AVANT de
+            //   publier. Coût = un appel par plateforme, mais les plateformes sont déjà
+            //   interrogées en parallèle (fetchNativeNetMirrorServers) → un aller-retour en tout.
+            //   Principe projet : pas de serveur plutôt qu'un serveur menteur.
+            if (!contenuLisible(platform, idLecture)) {
+                Log.d(TAG, "${platform.label} : contenu non lisible → aucun serveur")
+                return@withContext emptyList()
+            }
+
             // 3) Construire les serveurs — un PAR LANGUE, VF en premier
             val baseSrc = buildString {
                 append("nm::${platform.ottCookie}::$netmirrorId")
@@ -1424,6 +1468,55 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         } catch (e: Exception) {
             Log.w(TAG, "fetchServersForPlatform ${platform.label} failed: ${e.message}")
             emptyList()
+        }
+    }
+
+    /**
+     * 2026-09-18 — LE CONTENU EST-IL RÉELLEMENT LISIBLE SUR CETTE PLATEFORME ?
+     *
+     * Sonde `playlist.php` avec l'identifiant qui servira à la lecture, exactement comme le fera
+     * getVideo (même chemin par plateforme, même cookie de session, mêmes en-têtes). Deux refus
+     * possibles, tous deux observés en direct :
+     *   - HTTP 404 → la plateforme ne connaît pas ce contenu (Lanterns sur hs/dp) ;
+     *   - HTTP 200 + « Video ID not found! » → id servi à la mauvaise racine (relevé en 2026-08-08
+     *     avec un id Prime Video sur /playlist.php).
+     * En cas de doute — autre code, réseau capricieux, exception — on répond `true` : on ne veut
+     * pas faire disparaître un serveur qui marche à cause d'un aléa passager.
+     */
+    private suspend fun contenuLisible(
+        platform: OttPlatform,
+        contentId: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val session = ensureCookie()
+            val url = "$MAIN_URL${platform.playlistPath}?id=$contentId&t=${System.currentTimeMillis()}"
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", NM_UA)
+                .header("Ott", platform.ottCookie)
+                .header("Cookie", "$session; ott=${platform.ottCookie}; hd=on")
+                .header("Referer", "$MAIN_URL/")
+                .build()
+            httpClientFollowRedirects.newCall(req).execute().use { r ->
+                when {
+                    r.code == 404 -> {
+                        Log.d(TAG, "${platform.label} : playlist 404 pour $contentId → hors catalogue")
+                        false
+                    }
+                    !r.isSuccessful -> true
+                    else -> {
+                        val corps = r.body?.string().orEmpty()
+                        val absent = corps.contains("Video ID not found", ignoreCase = true)
+                        if (absent) {
+                            Log.d(TAG, "${platform.label} : « Video ID not found » pour $contentId → hors catalogue")
+                        }
+                        !absent
+                    }
+                }
+            }
+        }.getOrElse { e ->
+            Log.d(TAG, "${platform.label} : sonde playlist impossible (${e.message}) → on laisse passer")
+            true
         }
     }
 
@@ -1912,7 +2005,13 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         val contentId = if (seasonNum != null && episodeNum != null) {
             // Pour les séries : d'abord récupérer l'ID de l'épisode via le backend
             val episodeId = resolveEpisodeId(ottCode, netmirrorId, seasonNum, episodeNum, titreEpisodeVo)
-            episodeId ?: netmirrorId
+            // 2026-09-18 : NE PLUS retomber sur `netmirrorId` quand l'épisode est introuvable.
+            //   `netmirrorId` est l'identifiant de la SÉRIE : on appelait donc playlist.php avec
+            //   un id de série pour lire un épisode, d'où le « playlist.php returned 404 » de
+            //   Lanterns S1E6. Un épisode non résolu doit échouer franchement et tout de suite —
+            //   et normalement on n'arrive même plus ici, le serveur n'étant plus proposé
+            //   (cf. garde « 2 ter » dans fetchServersForPlatform).
+            episodeId ?: error("NetMirror : épisode S${seasonNum}E${episodeNum} introuvable")
         } else {
             netmirrorId
         }
