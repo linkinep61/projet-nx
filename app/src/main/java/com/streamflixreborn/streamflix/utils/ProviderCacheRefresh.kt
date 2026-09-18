@@ -92,10 +92,17 @@ object ProviderCacheRefresh {
     fun nuclearCachePurge(context: Context) {
         Log.w(TAG, "=== NUCLEAR CACHE PURGE === (0 serveur détecté, auto-recovery)")
         refreshNonIptv(context)
-        // Vider TOUT le cookie manager (pas seulement CF) — état désespéré
+        // Vider TOUT le cookie manager (pas seulement CF) — état désespéré.
+        // 2026-09-18 : mais PAS la session TF1. Ce vidage (et le wipe profond
+        //   armé plus bas) est la raison pour laquelle TF1 se retrouvait
+        //   déconnecté « tout seul » alors que M6 et RMC, qui gardent leurs
+        //   jetons en SharedPreferences, ne bougeaient pas : TF1 est le seul
+        //   dont la session vit dans le stockage de la WebView. On la remet en
+        //   place juste après le vidage.
         runCatching {
             CookieManager.getInstance().removeAllCookies { ok ->
                 Log.d(TAG, "nuclear: removeAllCookies success=$ok")
+                runCatching { TF1GigyaSession.restaurer(context) }
             }
         }
         // DNS cache (un DNS poisonné bloque aussi tout)

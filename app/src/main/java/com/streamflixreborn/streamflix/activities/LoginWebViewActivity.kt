@@ -1456,6 +1456,13 @@ class LoginWebViewActivity : AppCompatActivity() {
         //   automatique avant expiration (= TF1JwtRefresher.needsRefresh()).
         val expSec = com.streamflixreborn.streamflix.utils.TF1JwtRefresher.parseJwtExp(token)
         TF1Auth.saveToken(this, token, refresh = null, exp = expSec)
+        // 2026-09-17 : le JWT ne vit que 12 h. On capture ICI la SESSION Gigya
+        //   (cookies `glt_*`), seul moment où elle est forcément présente, pour
+        //   que le renouvellement silencieux puisse la réinjecter plus tard et
+        //   se ré-authentifier sans redemander quoi que ce soit. Indispensable
+        //   pour les comptes Google/Apple (aucun mot de passe à stocker).
+        val nbCookies = com.streamflixreborn.streamflix.utils.TF1GigyaSession.capturer(this)
+        Log.i(TAG, "Session Gigya TF1 capturée : $nbCookies cookie(s)")
         Toast.makeText(this, "✓ TF1+ connecté", Toast.LENGTH_SHORT).show()
         Log.i(TAG, "JWT TF1+ saved (len=${token.length}, exp=$expSec)")
         setResult(RESULT_OK)

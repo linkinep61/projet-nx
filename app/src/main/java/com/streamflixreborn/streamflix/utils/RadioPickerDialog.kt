@@ -471,7 +471,13 @@ object RadioPickerDialog {
                 }
                 var list = if (showOnlyFavorites) {
                     val favIds = RadioFavoritesStore.all()
-                    all.filter { it.id in favIds }
+                    // 2026-09-18 (bug user : « je mets une radio Audiophile en favori,
+                    //   elle n'apparaît pas avec les autres ») : les stations FLAC ne
+                    //   sont pas dans `all` — elles vivent dans leur propre dossier —
+                    //   donc filtrer `all` seul ne pouvait JAMAIS les retrouver. L'étoile
+                    //   s'allumait bien, le favori était bien enregistré, mais la vue
+                    //   Favoris le cherchait dans une liste où il n'était pas.
+                    (all + audiophile).filter { it.id in favIds }
                 } else all
                 if (currentQuery.isNotBlank()) {
                     val q = currentQuery.lowercase().trim()

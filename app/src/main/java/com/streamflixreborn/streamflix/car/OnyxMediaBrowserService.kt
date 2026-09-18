@@ -166,7 +166,12 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
                         }
                     FOLDER_RADIO -> {
                         val favIds = runCatching { RadioFavoritesStore.all() }.getOrDefault(emptySet())
-                        val favs = allStations().filter { it.id in favIds && !it.streamUrl.isNullOrBlank() }
+                        // 2026-09-18 : les radios FLAC d'audiophile.fm ne sont pas dans
+                        //   `allStations()` (catalogue à part) — sans elles ici, une station
+                        //   mise en favori n'apparaissait jamais dans le dossier Favoris,
+                        //   ni dans l'app ni en voiture. Même correctif que RadioPickerDialog.
+                        val favs = (allStations() + audiophileStations())
+                            .filter { it.id in favIds && !it.streamUrl.isNullOrBlank() }
                         // Contexte de ⏭/⏮ : la liste des favoris (skip = station favorite suivante).
                         lastRadioList = favs.map { it.streamUrl!! to it.name }
                         favs.forEach { s ->

@@ -67,13 +67,37 @@ private abstract class ReplayAuthBase(private val prefName: String) {
     }
     fun getApiKey(ctx: Context): String? = prefs(ctx).getString("api_key", null)
 
+    // 2026-09-17 (user : « TF1 se deconnecte souvent, je suis toujours oblige de
+    //   remettre les identifiants, alors que M6 et RMC non »).
+    //
+    //   CAUSE. `getToken` EFFACAIT TOUT le fichier de preferences des que le jeton
+    //   etait perime (`clearToken` = prefs.edit().clear() : jeton, refresh, exp,
+    //   account_id, api_key, uid_signature, signature_timestamp, m6_jwt). Et comme
+    //   `isLoggedIn` passe par `getToken`, le SIMPLE AFFICHAGE de la carte TF1 (TV
+    //   Hub, reglages) DETRUISAIT la session. Une lecture ne doit jamais detruire.
+    //
+    //   POURQUOI TF1 ET PAS LES AUTRES. Mesure des points de sauvegarde :
+    //     TF1  LoginWebViewActivity:1458 / TF1JwtRefresher:129 -> exp = vraie
+    //          expiration du JWT, qui vit ~1 HEURE. Donc destruction garantie a
+    //          chaque ouverture passe la premiere heure.
+    //     M6   M6UidResolver:412 -> exp = null (=0), la branche ne se declenche
+    //          jamais ; et le jeton vit plusieurs heures.
+    //     RMC  BfmAuth n'est qu'une facade sur RmcPlusAuth (cookies) : ce code
+    //          n'est jamais utilise.
+    //
+    //   CORRECTIF. (1) Un jeton perime n'est plus SERVI (retour null : l'appelant
+    //   declenche son refresh), mais il n'est plus EFFACE. (2) `isLoggedIn` ne veut
+    //   plus dire « mon jeton d'une heure est encore frais » mais « j'ai une session
+    //   a rafraichir » — le refresh silencieux (TF1JwtRefresher) s'appuie sur les
+    //   cookies Gigya, pas sur ce fichier, et peut donc encore aboutir.
+    //   NE PAS REMETTRE le clearToken ici : seule une deconnexion explicite de
+    //   l'utilisateur (bouton des reglages) doit vider ce fichier.
     fun getToken(ctx: Context): String? {
         val p = prefs(ctx)
         val tok = p.getString("token", null) ?: return null
         val exp = p.getLong("exp", 0L)
         if (exp > 0L && exp < System.currentTimeMillis() / 1000L) {
-            Log.d(TAG, "$prefName: token expired (exp=$exp)")
-            clearToken(ctx)
+            Log.d(TAG, "$prefName: token expired (exp=$exp) — conserve pour refresh")
             return null
         }
         return tok
@@ -81,6 +105,19 @@ private abstract class ReplayAuthBase(private val prefName: String) {
 
     fun getRefresh(ctx: Context): String? = prefs(ctx).getString("refresh", null)
 
+    // 2026-09-17 bis — MESURE SUR L'APPAREIL, NE PAS "SIMPLIFIER" EN SENS INVERSE.
+    //   J'avais d'abord fait renvoyer `true` des qu'un jeton existait, meme perime,
+    //   en pensant que le refresh silencieux le renouvellerait. Le test (expiration
+    //   forcee dans le passe) a montre le contraire, logs a l'appui :
+    //     TF1JwtRefresher: Refresh starting (headless WebView)
+    //     authEvent => { parsedJwt=null, authType=STARTUP_TOKEN }   <- page pas connectee
+    //     TF1JwtRefresher: Refresh callback: token=0                <- rien obtenu
+    //     Mediainfo HTTP 200 : "error_code":"PERMISSION_DENIED"     <- ECRAN NOIR
+    //   Afficher « connecte » avec un jeton inutilisable donne donc un ecran noir
+    //   sans explication, ce qui est PIRE que de demander une reconnexion.
+    //   On revient donc a « connecte = jeton exploitable », mais desormais SANS
+    //   destruction (cf. getToken) : le compte, l'apiKey et les signatures DRM
+    //   survivent, et si le refresh aboutit plus tard l'etat repasse a connecte.
     fun isLoggedIn(ctx: Context): Boolean = getToken(ctx) != null
 
     fun clearToken(ctx: Context) {
