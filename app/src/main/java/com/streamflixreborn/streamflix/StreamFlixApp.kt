@@ -452,6 +452,29 @@ class StreamFlixApp : Application() {
             Log.w("StreamFlixApp", "Startup cache clear failed: ${e.message}")
         }
 
+        // 2026-09-18 — RENOUVELLEMENT TF1 AU DÉMARRAGE.
+        //   Le commentaire d'en-tête de TF1JwtRefresher annonçait un appel « au
+        //   boot de l'app » : il n'existait pas. Le seul appelant était
+        //   TF1Resolver.resolveVideoId, c'est-à-dire AU MOMENT DE LANCER UNE
+        //   VIDÉO. Conséquence pour l'utilisateur : le jeton TF1 (12 h) expire
+        //   pendant la nuit, il rouvre l'app, la carte TF1 s'affiche
+        //   « déconnecté » — et rien ne tente jamais de le renouveler, puisque
+        //   personne ne lance de vidéo sur un service marqué déconnecté. D'où
+        //   la ressaisie des identifiants alors que M6 et RMC n'en demandent
+        //   pas. On tente donc le renouvellement dès le lancement, et
+        //   uniquement si une session Gigya est en réserve.
+        //   Différé de 8 s : la WebView ne doit pas concurrencer le démarrage.
+        try {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                try {
+                    if (com.streamflixreborn.streamflix.utils.TF1GigyaSession.disponible(this)) {
+                        com.streamflixreborn.streamflix.utils.TF1JwtRefresher
+                            .refreshIfNeeded(this)
+                    }
+                } catch (_: Throwable) {}
+            }, 8_000L)
+        } catch (_: Throwable) {}
+
         // Track current foreground Activity for WebView dialogs
         // + compteur d'activités visibles pour détecter le background (Home TV)
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {

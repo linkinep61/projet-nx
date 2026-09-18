@@ -1318,6 +1318,9 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                         },
                         onDisconnect = {
                             com.streamflixreborn.streamflix.utils.TF1Auth.clearToken(requireContext())
+                            // 2026-09-17 : idem cote mobile — la session Gigya gardee pour la
+                            //   reconnexion automatique doit partir aussi.
+                            com.streamflixreborn.streamflix.utils.TF1GigyaSession.effacer(requireContext())
                             clearWebViewAccountCookies(
                                 listOf(
                                     "tf1.fr", ".tf1.fr", "compte.tf1.fr",
