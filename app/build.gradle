@@ -45,10 +45,20 @@ android {
 
     defaultConfig {
         applicationId "com.streamfr.app"
+        // 2026-09-19 : minSdk 23 (Android 6) CONFIRME apres arbitrage explicite du user.
+        //   Chiffres Google : minSdk 23 = 99,5 % du parc, minSdk 26 = 98,3 %. Monter a 26
+        //   couterait donc ~1,2 point, plus une part inconnue de box Android TV bas de gamme
+        //   (des box neuves en Android 7.1 se vendent encore, et une box ne se met jamais a
+        //   jour). En face, le gain serait nul : voir les deux plafonds ci-dessous.
+        //   PLAFONDS ACTUELS dus a ce choix, tous deux sans interet fonctionnel :
+        //     - org.mozilla:rhino  bloque en 1.8.x   (1.9.x exige API 26)
+        //     - androidx.navigation bloque en 2.9.x  (2.10.x exige API 24)
+        //   A NE REOUVRIR que si une bibliotheque reellement necessaire exige 24 ou 26 ;
+        //   la balance sera alors differente parce qu'il y aura quelque chose en face.
         minSdk 23
         targetSdk 35
-        versionCode 10951
-        versionName "1.7.251"
+        versionCode 10952
+        versionName "1.7.252"
 
         // ABI pilotÃ©e par la propriÃ©tÃ© ABI_TARGET (local.properties, posÃ©e par la CI).
         //   APK par dÃ©faut = ARM (armeabi-v7a + arm64-v8a).
@@ -145,38 +155,36 @@ android {
 dependencies {
     implementation 'androidx.media3:media3-datasource-okhttp:1.8.0'
     implementation 'androidx.media3:media3-datasource-cronet:1.8.0'
-    implementation 'com.google.android.gms:play-services-cronet:18.1.0'
-    implementation 'androidx.appcompat:appcompat:1.7.1'
-    implementation 'androidx.documentfile:documentfile:1.0.1'
-    implementation 'androidx.constraintlayout:constraintlayout:2.2.1'
-    implementation 'androidx.navigation:navigation-fragment-ktx:2.8.8'
-    implementation 'androidx.navigation:navigation-ui-ktx:2.8.8'
+    implementation 'com.google.android.gms:play-services-cronet:18.1.1'
+    implementation 'androidx.appcompat:appcompat:1.8.0'
+    implementation 'androidx.documentfile:documentfile:1.1.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.2.2'
+    // 2026-09-19 : on DÃ‰CLARAIT 2.8.8 alors que le plugin safe-args (2.9.6) forÃ§ait dÃ©jÃ  la
+    //   2.9.6 Ã  la rÃ©solution. Le numÃ©ro Ã©crit ici ne correspondait donc pas Ã  ce qui Ã©tait
+    //   embarquÃ© : on l'aligne sur la rÃ©alitÃ© pour ne pas se fier Ã  une version fantÃ´me.
+    implementation 'androidx.navigation:navigation-fragment-ktx:2.9.8'
+    implementation 'androidx.navigation:navigation-ui-ktx:2.9.8'
     implementation project(path: ':navigation')
 
-    implementation 'androidx.core:core-ktx:1.17.0'
+    implementation 'androidx.core:core-ktx:1.18.0'
     implementation 'androidx.leanback:leanback:1.2.0'
-    implementation 'com.github.bumptech.glide:glide:5.0.0-rc01'
-    implementation 'androidx.work:work-runtime-ktx:2.10.0'
-    ksp 'com.github.bumptech.glide:ksp:5.0.0-rc01'
-    implementation 'com.github.bumptech.glide:okhttp3-integration:5.0.0-rc01'
+    implementation 'com.github.bumptech.glide:glide:5.0.5'
+    implementation 'androidx.work:work-runtime-ktx:2.11.2'
+    ksp 'com.github.bumptech.glide:ksp:5.0.5'
+    implementation 'com.github.bumptech.glide:okhttp3-integration:5.0.5'
 
     implementation 'androidx.media3:media3-exoplayer:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-dash:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-hls:1.8.0'
     implementation 'androidx.media3:media3-session:1.8.0'
     implementation 'androidx.media3:media3-ui:1.8.0'
-    // 2026-06-04 (user OTF "garde le pattern OTF comme l'application originelle
-    //   jusqu'Ã  l'ExoPlayer de la vidÃ©o") : Embarquement d'ExoPlayer 2.19.1 EN
-    //   PLUS de Media3 1.8.0. Packages distincts (com.google.android.exoplayer2
-    //   vs androidx.media3) â†’ coexistent dans le mÃªme APK sans conflit.
-    //   Usage : strictement OTF (livehub::otf::*) via OtfPlayerActivity dÃ©diÃ©e.
-    //   Le reste de Streamflix (Vavoo/Ola/Vegeta/Movix/Wiflix/etc.) continue
-    //   d'utiliser Media3 1.8.0 inchangÃ©. Media3 1.8.0 a un AudioSink strict
-    //   qui rejette les discontinuities timestamp audio (flux OTF en a), 2.19.1
-    //   est laxiste â†’ reproduit l'exact comportement de l'app OTF TV V3.2 officielle.
-    implementation 'com.google.android.exoplayer:exoplayer-core:2.19.1'
-    implementation 'com.google.android.exoplayer:exoplayer-hls:2.19.1'
-    implementation 'com.google.android.exoplayer:exoplayer-ui:2.19.1'
+    // 2026-09-19 : ExoPlayer 2.19.1 (com.google.android.exoplayer:{core,hls,ui}) RETIRE.
+    //   Embarque le 2026-06-04 en plus de Media3, uniquement pour les deux Activities OTF
+    //   dediees, parce que l'AudioSink strict de Media3 refusait les discontinuites de
+    //   timestamp des flux OTF du CDN dencreak. Ce CDN est mort (NXDOMAIN mondial) ; les
+    //   flux blcco.linkip.org qui l'ont remplace passent dans Media3 sans broncher (mesure
+    //   sur l'Oppo + validation TV par le user). OTF utilise maintenant le lecteur normal,
+    //   donc plus rien ne referencait 2.19.1.
     // 2026-05-09 v15 : nextlib via JitPack â€” codec pack FFmpeg pour Media3.
     // Permet de dÃ©coder AC3, E-AC3, MP2, FLAC, et tous les codecs exotiques que
     // ExoPlayer ne supporte pas en natif. Active via EXTENSION_RENDERER_MODE_PREFER.
@@ -184,59 +192,94 @@ dependencies {
 
 
     implementation 'com.squareup.retrofit2:retrofit:2.11.0'
-    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    implementation 'com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0'
-    implementation 'com.squareup.okhttp3:logging-interceptor:4.12.0'
-    implementation 'dnsjava:dnsjava:3.6.3'
+    // 2026-09-19 : OkHttp 4.12.0 -> 5.4.0 (les trois artefacts ensemble).
+    //   PLAFOND : 5.5.0 est hors de portee, son artefact okhttp-android exige
+    //   compileSdk 37 (on est en 36). 5.4.0 est la derniere qui passe.
+    //   Ce que la 5.x apporte reellement ici : Happy Eyeballs (RFC 8305), la connexion
+    //   tentee en IPv6 et IPv4 en parallele, on garde celle qui repond la premiere.
+    //   Utile sur les hebergeurs dont l'IPv6 est mort ou lent -> plus d'attente du timeout.
+    //   ATTENTION A LA PORTEE : le lecteur video n'utilise PAS OkHttp. Les logs
+    //   PlayerNetwork disent "usingCronet=true" -> la lecture passe par
+    //   play-services-cronet. OkHttp ne sert qu'au scraping des providers, aux images
+    //   via glide okhttp3-integration, et au DNS-over-HTTPS. Ne pas attendre de gain
+    //   de vitesse sur la lecture.
+    //   Si un provider se met a ne plus rien trouver, c'est le premier suspect :
+    //   glide okhttp3-integration et media3-datasource-okhttp ont ete compiles
+    //   contre OkHttp 4.
+    implementation 'com.squareup.okhttp3:okhttp:5.4.0'
+    implementation 'com.squareup.okhttp3:okhttp-dnsoverhttps:5.4.0'
+    implementation 'com.squareup.okhttp3:logging-interceptor:5.4.0'
+    implementation 'dnsjava:dnsjava:3.6.5'
     implementation project(path: ':retrofit-jsoup-converter')
     implementation 'com.squareup.retrofit2:converter-gson:2.11.0'
     implementation 'com.squareup.retrofit2:converter-scalars:2.11.0'
-    implementation 'org.jsoup:jsoup:1.19.1'
+    // 2026-09-19 : on dÃ©clarait 1.19.1 alors qu'une dÃ©pendance transitive tirait dÃ©jÃ  la 1.22.2 â€”
+    //   l'app tournait donc dÃ©jÃ  sur une version plus rÃ©cente que celle Ã©crite ici. AlignÃ© sur la
+    //   derniÃ¨re stable. jsoup est le socle de TOUS les providers qui grattent du HTML : si un
+    //   fournisseur se met Ã  ne plus rien trouver aprÃ¨s ce changement, c'est le premier suspect.
+    implementation 'org.jsoup:jsoup:1.23.2'
 
-    implementation 'androidx.fragment:fragment-ktx:1.8.6'
-    implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.8.7'
-    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7' // lifecycleScope (Ã©crans Android Auto)
+    implementation 'androidx.fragment:fragment-ktx:1.9.0'
+    // 2026-09-19 : on dÃ©clarait 2.8.7 mais une dÃ©pendance transitive tirait dÃ©jÃ  la 2.9.0 sur
+    //   livedata â€” trois numÃ©ros pour deux versions rÃ©elles. AlignÃ©s sur 2.9.0.
+    implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.11.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.11.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.11.0' // lifecycleScope (Ã©crans Android Auto)
     // Android Auto â€” Car App Library (projection vidÃ©o sur l'Ã©cran voiture + templates)
-    implementation 'androidx.car.app:app:1.4.0'
-    implementation 'androidx.car.app:app-projected:1.4.0'
+    implementation 'androidx.car.app:app:1.7.0'
+    implementation 'androidx.car.app:app-projected:1.7.0'
     implementation 'androidx.preference:preference-ktx:1.2.1'
     implementation 'androidx.leanback:leanback-preference:1.2.0'
 
     implementation 'androidx.tvprovider:tvprovider:1.1.0'
 
-    implementation "androidx.room:room-runtime:2.7.0-rc01"
-    implementation "androidx.room:room-ktx:2.7.0-rc01"
-    implementation 'com.google.android.material:material:1.12.0'
+    implementation "androidx.room:room-runtime:2.8.5"
+    implementation "androidx.room:room-ktx:2.8.5"
+    implementation 'com.google.android.material:material:1.14.0'
 
     // 2026-05-31 : Google Cast SDK pour envoyer le flux vidÃ©o Ã  la Chromecast
-    implementation 'com.google.android.gms:play-services-cast-framework:22.0.0'
-    implementation 'androidx.mediarouter:mediarouter:1.7.0'
+    implementation 'com.google.android.gms:play-services-cast-framework:22.3.1'
+    implementation 'androidx.mediarouter:mediarouter:1.8.1'
     // 2026-06-09 : MediaStyle pour la notif RadioPlaybackService
-    implementation 'androidx.media:media:1.7.0'
-    ksp 'androidx.room:room-compiler:2.7.0-rc01'
+    implementation 'androidx.media:media:1.8.0'
+    ksp 'androidx.room:room-compiler:2.8.5'
 
-    implementation("org.mozilla:rhino:1.8.0")
+    // 2026-09-19 : rhino 1.8.0 -> 1.8.1.
+    //   PLAFOND : 1.9.0 et 1.9.1 sont INUTILISABLES ici. Leur SlotMapOwner$ThreadedAccess
+    //   utilise MethodHandle.invoke, que D8 refuse en dessous de --min-api 26 :
+    //   "MethodHandle.invoke and MethodHandle.invokeExact are only supported starting with
+    //   Android O". On est en minSdk 23 (Android 6) -> mergeExtDexDebug echoue net.
+    //   Passer rhino en 1.9.x imposerait donc minSdk 26 a toute l'app. Ne pas retenter
+    //   sans avoir d'abord decide de larguer Android 6 et 7.
+    //   Rayon d'action de ce bump : le seul consommateur est AADecoder.decodeWithRhino/eval,
+    //   appele par MStreamDayExtractor (desobfuscation AAEncode). Si MStreamDay se met a ne
+    //   plus rendre de lien, c'est ici.
+    implementation("org.mozilla:rhino:1.8.1")
     // 2026-07-24 : NewPipeExtractor â€” recherche + extraction AUDIO YouTube (2e source musique,
     //   complÃ©ment de FileSearch). Extrait en natif JVM, sans instance tierce (contrairement Ã  Piped).
-    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.26.4') {
-        // NewPipe tire protobuf-javalite 4.x â†’ Â« Duplicate class com.google.protobuf Â» avec le
-        //   protobuf repackagÃ© de Firebase (protolite-well-known-types). On exclut celui de NewPipe ;
-        //   les classes com.google.protobuf viennent de Firebase.
-        exclude group: 'com.google.protobuf', module: 'protobuf-javalite'
-    }
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
+    // 2026-09-19 : l'exclusion de protobuf-javalite a Ã©tÃ© RETIRÃ‰E en mÃªme temps que Firebase.
+    //   Historique : NewPipe tire protobuf-javalite, ce qui donnait Â« Duplicate class
+    //   com.google.protobuf Â» avec le protobuf repackagÃ© de Firebase ; on excluait donc celui de
+    //   NewPipe et les classes venaient de Firebase. Firebase parti, plus de doublon possible :
+    //   NewPipe doit reprendre son propre protobuf, sinon la recherche musicale YouTube lÃ¨ve une
+    //   NoClassDefFoundError Ã  la premiÃ¨re requÃªte. NE PAS remettre cette exclusion.
+    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.26.5')
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     // 2026-05-07 : conscrypt 2.5.3 â€” libs natives 16 KB-aligned (fix popup
     // "Android App Compatibility" sur Android 16+ avec page size 16 KB).
-    implementation 'org.conscrypt:conscrypt-android:2.5.3'
-    implementation "androidx.browser:browser:1.7.0"
+    implementation 'org.conscrypt:conscrypt-android:2.7.0'
+    implementation "androidx.browser:browser:1.10.0"
     implementation "org.nanohttpd:nanohttpd:2.3.1"
-    implementation "com.google.zxing:core:3.5.1"
+    implementation "com.google.zxing:core:3.5.4"
 
-    // Firebase â€” systÃ¨me de notes/ratings communautaire
-    implementation platform('com.google.firebase:firebase-bom:34.13.0')
-    implementation 'com.google.firebase:firebase-firestore'
-    implementation("org.java-websocket:Java-WebSocket:1.5.3")
+    // 2026-09-19 : Firebase RETIRÃ‰ des dÃ©pendances. Le code l'avait quittÃ© le 2026-06-02
+    //   (plus un seul import, plus de google-services.json, plus de plugin gms) mais ces deux
+    //   lignes Ã©taient restÃ©es : ~2,6 Mo de code compilÃ© et 33 000 mÃ©thodes embarquÃ©s pour
+    //   rien (firebase + firestore + grpc + rpc + type, mesurÃ©s Ã  l'apkanalyzer).
+    //   âš  Contrepartie OBLIGATOIRE ci-dessus : l'exclusion de protobuf-javalite sur
+    //   NewPipeExtractor a Ã©tÃ© retirÃ©e en mÃªme temps, sinon plus personne ne fournit
+    //   com.google.protobuf et la recherche musicale YouTube casse Ã  l'exÃ©cution.
+    implementation("org.java-websocket:Java-WebSocket:1.6.0")
 
 
 }

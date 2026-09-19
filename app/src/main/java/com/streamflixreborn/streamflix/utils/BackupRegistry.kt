@@ -84,7 +84,6 @@ object BackupRegistry {
         "Movix" to "Movix",
         "Frembed" to "Frembed",
         "Vidzy" to "Vidzy (par TMDB)",
-        "Bowd" to "Bowd (films et séries, par TMDB)",
         "Nakios" to "Nakios",
         "LoiFlix" to "LoiFlix",
         "Nabistream" to "Nabistream (dramas)",
@@ -92,6 +91,9 @@ object BackupRegistry {
         "Rutube" to "Rutube (films/séries FR)",
         "TV Hub" to "TV Hub (France.tv/Arte gratuit)",
         "FileSearch" to "FileSearch (fichiers directs)",
+        // 2026-09-19 : films VF du catalogue OTF TV (fichiers .mkv directs, aucune requête
+        //   supplémentaire — le catalogue arrive avec les chaînes OTF du TV Hub).
+        "OTF TV" to "OTF TV (films VF)",
         "Webflix" to "Webflix",
         "Yablom" to "Yablom (films FR)",
         "Vostfree" to "Vostfree (animes VF/VOSTFR)",
@@ -1562,18 +1564,13 @@ object BackupRegistry {
             //   2026-07-31 (user) : indexé PAR TMDB → aucun matching de titre, donc AUCUN
             //   mauvais film/série possible (contrairement aux providers qui cherchent par nom).
             //   /serie/{tmdb}/{s}/{e} et /movie/{tmdb} → iframe vidzy.cc lue par l'extracteur Vidzy.
-            // 2026-09-10 : Bowd. Leur index /vod/playable est une liste d'id TMDB
-            //   (29 436 films, 397 séries) → appariement EXACT, aucun matching par titre.
-            //   L'index sert de pré-filtre : pas d'appel réseau pour ce qu'ils n'ont pas.
-            //   Nécessite un compte Bowd connecté (cf. BowdAuth), sinon la source rend vide.
-            launch { emit("Bowd") {
-                com.streamflixreborn.streamflix.utils.BowdTv.serveursVod(
-                    tmdbId = resolvedTmdbId,
-                    isMovie = key.isMovie,
-                    season = key.season,
-                    episode = key.episode,
-                )
-            } }
+            // ── BOWD — RETIRÉ le 2026-09-20 ───────────────────────────────────────
+            //   (user : « pas vraiment stable »). La source rendait les films et séries
+            //   de bowdtv.com par appariement TMDB exact (index /vod/playable, 29 436
+            //   films et 397 séries) et exigeait un compte connecté, sinon elle rendait
+            //   vide. TOUT Bowd est parti le même jour : le dossier TV Hub, le compte,
+            //   le lecteur WebView et cette source. Rien n'a jamais existé côté nx-data.
+            //   Pour le remettre : `git checkout <commit d'avant> -- <les fichiers Bowd>`.
 
             launch { emit("Vidzy") {
                 com.streamflixreborn.streamflix.providers.VidzyTmdbProvider.fetchVidzyBackupServers(
@@ -1646,6 +1643,17 @@ object BackupRegistry {
                         videoType, key.season, key.episode, key.year, knownTitles.toList(),
                         oeuvreFrancaise = langueOriginale.equals("fr", ignoreCase = true),
                     )
+                }
+            }
+
+            // ── OTF TV (par titre EXACT) — films VF du catalogue OTF, fichiers .mkv directs ──
+            // 2026-09-19 : coût réseau NUL, le catalogue arrive avec les chaînes OTF du TV Hub.
+            //   Correspondance volontairement STRICTE (égalité du titre normalisé) : OTF ne donne
+            //   pas l'année, impossible donc de départager deux homonymes. Films uniquement.
+            launch {
+                emit("OTF TV") {
+                    com.streamflixreborn.streamflix.providers.OtfFilmsBackup
+                        .fetchOtfBackupServers(knownTitles.toList(), key.isMovie)
                 }
             }
 
@@ -2492,6 +2500,9 @@ object BackupRegistry {
             // 2026-08-16 : l'URL Purstream est deja le master HLS final (aucun jeton) → route directe.
             "Purstream" -> com.streamflixreborn.streamflix.providers.PurstreamProvider.getVideo(orig)
             "FileSearch" -> com.streamflixreborn.streamflix.providers.FileSearchProvider.getVideo(orig)
+            // 2026-09-19 : OTF TV — `src` EST le fichier .mkv (stable, pas de signature), on
+            //   pose juste l'en-tête attendu par le serveur.
+            "OTF TV" -> com.streamflixreborn.streamflix.providers.OtfFilmsBackup.video(orig)
             "Papadustream V2" -> PapadustreamV2Provider.getVideo(orig)
             // 2026-08-08 : ok.ru — flux résolu À LA LECTURE (URLs liées à l'IP + `expires`).
             "ok.ru" -> com.streamflixreborn.streamflix.providers.OkRuProvider.getVideo(server)

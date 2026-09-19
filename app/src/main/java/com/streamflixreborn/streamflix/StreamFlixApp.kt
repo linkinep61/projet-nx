@@ -218,19 +218,23 @@ class StreamFlixApp : Application() {
         // la bascule active/désactive OnyxMediaBrowserService.
         runCatching { com.streamflixreborn.streamflix.car.CarModeSwitcher.applyFromPreferences(this) }
 
-        // 2026-09-10 — Préchauffe du jeton Bowd, HORS du chemin critique.
-        //   Mesuré : lancée depuis BackupRegistry, la reconnexion prenait 11 à 12 s et la
-        //   source abandonnait avant d'aboutir. Ce n'est pas leur serveur qui est lent —
-        //   c'est la famine décrite dans BackupRegistry.emit : une vingtaine de sources
-        //   démarrent ensemble et se disputent CPU, sockets et DNS. Obtenu ici, au calme,
-        //   le jeton est persisté et déjà prêt quand l'utilisateur ouvre un film.
-        //   Coût : deux petites requêtes, et uniquement si un compte est enregistré.
-        //   (L'index VOD, lui, reste chargé à la demande : 594 Ko au lancement pour des
-        //   utilisateurs qui n'ouvriront peut-être aucun film, ce serait un mauvais échange.)
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            runCatching {
-                if (com.streamflixreborn.streamflix.utils.BowdAuth.hasCredentials(this@StreamFlixApp)) {
-                    com.streamflixreborn.streamflix.utils.BowdAuth.jeton(this@StreamFlixApp)
+        // 2026-09-20 — MÉNAGE APRÈS LE RETRAIT DE BOWD (user : « pas vraiment stable »).
+        //   Cette ligne remplace la préchauffe du jeton Bowd qui vivait ici. Bowd est parti
+        //   en entier — dossier TV Hub, compte, lecteur WebView et source de films — mais
+        //   les identifiants restaient écrits sur les appareils de ceux qui s'étaient
+        //   connectés. On ne garde pas le mot de passe d'un service qu'on ne sert plus :
+        //   le fichier est supprimé au premier démarrage qui suit la mise à jour.
+        //   ⚠ Volontairement ICI et pas dans un fichier Bowd* : ceux-là sont supprimés.
+        //      Le nom vérifié dans BowdAuth avant suppression : PREF_NAME = "bowd_creds",
+        //      c'est aussi celui que DeviceSyncManager.FICHIERS_COMPTES transportait.
+        //   À RETIRER quand la quasi-totalité du parc sera passée par une version ≥ celle-ci
+        //   (compter large : des box restent des mois sans mise à jour).
+        runCatching {
+            listOf("bowd_auth", "bowd_creds").forEach { nom ->
+                val p = getSharedPreferences(nom, MODE_PRIVATE)
+                if (p.all.isNotEmpty()) p.edit().clear().apply()
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    deleteSharedPreferences(nom)
                 }
             }
         }

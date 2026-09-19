@@ -248,11 +248,7 @@
             android:hardwareAccelerated="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.AppCompat.NoActionBar" />
-        <activity
-            android:name=".activities.tools.BowdWebPlayerActivity"
-            android:exported="false"
-            android:hardwareAccelerated="true"
-            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <!-- 2026-09-20 : BowdWebPlayerActivity RETIRÉE avec le reste de Bowd. -->
 
         <activity
             android:name=".activities.tools.LocalPlayerActivity"
@@ -261,24 +257,8 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/AppTheme.Mobile" />
 
-        <!-- 2026-06-04 : Activity OTF dédiée — utilise ExoPlayer 2.19.1 strict
-             pattern OTF TV V3.2 (le reste de l'app reste sur Media3 1.8.0). -->
-        <activity
-            android:name=".activities.player.OtfPlayerActivity"
-            android:exported="false"
-            android:hardwareAccelerated="true"
-            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
-            android:screenOrientation="sensorLandscape"
-            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
-        <!-- 2026-07-05 : OtfPlayerTvActivity (variante TV) manquait dans ce manifest "default"
-             → crash ActivityNotFoundException à l'ouverture d'OTF sur la Chromecast (APP_LAYOUT=default).
-             Copiée depuis tv/AndroidManifest.xml. -->
-        <activity
-            android:name=".activities.player.OtfPlayerTvActivity"
-            android:exported="false"
-            android:hardwareAccelerated="true"
-            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
-            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+        <!-- 2026-09-19 : OtfPlayerActivity / OtfPlayerTvActivity supprimées — OTF passe
+             maintenant par le lecteur Media3 normal (voir OtfTvService.kt). -->
 
         <activity
             android:name=".activities.main.MainTvActivity"

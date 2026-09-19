@@ -49,6 +49,42 @@ object OtfTvService {
     /** CDN vérifié VIVANT (celui que l'app officielle utilise réellement) → priorité maximale. */
     private val PREFERRED_CDN_HOSTS = listOf("blcco.linkip.org", "blc2cr.linkip.org")
 
+    /**
+     * 2026-09-19 (user « je clique sur France 2 sur l'app officielle ça marche, il n'est pas chez
+     * nous ») — TABLE D'IDS **VÉRIFIÉS À L'IMAGE**, la seule exception autorisée à la règle
+     * « on ne fabrique jamais une URL OTF » (cf. le bloc ⛔ plus bas).
+     *
+     * CONSTAT : le catalogue V4 contient bien « FRANCE 2 », mais UNIQUEMENT sur `fr.dencreak.com`,
+     * domaine NXDOMAIN dans le monde entier (vérifié box + 1.1.1.1 + 8.8.8.8 + DoH Cloudflare et
+     * Google). Sur les 281 chaînes du groupe France, 224 URLs sur 281 sont sur ce domaine mort :
+     * 197 chaînes uniques sur 254 sont affichées mais injouables. Les ids linkip se suivent —
+     * 877 TF1, 876 M6, **875 absent du catalogue**, 874 France3, 873 France4, 872 France5 — l'API
+     * saute simplement l'id 875.
+     *
+     * VÉRIFICATION (même méthode que pour les ids 1704 / 792-795 / 843-847) : `blcco/live/875_.m3u8`
+     * répond 200, image extraite le 2026-09-19 à 18h40 = France-Australie de rugby féminin (WXV)
+     * avec le bandeau france•tv, match diffusé EN DIRECT sur France 2 à cette heure-là. Témoin de
+     * contrôle : 874 = jeu France 3 + bande-annonce « Cassandre », conforme au catalogue.
+     *
+     * ⚠ N'AJOUTER une ligne ici QU'APRÈS avoir extrait une image du flux et identifié la chaîne.
+     * Jamais par déduction sur le numéro. Clé = `normalizedKey` (cf. [normalize]).
+     */
+    private val IDS_BLCCO_VERIFIES: Map<String, String> = mapOf(
+        "france2" to "875",
+    )
+
+    /** Injecte l'URL blcco vérifiée pour les chaînes dont le catalogue ne donne que des CDN morts. */
+    private fun injecterIdsVerifies(channels: List<OtfChannel>): List<OtfChannel> =
+        channels.map { ch ->
+            val id = IDS_BLCCO_VERIFIES[ch.normalizedKey] ?: return@map ch
+            val url = "https://blcco.linkip.org/live/${id}_.m3u8"
+            if (ch.urls.any { it.equals(url, true) }) ch
+            else {
+                Log.d(TAG, "id vérifié injecté : ${ch.name} → $url")
+                ch.copy(urls = listOf(url) + ch.urls)
+            }
+        }
+
     /** 2026-07-20 (user : « quand je change de chaîne ça change pas… obligé de faire retour ») —
      *  le catalogue contient PLUSIEURS entrées portant EXACTEMENT le même nom (ex. « TF1 » présent
      *  en double/triple sur des CDN différents). Le tri TNT les plaçant côte à côte, « chaîne
@@ -125,6 +161,25 @@ object OtfTvService {
         else -> 1
     }
 
+    /*
+     * HISTORIQUE — lecteur OTF dédié (supprimé le 2026-09-19).
+     *
+     * Du 2026-06-04 au 2026-09-19, les ids `livehub::otf::*` étaient renvoyés vers
+     * OtfPlayerActivity / OtfPlayerTvActivity, deux Activities bâties sur ExoPlayer 2.19.1
+     * embarqué EN PLUS de Media3 : l'AudioSink strict de Media3 1.8 refusait les
+     * discontinuités de timestamp des flux OTF du CDN `dencreak` (France 5 en tête) et
+     * partait en boucle MediaCodec → OOM. Un premier retrait le 2026-06-20 avait échoué
+     * sur télé et avait été annulé.
+     *
+     * Ce qui a changé : `dencreak` est mort (NXDOMAIN mondial) et les flux viennent
+     * désormais de `blcco.linkip.org`, que Media3 avale sans broncher — mesuré le
+     * 2026-09-19 sur l'Oppo (France 2 et France 5 : READY en ~1,3 s, 60 s de lecture,
+     * mémoire plate, zéro PlaybackException), puis validé par le user sur la Chromecast.
+     * OTF passe donc par le lecteur normal, et bénéficie du mini-player comme le reste
+     * du Hub. Les deux Activities et les trois dépendances `com.google.android.exoplayer`
+     * ont été supprimées dans la foulée ; pour les retrouver : `git log -- '*OtfPlayer*'`.
+     */
+
     data class OtfChannel(
         val name: String,
         val normalizedKey: String,
@@ -133,6 +188,56 @@ object OtfTvService {
         val logo: String? = null, // URL du logo si dispo dans l'API
         val group: String = "", // Nom du groupe/catégorie (langue/pays)
     )
+
+    /**
+     * 2026-09-19 (user « OTF TV possède des films en français et on ne les a jamais récupérés ») :
+     * la MÊME réponse `authV4.php` qui donne les chaînes contient aussi un catalogue VOD —
+     * clé racine `Movies`, 9 groupes de langue, et `MoviesLink` qui donne la base des fichiers.
+     * On le récupère donc GRATUITEMENT, sans une requête de plus.
+     *
+     * Mesuré le 2026-09-19 : French 700 films, English 700, Kids 306, German 310, Hindi 388,
+     * Spanish 224, Arabic 195, Swedish 34, Persian 29. **Aucune URL n'est partagée entre deux
+     * groupes** (277 titres existent en French ET en English avec des ids DIFFÉRENTS) → le groupe
+     * est bien la VERSION du film, pas une étiquette. « French » = VF.
+     *
+     * Les fichiers sont des `.mkv` H.264 720p + AAC stéréo servis en HTTP avec Range (206) :
+     * le lecteur Media3 de l'app les lit tels quels, sans extracteur, sans FFmpeg, avec le seek.
+     */
+    data class OtfMovie(
+        val nom: String,
+        val poster: String?,
+        val fichier: String,   // ex. « 96360.mkv »
+        val groupe: String,    // French / English / Kids…
+        val url: String,       // MoviesLink + fichier
+    ) {
+        /** Le groupe « Kids » suffixe la langue dans le titre (« Moana 2 FR ») : on l'enlève. */
+        val titreAffiche: String
+            get() = nom.trim().removeSuffix(" FR").removeSuffix(" fr").trim()
+    }
+
+    @Volatile private var cachedMovies: List<OtfMovie> = emptyList()
+
+    /**
+     * Films en VF : tout le groupe « French », plus les entrées « … FR » de « Kids » — ce dernier
+     * mélange les langues et les marque dans le titre (139 FR, 78 EN, 59 DE, 24 AR, 5 ES au
+     * 2026-09-19). Total ≈ 839 films. Les autres groupes ne sont PAS en français : ne pas les
+     * verser ici sous peine de proposer un film allemand ou arabe sous une affiche française.
+     */
+    val filmsFrancais: List<OtfMovie>
+        get() = cachedMovies.filter { m ->
+            m.groupe.equals("French", true) ||
+                (m.groupe.equals("Kids", true) && m.nom.trim().endsWith(" FR", true))
+        }
+
+    /** Force le chargement du catalogue si besoin, puis rend les films VF. */
+    suspend fun fetchFilmsFrancais(): List<OtfMovie> {
+        if (cachedMovies.isEmpty()) fetchChannels()
+        return filmsFrancais
+    }
+
+    /** Retrouve un film par son nom de fichier (= id stable côté provider). */
+    suspend fun filmParFichier(fichier: String): OtfMovie? =
+        fetchFilmsFrancais().firstOrNull { it.fichier == fichier }
 
     // Cache en mémoire — valide 30 min
     private var cachedChannels: List<OtfChannel>? = null
@@ -262,7 +367,7 @@ object OtfTvService {
                 )
             }
         }
-        val result = merged.values.toList()
+        val result = injecterIdsVerifies(merged.values.toList())
         Log.d(TAG, "OTF TV: ${result.size} chaînes après fusion V3+V4")
         try {
             val hosts = result.flatMap { it.urls }.mapNotNull {
@@ -396,6 +501,8 @@ object OtfTvService {
             .replace(Regex(",\\s*\\]"), "]")
             .replace(Regex(",\\s*\\}"), "}")
         val json = JSONObject(fixed)
+        // 2026-09-19 : le catalogue VOD voyage dans la MÊME réponse → on le capte au passage.
+        parserFilms(json)
         val streams = json.optJSONArray("Streams") ?: return emptyList()
 
         val result = mutableListOf<OtfChannel>()
@@ -448,6 +555,46 @@ object OtfTvService {
             Log.d(TAG, "OTF TV: hôtes CDN = " + hosts.take(12).joinToString(", ") { "${it.key}(${it.value})" })
         } catch (_: Throwable) {}
         return result
+    }
+
+    /**
+     * 2026-09-19 : lit la section VOD de la réponse OTF (`MoviesLink` + `Movies`).
+     * Ne lève jamais : un catalogue films absent ou malformé ne doit PAS empêcher les chaînes
+     * de se charger — c'est le même appel réseau qui sert les deux.
+     */
+    private fun parserFilms(json: JSONObject) {
+        try {
+            val base = json.optString("MoviesLink", "").trim()
+            val groupes = json.optJSONArray("Movies")
+            if (base.isBlank() || groupes == null) return
+            val out = mutableListOf<OtfMovie>()
+            for (g in 0 until groupes.length()) {
+                val grp = groupes.optJSONObject(g) ?: continue
+                val nomGroupe = grp.optString("name", "").trim()
+                val films = grp.optJSONArray("movies") ?: continue
+                for (i in 0 until films.length()) {
+                    val f = films.optJSONObject(i) ?: continue
+                    val nom = f.optString("name", "").trim()
+                    val fichier = f.optString("url", "").trim()
+                    if (nom.isBlank() || fichier.isBlank()) continue
+                    out.add(
+                        OtfMovie(
+                            nom = nom,
+                            poster = f.optString("poster", "").trim().ifBlank { null },
+                            fichier = fichier,
+                            groupe = nomGroupe,
+                            url = base + fichier,
+                        )
+                    )
+                }
+            }
+            if (out.isNotEmpty()) {
+                cachedMovies = out
+                Log.d(TAG, "OTF VOD : ${out.size} films au total, ${filmsFrancais.size} en VF")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "OTF VOD : parsing KO (${t.javaClass.simpleName}) — sans effet sur les chaînes")
+        }
     }
 
     private fun otfEncrypt(plaintext: String): String {

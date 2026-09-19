@@ -136,17 +136,17 @@ object WallhavenService {
 
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    return@withContext Result.failure(
-                        Exception("HTTP ${resp.code}: ${resp.message}")
-                    )
+                    // 2026-09-20 : l'API Wallhaven rend 503 depuis plusieurs jours.
+                    //   Plutot qu'une grille vide, on sert le depot GitHub de secours.
+                    Log.w(TAG, "HTTP ${resp.code} -> repli GitHub")
+                    return@withContext GithubWallsService.search(query, page)
                 }
-                val body = resp.body?.string() ?: return@withContext Result.failure(
-                    Exception("Empty body")
-                )
+                val body = resp.body?.string()
+                    ?: return@withContext GithubWallsService.search(query, page)
                 val json = JSONObject(body)
-                val data = json.optJSONArray("data") ?: return@withContext Result.failure(
-                    Exception("No 'data' field in response")
-                )
+                // Une 200 sans champ « data » = l'API repond mais ne sert plus rien.
+                val data = json.optJSONArray("data")
+                    ?: return@withContext GithubWallsService.search(query, page)
                 val list = mutableListOf<Wallpaper>()
                 for (i in 0 until data.length()) {
                     val w = data.getJSONObject(i)
@@ -185,8 +185,10 @@ object WallhavenService {
                 )
             }
         } catch (e: Throwable) {
-            Log.w(TAG, "search failed: ${e.message}")
-            Result.failure(e)
+            // Panne reseau, DNS, TLS, corps illisible : meme traitement que le 503,
+            //   on passe au depot GitHub plutot que de rendre une erreur a l'ecran.
+            Log.w(TAG, "search failed (${e.message}) -> repli GitHub")
+            GithubWallsService.search(query, page)
         }
     }
 

@@ -375,15 +375,8 @@ class HomeTvFragment : Fragment() {
         // Re-set interceptor if cleared
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
-                // 2026-06-04 (user "le mini Player est toujours activé quand
-                //   on clique sur otf TV") : OTF bypass mini player → fullscreen
-                //   direct = OtfPlayerTvActivity. (Rollback du test 2026-06-20.)
-                if (tvShow.id.startsWith("livehub::otf::")) {
-                    Log.d("HomeTv", "OTF: bypass mini player (onResume) → fullscreen direct (${tvShow.title})")
-                    MiniPlayerController.stopAsync()
-                    try { binding.miniPlayerContainer.visibility = View.GONE; syncOverlayVisibility() } catch (_: Exception) {}
-                    false
-                } else if (tvShow.id == MiniPlayerController.currentChannelId) {
+                // 2026-09-19 : court-circuit OTF supprimé avec les activités dédiées.
+                if (tvShow.id == MiniPlayerController.currentChannelId) {
                     // 2026-06-08 : radio re-cliquée = no-op (mini-bar reste,
                     //   pas de fullscreen — pas la peine pour le son seul).
                     if (MiniPlayerController.isRadioChannel(tvShow.id)) {
@@ -503,13 +496,8 @@ class HomeTvFragment : Fragment() {
         binding.miniPlayerView.setOnClickListener { navigateToFullPlayer() }
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
-            // 2026-06-04 : OTF bypass mini → fullscreen direct (OtfPlayerTvActivity).
-            if (tvShow.id.startsWith("livehub::otf::")) {
-                Log.d("HomeTv", "OTF: bypass mini player → fullscreen direct (${tvShow.title})")
-                MiniPlayerController.stopAsync()
-                try { binding.miniPlayerContainer.visibility = View.GONE; syncOverlayVisibility() } catch (_: Exception) {}
-                false
-            } else if (tvShow.id == MiniPlayerController.currentChannelId) {
+            // 2026-09-19 : court-circuit OTF supprimé avec les activités dédiées.
+            if (tvShow.id == MiniPlayerController.currentChannelId) {
                 // 2026-06-08 : radio re-cliquée = no-op (pas de fullscreen).
                 if (MiniPlayerController.isRadioChannel(tvShow.id)) {
                     Log.d("HomeTv", "Radio same channel — no-op: ${tvShow.title}")

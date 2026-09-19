@@ -105,6 +105,11 @@ interface Provider {
             UnJourUnFilmProvider to ProviderSupport(movies = true, tvShows = true),
             FrembedProvider to ProviderSupport(movies = true, tvShows = true),
             aploufProvider to ProviderSupport(movies = true, tvShows = false),
+            // 2026-09-19 : OTF Films N'EST PAS un provider navigable, et ne doit pas le
+            //   redevenir (user : « il devait juste servir de source de serveur, il devait pas
+            //   avoir son propre truc »). Le catalogue VOD d'OTF est exposé de deux façons :
+            //   1. source de secours dans BackupRegistry — emit("OTF TV"), cf. OtfFilmsBackup ;
+            //   2. sous-dossier « OTF Films (VF) » tout en bas d'Autres Replays, dans le TV Hub.
             // « ensuite les autres » (Films/Séries) :
             // 2026-07-10 (user "Papadustream V1 : supprime-la complètement, provider + backup,
             //   mais surtout PAS PapadustreamV2") : Papadustream V1 (site à reCAPTCHA) RETIRÉ.

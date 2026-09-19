@@ -501,7 +501,7 @@ object LiveHubFolderDialog {
                         // Fallback : affiche le cache sans bouton langue
                         displayCategories(ctx, folderName, cached, onChannelSelected)
                     } else {
-                        displayOtfChannelsWithLanguageButton(
+                        afficherGrilleOtf(
                             ctx, folderName, currentGroup, cached,
                             allChannels, groupNames, onChannelSelected
                         )
@@ -615,8 +615,14 @@ object LiveHubFolderDialog {
                             sonyCats = filterFastByFolder(allFast, "sony_one")
                         } catch (_: Throwable) {}
                     }
+                    // 2026-09-19 (user « au pire tu mets ça dans le TV Hub, tout en bas dans
+                    //   Autres Replays ») : les films VF du catalogue OTF, en DERNIER sous-dossier.
+                    val otfFilmCats = if (folderKey == "autres_replay") {
+                        try { LiveTvHubProvider.fetchOtfFilmsCategoriesPublic() }
+                        catch (_: Throwable) { emptyList() }
+                    } else emptyList()
                     val hasExtras = mixCats.isNotEmpty() || wwCats.isNotEmpty() ||
-                        rakCats.isNotEmpty() || sonyCats.isNotEmpty()
+                        rakCats.isNotEmpty() || sonyCats.isNotEmpty() || otfFilmCats.isNotEmpty()
                     // 2026-06-30 : cacher les extras pour que le 2ème clic sur
                     //   "Autres Replays" retrouve la vue complète (avec Mix FR,
                     //   WorldWide, Rakuten, Sony) au lieu des replays bruts.
@@ -627,6 +633,7 @@ object LiveHubFolderDialog {
                         if (wwCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_ww"] = wwCats
                         if (rakCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_rak"] = rakCats
                         if (sonyCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_sony"] = sonyCats
+                        if (otfFilmCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_otffilms"] = otfFilmCats
                     }
                     withContext(Dispatchers.Main) {
                         finAttente()
@@ -639,7 +646,7 @@ object LiveHubFolderDialog {
                             ).show()
                         } else if (hasExtras) {
                             displayCategoriesWithMixFr(ctx2, folderName, filtered, mixCats,
-                                onChannelSelected, wwCats, rakCats, sonyCats)
+                                onChannelSelected, wwCats, rakCats, sonyCats, otfFilmCats)
                         } else {
                             displayCategories(ctx2, folderName, filtered, onChannelSelected)
                         }
@@ -834,41 +841,9 @@ object LiveHubFolderDialog {
             return
         }
 
-        // 2026-09-10 (user : « il faut faire ça directement par le navigateur ») : dossier Bowd.
-        //   Catalogue via jeton anonyme (689 chaînes FR, aucun compte) ; la LECTURE se fait
-        //   dans leur page player en WebView, cf. BowdTv et BowdWebPlayerActivity.
-        if (folderKey == com.streamflixreborn.streamflix.utils.BowdTv.FOLDER_KEY) {
-            val bd = com.streamflixreborn.streamflix.utils.BowdTv
-            // Le catalogue est lisible en anonyme, mais la LECTURE exige un compte : on
-            //   propose la connexion dès l'ouverture pour éviter que l'utilisateur ne
-            //   découvre le blocage seulement au moment de lancer une chaîne.
-            if (!com.streamflixreborn.streamflix.utils.BowdAuth.estConnecte(ctx)) {
-                com.streamflixreborn.streamflix.activities.BowdLoginDialog.show(ctx)
-            }
-            val deja = bd.categories(bd.chainesSiDejaChargees())
-            if (deja.isNotEmpty()) {
-                displayCategories(ctx, folderName, deja, onChannelSelected)
-                return
-            }
-            android.widget.Toast.makeText(ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
-                val cats = try {
-                    bd.categories(bd.chaines())
-                } catch (t: Throwable) {
-                    android.util.Log.w("LiveHubFolderDialog", "Bowd KO : ${t.message}")
-                    emptyList()
-                }
-                withContext(Dispatchers.Main) {
-                    if (cats.isEmpty()) {
-                        android.widget.Toast.makeText(ctx, "$folderName indisponible — réessaie", android.widget.Toast.LENGTH_LONG).show()
-                    } else {
-                        displayCategories(ctx, folderName, cats, onChannelSelected)
-                    }
-                }
-            }
-            return
-        }
+        // 2026-09-20 : branche du dossier Bowd RETIRÉE (user : « pas vraiment stable »).
+        //   Elle listait 689 chaînes FR via un jeton anonyme et proposait la connexion dès
+        //   l'ouverture, la lecture exigeant un compte chez eux.
         // 2026-07-10 (user "supprime la version de base") : ancienne branche Stream4Free `stream4`
         //   (résolveur OkHttp + git) RETIRÉE. Stream4Free = maintenant la clé `stream4cf` (version CF).
         // 2026-07-10 (user "supprime LumiChat partout") : branche lazy-fetch LumiChat RETIRÉE.
@@ -1050,7 +1025,7 @@ object LiveHubFolderDialog {
             LiveTvHubProvider.folderContents["otf"] = sections
         }
         withContext(Dispatchers.Main) {
-            displayOtfChannelsWithLanguageButton(
+            afficherGrilleOtf(
                 ctx, folderName, currentGroup, sections,
                 allChannels, groupNames, onChannelSelected
             )
@@ -1185,6 +1160,47 @@ object LiveHubFolderDialog {
         }
     }
 
+    /**
+     * 2026-09-19 (user « est-ce qu'on peut afficher OTF TV comme les autres providers, avec les
+     * jaquettes, en petit carré ») : OTF passe par la GRILLE standard du Hub — mêmes vignettes,
+     * même barre de recherche avec son 🕘, plus le bouton 🌍 langue posé tout en haut.
+     *
+     * Le CLIC est rigoureusement inchangé : il part dans `onChannelSelected`. Depuis le
+     * 2026-09-19 il aboutit au lecteur Media3 normal (les Activities OTF dédiées et leur
+     * ExoPlayer 2.19.1 ont été supprimées — voir OtfTvService.kt). La grille n'est qu'un
+     * sélecteur.
+     *
+     * `publierGrille = false` est CONSERVÉ tel quel : publier la grille OTF comme « grille
+     * active » ferait zapper le lecteur PRINCIPAL dans la liste OTF. L'ordre OTF reste donné
+     * par `OtfTvService.sortChannelsFrenchTntOrder`.
+     *
+     * Tous les logos sont fournis par l'API OTF (champ `thumbnail`, 100 % des chaînes du groupe
+     * France) → la grille est pleine, pas trouée.
+     */
+    private fun afficherGrilleOtf(
+        ctx: Context,
+        folderName: String,
+        currentGroup: String,
+        sections: List<Category>,
+        allChannels: List<com.streamflixreborn.streamflix.utils.OtfTvService.OtfChannel>,
+        groupNames: List<String>,
+        onChannelSelected: (TvShow) -> Unit,
+    ) {
+        val channels = sections.flatMap {
+            (it.list as? List<*>)?.filterIsInstance<TvShow>().orEmpty()
+        }
+        showPosterGrid(
+            ctx = ctx,
+            category = Category(name = "OTF TV — $currentGroup (${channels.size})", list = channels),
+            channels = channels,
+            onChannelSelected = onChannelSelected,
+            boutonSupp = "🌍 $currentGroup" to {
+                showOtfLanguagePicker(ctx, folderName, allChannels, groupNames, onChannelSelected)
+            },
+            publierGrille = false,
+        )
+    }
+
     /** Picker de langue OTF : l'user choisit un groupe, on réaffiche les
      *  chaînes de ce groupe. */
     private fun showOtfLanguagePicker(
@@ -1214,7 +1230,7 @@ object LiveHubFolderDialog {
                     LiveTvHubProvider.folderContents["otf"] = sections
                 }
                 // Réaffiche les chaînes du nouveau groupe avec le bouton 🌍
-                displayOtfChannelsWithLanguageButton(
+                afficherGrilleOtf(
                     ctx, folderName, chosen, sections,
                     allChannels, groupNames, onChannelSelected
                 )
@@ -1514,6 +1530,8 @@ object LiveHubFolderDialog {
         // 2026-09-16 : paramètre `sportCategories` SUPPRIMÉ (onglet Sport retiré).
         rakutenCategories: List<Category> = emptyList(),
         sonyCategories: List<Category> = emptyList(),
+        // 2026-09-19 : films VF du catalogue OTF — sous-dossier placé EN DERNIER (demande user).
+        otfFilmCategories: List<Category> = emptyList(),
     ) {
         val dp = ctx.resources.displayMetrics.density
         val isTV = ctx.resources.configuration.uiMode and
@@ -1571,6 +1589,24 @@ object LiveHubFolderDialog {
             val dejaLa = com.streamflixreborn.streamflix.utils.VidaraCommunaute.categoriesSiDejaCharge()
             if (dejaLa.isNotEmpty()) {
                 displayCategories(ctx, "Partage de la communaute", dejaLa, onChannelSelected)
+                // 2026-09-20 (user : « les jaquettes s'affichent sur le telephone mais pas
+                //   sur la tele ») : cette branche affichait le cache et s'arretait la. Or
+                //   `completerFichesPour` n'etait appele QUE dans le `else` ci-dessous, donc
+                //   une premiere ouverture interrompue laissait les affiches manquantes
+                //   introuvables A JAMAIS — la liste, elle, etait desormais en cache. La
+                //   Chromecast en etait restee a une seule fiche (Protector).
+                //   On relance donc le rattrapage en arriere-plan, sans toucher a l'affichage
+                //   en cours (cf. le commentaire de completerFichesManquantes : rafraichir
+                //   ferait sauter le focus de la telecommande). Les affiches apparaissent a
+                //   l'ouverture suivante, et definitivement.
+                CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                    runCatching {
+                        com.streamflixreborn.streamflix.utils.VidaraCommunaute
+                            .completerFichesManquantes()
+                    }.onFailure {
+                        android.util.Log.w("LiveHubFolderDialog", "rattrapage affiches KO : ${it.message}")
+                    }
+                }
             } else {
                 android.widget.Toast.makeText(
                     ctx, "Chargement du partage de la communaute\u2026",
@@ -1610,6 +1646,12 @@ object LiveHubFolderDialog {
             show(ctx, "ma_bibliotheque", "Film / série", onChannelSelected)
         })
         com.streamflixreborn.streamflix.utils.VegetaVod.prechauffer()
+
+        // 2026-09-19 (user « au pire tu mets ça dans le TV Hub, tout en bas dans Autres
+        //   Replays ») : films VF d'OTF, ajoutés EN DERNIER pour être vraiment en bas de la
+        //   liste des sous-dossiers.
+        if (otfFilmCategories.isNotEmpty()) folders.add("🎬 OTF Films (VF)" to {
+            displayCategories(ctx, "OTF Films (VF)", otfFilmCategories, onChannelSelected) })
 
         // 2026-06-27 (user "mets une recherche à l'ouverture du dossier") :
         //   agrège TOUTES les chaînes des sous-dossiers pour une recherche globale.
@@ -2739,6 +2781,15 @@ object LiveHubFolderDialog {
         //   atteignables à la télécommande comme au doigt.
         searchHistory: (() -> List<String>)? = null,
         favoritesProvider: (() -> List<TvShow>)? = null,
+        // 2026-09-19 (user « afficher OTF comme les autres providers, en petit carré avec les
+        //   jaquettes ») : bouton libre posé au-dessus de la barre de recherche (libellé + action).
+        //   Sert au 🌍 de changement de langue d'OTF. Les autres dossiers ne le passent pas → ils
+        //   sont strictement inchangés.
+        boutonSupp: Pair<String, () -> Unit>? = null,
+        // 2026-09-19 : la grille OTF n'est pas publiée comme « grille active ». L'ordre OTF
+        //   vient de OtfTvService.sortChannelsFrenchTntOrder ; publier cette grille ferait
+        //   zapper le lecteur PRINCIPAL dans la liste OTF après coup → false pour OTF.
+        publierGrille: Boolean = true,
     ) {
         // 2026-07-05 (user "chaînes du même dossier affiche des IPTV au lieu du
         //   dossier") : persiste les chaînes de la grille dans folderContents
@@ -2746,7 +2797,7 @@ object LiveHubFolderDialog {
         //   du dossier courant. La clé "__grid_active" est écrasée à chaque
         //   ouverture de grille = toujours les chaînes de la dernière grille vue.
         //   N'est PAS touchée par groupSectionsIntoFolders (clé interne __).
-        publierGrilleActive(category.name, channels)
+        if (publierGrille) publierGrilleActive(category.name, channels)
         val MPC = com.streamflixreborn.streamflix.utils.MiniPlayerController
         val dp = ctx.resources.displayMetrics.density
         val isTV = ctx.resources.configuration.uiMode and
@@ -3144,7 +3195,7 @@ object LiveHubFolderDialog {
             // 2026-08-14 : la grille de référence doit suivre CE qui est affiché. Sans ça
             //   elle restait figée sur la liste d'ouverture (souvent vide) et un clip lancé
             //   autrement que par un clic n'avait aucune file → aucun enchaînement.
-            publierGrilleActive(category.name, items)
+            if (publierGrille) publierGrilleActive(category.name, items)
         }
 
         val barreOutils = if (networkSearch != null) android.widget.LinearLayout(ctx).apply {
@@ -3319,6 +3370,21 @@ object LiveHubFolderDialog {
                     android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                     android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 ))
+            }
+            // 2026-09-19 : bouton libre (🌍 langue d'OTF), tout en haut pour être atteignable
+            //   à la télécommande sans traverser toute la grille (user, 2026-06-20).
+            boutonSupp?.let { (libelle, action) ->
+                addView(
+                    android.widget.LinearLayout(ctx).apply {
+                        orientation = android.widget.LinearLayout.HORIZONTAL
+                        setPadding((6 * dp).toInt(), (2 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt())
+                        addView(boutonOutil(libelle) { action() })
+                    },
+                    android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
             }
             // Rutube a déjà son 🕘 dans sa barre d'outils (et son propre listener de
             //   validation, qui lance la recherche réseau) : on ne l'enveloppe pas.

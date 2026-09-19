@@ -1315,67 +1315,10 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             cat.addPreference(pref)
         }
 
-        // 2026-09-10 (user : « l'option de compte pour voir le mot de passe et le pseudo
-        //   enregistré, il est où ») : Bowd rejoint les comptes gérables ici. Contrairement
-        //   aux autres, on peut y RELIRE ses identifiants — utile quand il faut les ressaisir
-        //   sur un autre appareil et qu'on ne s'en souvient plus, ce qui arrive vite avec un
-        //   compte cree une seule fois pour la circonstance.
-        val bowdKey = "tvhub_account_bowd"
-        if (findPreference<Preference>(bowdKey) == null) {
-            val pref = Preference(requireContext()).apply {
-                key = bowdKey
-                title = "Compte Bowd"
-                isIconSpaceReserved = false
-                summary = bowdAccountSummary()
-                setOnPreferenceClickListener {
-                    val ctx = requireContext()
-                    val ba = com.streamflixreborn.streamflix.utils.BowdAuth
-                    if (!ba.hasCredentials(ctx)) {
-                        com.streamflixreborn.streamflix.activities.BowdLoginDialog.show(ctx) {
-                            summary = bowdAccountSummary()
-                        }
-                        return@setOnPreferenceClickListener true
-                    }
-                    AlertDialog.Builder(ctx)
-                        .setTitle("Compte Bowd")
-                        .setItems(arrayOf(
-                            "Voir mes identifiants",
-                            "Changer de compte",
-                            "Déconnexion (efface identifiants)",
-                        )) { _, idx ->
-                            when (idx) {
-                                0 -> AlertDialog.Builder(ctx)
-                                    .setTitle("Identifiants Bowd")
-                                    .setMessage(
-                                        "Identifiant : " + (ba.savedUsername(ctx) ?: "—") + "\n" +
-                                        "Mot de passe : " + (ba.savedPassword(ctx) ?: "—") + "\n\n" +
-                                        "Ils sont stockés sur cet appareil. Le transfert par code " +
-                                        "les emporte aussi, ce qui évite de les ressaisir ailleurs."
-                                    )
-                                    .setPositiveButton("Fermer", null)
-                                    .show()
-                                1 -> com.streamflixreborn.streamflix.activities.BowdLoginDialog.show(ctx) {
-                                    summary = bowdAccountSummary()
-                                }
-                                2 -> AlertDialog.Builder(ctx)
-                                    .setTitle("Déconnecter Bowd ?")
-                                    .setMessage("Ton identifiant et ton mot de passe Bowd seront supprimés de cet appareil. Tes favoris et le reste ne sont pas touchés.")
-                                    .setPositiveButton("Déconnecter") { _, _ ->
-                                        ba.clearCredentials(ctx)
-                                        summary = bowdAccountSummary()
-                                        Toast.makeText(ctx, "Bowd : déconnecté", Toast.LENGTH_SHORT).show()
-                                    }
-                                    .setNegativeButton("Annuler", null)
-                                    .show()
-                            }
-                        }
-                        .setNegativeButton("Annuler", null)
-                        .show()
-                    true
-                }
-            }
-            cat.addPreference(pref)
-        }
+        // 2026-09-20 : entrée « Compte Bowd » RETIRÉE avec le reste de Bowd (user : « pas
+        //   vraiment stable »). C'était le seul compte dont on pouvait RELIRE les
+        //   identifiants ici ; les identifiants déjà stockés sont effacés au premier
+        //   démarrage, cf. StreamFlixApp.
 
         // RMC BFM Play
         val bfmKey = "tvhub_account_bfm"
@@ -1425,13 +1368,6 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         if (com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(requireContext()))
             "✓ Connecté — cliquer pour reconnecter ou déconnecter"
         else "Non connecté — cliquer pour se connecter"
-
-    private fun bowdAccountSummary(): String {
-        val ctx = requireContext()
-        val ba = com.streamflixreborn.streamflix.utils.BowdAuth
-        return if (ba.hasCredentials(ctx)) "Connecté — " + (ba.savedUsername(ctx) ?: "compte enregistré")
-        else "Non connecté — nécessaire pour lire les chaînes et films Bowd"
-    }
 
     private fun bfmAccountSummary(): String =
         if (com.streamflixreborn.streamflix.utils.BfmAuth.isLoggedIn(requireContext()))

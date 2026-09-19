@@ -129,3 +129,12 @@ logo_sources/
 
 cloudflare-worker/.wrangler/
 run_build*.bat
+
+# 2026-09-19 : tools/ = atelier local (sondes, scripts d'upload VOE, essais jetables).
+#   Il n'a rien a faire dans le depot. Les scripts qui servent vraiment vont dans outils/.
+tools/
+# Sorties de mesure produites dans outils/ (catalogues, captures, journaux) : regenerables.
+outils/*.json
+outils/*.png
+outils/*.log
+outils/*.err

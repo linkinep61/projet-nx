@@ -781,45 +781,15 @@ class PlayerTvFragment : Fragment() {
             }, 600)
         }
 
-        // 2026-06-04 (user "faut faire la même chose pour la version TV mais
-        //   que pour OTF bien sûr") : pour les flux OTF on bascule vers
-        //   OtfPlayerTvActivity qui utilise ExoPlayer 2.19.1 (laxiste discon-
-        //   tinuities) au lieu de Media3 1.8.0 (strict, crash).
-        // 2026-06-20 (user "ça lag de partout sur OTF on peut pas se permettre
-        //   de refaire les réglages") : test de retrait du lecteur dédié = ÉCHEC,
-        //   restauration. Le pipeline Media3 standard lague sur les flux OTF.
-        if (args.id.startsWith("livehub::otf::")) {
-            viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                val key = args.id.removePrefix("livehub::otf::").substringBefore("::")
-                val urls = try {
-                    com.streamflixreborn.streamflix.utils.OtfTvService.getUrlsForChannel(key)
-                } catch (_: Exception) { emptyList() }
-                val url = urls.firstOrNull()
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    if (url != null && context != null) {
-                        Log.d("PlayerTvFragment", "OTF stream → redirect to OtfPlayerTvActivity (ExoPlayer 2.19.1)")
-                        val intent = android.content.Intent(
-                            requireContext(),
-                            com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity::class.java,
-                        ).apply {
-                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_URL, url)
-                            // 2026-07-20 : toutes les URLs (CDN multiples) pour la bascule auto.
-                            putStringArrayListExtra(
-                                com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_URLS,
-                                ArrayList(urls),
-                            )
-                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_KEY, key)
-                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_TITLE, args.title)
-                        }
-                        startActivity(intent)
-                        findNavController().popBackStack()
-                    } else {
-                        Log.w("PlayerTvFragment", "OTF: pas d'URL pour key=$key, fallback Media3")
-                    }
-                }
-            }
-            return
-        }
+        // 2026-09-19 : renvoi OTF vers OtfPlayerTvActivity (ExoPlayer 2.19.1) SUPPRIMÉ.
+        //   Historique complet : mis en place le 2026-06-04 parce que l'AudioSink strict de
+        //   Media3 refusait les discontinuités des flux OTF du CDN `dencreak` ; un premier
+        //   retrait le 2026-06-20 avait ÉCHOUÉ sur télé (« ça lag de partout ») et avait été
+        //   annulé. Ce qui a changé depuis : `dencreak` est mort (NXDOMAIN mondial) et les flux
+        //   viennent de `blcco.linkip.org`. Mesure du 2026-09-19 sur l'Oppo (France 2 et
+        //   France 5 : READY en ~1,3 s, 60 s de lecture, buffer constant, mémoire plate, zéro
+        //   erreur), puis **essai du user sur la Chromecast : rien ne lague**. D'où la
+        //   suppression des deux activités dédiées et des trois dépendances 2.19.1.
 
         // 2026-05-15 (user "vire cette foutue roulette pour Mon IPTV") : force
         // GONE de tout overlay loading dès l'init pour les contenus IPTV.

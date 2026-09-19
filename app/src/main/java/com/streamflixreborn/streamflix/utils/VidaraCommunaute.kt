@@ -205,6 +205,39 @@ object VidaraCommunaute {
         if (!ACTIVE || cache.isEmpty()) emptyList() else categoriesDe(cache)
 
     /**
+     * 2026-09-20 (user : « les jaquettes s'affichent sur le telephone mais pas sur la tele,
+     *   j'ai juste celle de Protector ») — RATTRAPAGE DES AFFICHES MANQUANTES.
+     *
+     * LE BUG. `LiveHubFolderDialog` affiche `categoriesSiDejaCharge()` des que la liste des
+     * fichiers est en cache, et ne descend alors JAMAIS dans la branche qui appelle
+     * `categories()`. Or c'est cette derniere, et elle seule, qui appelle
+     * `completerFichesPour()`. Consequence : la toute premiere ouverture (cache de fichiers
+     * vide) telecharge les fiches TMDB, mais si elle est interrompue, les fiches manquantes
+     * ne sont PLUS JAMAIS recuperees — la liste, elle, est desormais en cache.
+     *
+     * C'est une COURSE, pas un bug propre a la tele : l'Oppo avait eu le temps de tout
+     * telecharger, la Chromecast s'etait arretee apres une seule fiche (Protector). Le meme
+     * appareil pouvait basculer d'un etat a l'autre.
+     *
+     * MESURE DU 2026-09-20 sur les 135 fichiers de l'index : les 90 qui portent un
+     * identifiant resolvent TOUS chez TMDB et ont TOUS une affiche. Le probleme n'etait donc
+     * ni les donnees ni le nommage de Francky. (Les 45 restants n'ont pas d'identifiant du
+     * tout — c'est un autre sujet, non traite ici.)
+     *
+     * ⚠ VOLONTAIREMENT SANS RAFRAICHISSEMENT DE L'AFFICHAGE. On ne rappelle pas
+     * `displayCategories` quand les fiches arrivent : sur tele, cela ouvrirait un dialogue
+     * par-dessus et ferait sauter le focus de la telecommande en pleine navigation. Les
+     * affiches apparaissent donc a l'ouverture SUIVANTE du dossier — et definitivement,
+     * puisque `completerFichesPour` ecrit son cache sur disque.
+     */
+    suspend fun completerFichesManquantes() {
+        if (!ACTIVE) return
+        val fichiers = cacheActuel()
+        if (fichiers.isEmpty()) return
+        VidaraLibrary.completerFichesPour(fichiers.map { it.enBibliotheque() })
+    }
+
+    /**
      * 2026-08-28 (user : « tout est en vrac, y a pas les dossiers ») : une Category
      *   par DOSSIER du contributeur, nommee « <contributeur> - <dossier> ». Meme
      *   convention que VoeLibrary (« ONYX - <dossier> ») : displayCategories sait

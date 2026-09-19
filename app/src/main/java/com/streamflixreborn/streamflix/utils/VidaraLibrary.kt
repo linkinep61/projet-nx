@@ -631,14 +631,59 @@ object VidaraLibrary {
         RE_ID_TETE.find(f.titre)?.groupValues?.get(1)
             ?: RE_TV_TETE.find(f.titre)?.groupValues?.get(1)?.let { "tv$it" }
 
-    /** Fiche TMDB d'un fichier, si son nom porte un identifiant déjà téléchargé. */
-    fun ficheDe(f: Fichier): Fiche? = idTmdbDe(f)?.let { fiches[it] }
+    /**
+     * 2026-09-20 (user, sur « The Runner (2026) » sans jaquette : « pourtant c'est bien
+     *   marque 2026 ») — ANNEE EN FIN DE TITRE, pour les fichiers SANS identifiant.
+     *
+     * Jusqu'ici, seuls RE_ID_TETE / RE_TV_TETE etaient lus : un nombre EN TETE suivi d'un
+     * tiret. L'annee entre parentheses etait affichee telle quelle et jamais interpretee —
+     * `sansPrefixe` ne retire que le prefixe et laisse la fin intacte. Un fichier nomme
+     * « The Runner (2026) » n'avait donc aucune fiche, alors qu'un humain trouve le film
+     * en trois secondes.
+     *
+     * MESURE DU 2026-09-20 sur l'index de Francky : 45 fichiers sur 135 sont sans
+     * identifiant. Sur un echantillon de 6 titres de ce lot, la recherche TMDB
+     * « titre + annee » les a TOUS trouves du premier coup, avec affiche.
+     *
+     * POURQUOI L'ANNEE EST INDISPENSABLE : « Revenge » rend 20 resultats chez TMDB,
+     * « Mercy » en rend 19. Sans l'annee on tirerait au hasard et on collerait la mauvaise
+     * affiche — ce qui est PIRE que pas d'affiche du tout. Le filtre `year=` fait sortir
+     * le bon en tete. Sans annee dans le nom du fichier, on ne cherche donc PAS.
+     */
+    private val RE_ANNEE_FIN = Regex("""\((\d{4})\)\s*$""")
+
+    /**
+     * Cle de recherche « q:<titre>|<annee> », dans le MEME cache que les identifiants —
+     * l'espace de noms « q: » ne peut pas entrer en collision avec « 12345 » ni « tv12345 »,
+     * donc le format de stockage sur disque est inchange.
+     * Rend null si le nom ne porte pas d'annee exploitable.
+     */
+    private fun cleRechercheDe(f: Fichier): String? {
+        val m = RE_ANNEE_FIN.find(f.titre) ?: return null
+        val annee = m.groupValues[1]
+        val titre = f.titre.removeRange(m.range).trim().trim('-', '.', '_').trim()
+        if (titre.isBlank()) return null
+        return "q:${titre.lowercase()}|$annee"
+    }
+
+    /** Identifiant direct s'il existe, sinon cle de recherche par titre + annee. */
+    private fun cleDe(f: Fichier): String? = idTmdbDe(f) ?: cleRechercheDe(f)
+
+    /** Fiche TMDB d'un fichier : par identifiant, ou par recherche titre + annee. */
+    fun ficheDe(f: Fichier): Fiche? = cleDe(f)?.let { fiches[it] }
 
     /** Ce qu'il faut AFFICHER : titre officiel si connu, sinon nom de fichier nettoyé.
      *  Pour un EPISODE de serie on garde le nom du fichier (il porte SxxExx + titre
      *  d'episode) : la fiche de la serie ne sert qu'a l'affiche. */
     fun titrePour(f: Fichier): String =
         if (RE_TV_TETE.containsMatchIn(f.titre)) f.titreAffiche
+        // 2026-09-20 : fiche obtenue par RECHERCHE titre + annee (pas d'identifiant en
+        //   tete de nom) -> on garde le nom du fichier et on ne prend QUE l'affiche.
+        //   TMDB rend souvent le titre international (« Les morts ne meurent pas »
+        //   ressort en « The Dead Don't Die ») alors que le nom du fichier porte le
+        //   titre francais, plus parlant pour l'utilisateur. Quand l'identifiant est
+        //   ecrit en tete, l'intention est explicite : la on prend le titre officiel.
+        else if (idTmdbDe(f) == null) f.titreAffiche
         else ficheDe(f)?.titre?.takeIf { it.isNotBlank() } ?: f.titreAffiche
 
     /** Ce qu'il faut AFFICHER : affiche TMDB si connue, sinon rien (index sans vignette). */
@@ -654,36 +699,25 @@ object VidaraLibrary {
         if (BuildConfig.TMDB_API_KEY.isBlank()) return
         lireFichesDisque()
         // containsKey explicite (KT-18053 : `in` appelle containsValue sur ConcurrentHashMap).
-        val manquants = fichiers.mapNotNull { idTmdbDe(it) }.distinct().filter { !fiches.containsKey(it) }
+        val manquants = fichiers.mapNotNull { cleDe(it) }.distinct().filter { !fiches.containsKey(it) }
         if (manquants.isEmpty()) return
         val jetons = kotlinx.coroutines.sync.Semaphore(8)
         // 2026-09-05 : écriture disque tous les 20 résultats, pas seulement à la
         //   fin — si l'application est quittée en cours de route, l'acquis reste.
         val depuisEcriture = java.util.concurrent.atomic.AtomicInteger(0)
         kotlinx.coroutines.coroutineScope {
-            manquants.forEach { id ->
+            manquants.forEach { cle ->
                 launch(Dispatchers.IO) {
                     jetons.withPermit {
                         // Une autre passe (niveau ouvert / fond) l'a peut-être déjà prise.
-                        if (fiches.containsKey(id)) return@withPermit
+                        if (fiches.containsKey(cle)) return@withPermit
                         runCatching {
-                            // « tv12345 » = serie (/tv, champs name/original_name), sinon film.
-                            val estSerie = id.startsWith("tv")
-                            val chemin = if (estSerie) "tv/${id.removePrefix("tv")}" else "movie/$id"
-                            val req = okhttp3.Request.Builder()
-                                .url("https://api.themoviedb.org/3/$chemin?api_key=${BuildConfig.TMDB_API_KEY}&language=fr-FR")
-                                .header("Accept", "application/json").build()
-                            NetworkClient.default.newCall(req).execute().use { r ->
-                                val j = JSONObject(r.body?.string().orEmpty())
-                                val t = if (estSerie) j.optString("name").ifBlank { j.optString("original_name") }
-                                        else j.optString("title").ifBlank { j.optString("original_title") }
-                                val p = j.optString("poster_path").takeIf { it.isNotBlank() }
-                                if (t.isNotBlank()) {
-                                    fiches[id] = Fiche(t, p?.let { "https://image.tmdb.org/t/p/w500$it" })
-                                    if (depuisEcriture.incrementAndGet() >= 20) {
-                                        depuisEcriture.set(0)
-                                        ecrireFichesDisque()
-                                    }
+                            val fiche = if (cle.startsWith("q:")) chercherFiche(cle) else lireFiche(cle)
+                            if (fiche != null) {
+                                fiches[cle] = fiche
+                                if (depuisEcriture.incrementAndGet() >= 20) {
+                                    depuisEcriture.set(0)
+                                    ecrireFichesDisque()
                                 }
                             }
                         }
@@ -692,6 +726,60 @@ object VidaraLibrary {
             }
         }
         ecrireFichesDisque()
+    }
+
+    /** Fiche par identifiant ecrit en tete de nom : « 12345 » -> /movie, « tv12345 » -> /tv. */
+    private fun lireFiche(id: String): Fiche? {
+        // « tv12345 » = serie (/tv, champs name/original_name), sinon film.
+        val estSerie = id.startsWith("tv")
+        val chemin = if (estSerie) "tv/${id.removePrefix("tv")}" else "movie/$id"
+        val req = okhttp3.Request.Builder()
+            .url("https://api.themoviedb.org/3/$chemin?api_key=${BuildConfig.TMDB_API_KEY}&language=fr-FR")
+            .header("Accept", "application/json").build()
+        return NetworkClient.default.newCall(req).execute().use { r ->
+            val j = JSONObject(r.body?.string().orEmpty())
+            val t = if (estSerie) j.optString("name").ifBlank { j.optString("original_name") }
+                    else j.optString("title").ifBlank { j.optString("original_title") }
+            val p = j.optString("poster_path").takeIf { it.isNotBlank() }
+            if (t.isBlank()) null else Fiche(t, p?.let { "https://image.tmdb.org/t/p/w500$it" })
+        }
+    }
+
+    /**
+     * 2026-09-20 : fiche par RECHERCHE, pour les fichiers dont le nom ne porte PAS
+     * d'identifiant mais se termine par « (annee) » — cle « q:<titre>|<annee> ».
+     *
+     * MESURE avant d'ecrire ce code : sur les 135 fichiers du partage, 90 portent un
+     * identifiant (tous resolus, tous avec affiche) et 45 n'en portent pas. Sur un
+     * echantillon de 6 de ces 45, la recherche titre + annee a rendu le bon film du
+     * premier coup a chaque fois : The Runner (2026) -> 1386315, The Substance (2024)
+     * -> 933260, Revenge (2017) -> 467938, Les morts ne meurent pas (2019) -> 535581,
+     * Mercy (2023) -> 1111966, Pitfall (2025) -> 1338972.
+     *
+     * L'ANNEE EST OBLIGATOIRE : « Revenge » seul rend 20 resultats, « Mercy » 19. Le
+     * filtre `year=` fait sortir le bon en tete. Sans annee dans le nom, cleRechercheDe
+     * rend null et on ne cherche pas du tout : une mauvaise affiche est PIRE que pas
+     * d'affiche. On ne prend donc que `results[0]`, jamais un choix approximatif.
+     */
+    private fun chercherFiche(cle: String): Fiche? {
+        val corps = cle.removePrefix("q:")
+        val sep = corps.lastIndexOf('|')
+        if (sep <= 0) return null
+        val titre = corps.substring(0, sep)
+        val annee = corps.substring(sep + 1)
+        val q = java.net.URLEncoder.encode(titre, "UTF-8")
+        val req = okhttp3.Request.Builder()
+            .url("https://api.themoviedb.org/3/search/movie?api_key=${BuildConfig.TMDB_API_KEY}" +
+                 "&language=fr-FR&include_adult=false&query=$q&year=$annee")
+            .header("Accept", "application/json").build()
+        return NetworkClient.default.newCall(req).execute().use { r ->
+            val resultats = JSONObject(r.body?.string().orEmpty()).optJSONArray("results")
+            val premier = resultats?.takeIf { it.length() > 0 }?.optJSONObject(0)
+                ?: return@use null
+            val t = premier.optString("title").ifBlank { premier.optString("original_title") }
+            val p = premier.optString("poster_path").takeIf { it.isNotBlank() }
+            if (t.isBlank()) null else Fiche(t, p?.let { "https://image.tmdb.org/t/p/w500$it" })
+        }
     }
 
 }

@@ -63,6 +63,21 @@ class VidaraExtractor : Extractor() {
         //   Confirmé : la page se revendique elle-même comme Vidara, son jwplayer porte
         //   `abouttext:"Vidara"` et `aboutlink:"https://vidara.so/"`, même schéma `/e/<id>`.
         "https://vidvara.site",
+        // 2026-09-20 (user : « je viens de voir qu'il y avait un vidar.cc ») : AJOUT PREVENTIF,
+        //   aucun provider ne sert ce front aujourd'hui. Note l'orthographe : `vidar`, SANS le
+        //   deuxieme « a » — a ne pas confondre avec `vidara.cc`, qui est mort (retire le
+        //   2026-08-07, toujours aucun enregistrement A verifie ce jour).
+        //   Verifie en direct : POST https://vidar.cc/api/stream avec un filecode bidon rend
+        //   {"error":"Video not found"} — l'API comprend la requete et cherche le fichier, donc
+        //   c'est bien le moteur Vidara, pas une page qui se contente de repondre 404.
+        //   ⚠ Bitdefender classe ce domaine en hameconnage : c'est un FAUX POSITIF (la page est
+        //   le vrai site Vidara, meme argumentaire que viewdara.com). Ne pas s'y fier pour
+        //   conclure qu'un front est illegitime.
+        //   Motif de l'ajout : cette famille change de front en permanence (vidara.cc mort,
+        //   puis vidaraa.cc, puis vidvara.site) et les deux precedents ont ete ajoutes APRES
+        //   coup, une fois des lectures tombees en « HOTE NON COUVERT ». Celui-ci est pose
+        //   d'avance : un domaine qui n'apparait jamais n'est jamais teste, cout nul.
+        "https://vidar.cc",
     )
 
     /**

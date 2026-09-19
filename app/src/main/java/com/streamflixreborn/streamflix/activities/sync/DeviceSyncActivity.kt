@@ -147,7 +147,7 @@ class DeviceSyncActivity : AppCompatActivity() {
                     //   doute pas. Il n'y a pas de demi-mesure possible : le bloc part
                     //   entier ou pas du tout, d'où la consigne de se déconnecter avant.
                     tvSendExpires.text = "Ce code expire dans 5 minutes.\n\n" +
-                        "⚠ Il contient aussi tes connexions (Bowd, TF1+, M6+, BFM). " +
+                        "⚠ Il contient aussi tes connexions (TF1+, M6+, BFM). " +
                         "Ne le transmets qu'à tes propres appareils — pour le partager " +
                         "avec quelqu'un d'autre, déconnecte-toi de ces services avant de " +
                         "générer le code."

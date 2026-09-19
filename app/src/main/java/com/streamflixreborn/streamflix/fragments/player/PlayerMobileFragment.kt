@@ -991,43 +991,14 @@ class PlayerMobileFragment : Fragment() {
             },
         )
 
-        // 2026-06-04 (user "garde le pattern OTF comme l'application originelle
-        //   jusqu'à l'ExoPlayer de la vidéo") : pour les flux OTF on bascule
-        //   immédiatement vers OtfPlayerActivity qui utilise ExoPlayer 2.19.1
-        //   (laxiste discontinuities) au lieu de Media3 1.8.0 (strict, crash).
-        if (args.id.startsWith("livehub::otf::")) {
-            viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                val key = args.id.removePrefix("livehub::otf::").substringBefore("::")
-                val urls = try {
-                    com.streamflixreborn.streamflix.utils.OtfTvService.getUrlsForChannel(key)
-                } catch (_: Exception) { emptyList() }
-                val url = urls.firstOrNull()
-                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    if (url != null && context != null) {
-                        Log.d("PlayerMobileFragment", "OTF stream → redirect to OtfPlayerActivity (ExoPlayer 2.19.1)")
-                        val intent = android.content.Intent(
-                            requireContext(),
-                            com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity::class.java,
-                        ).apply {
-                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_URL, url)
-                            // 2026-07-20 : on passe TOUTES les URLs (CDN multiples) pour que le
-                            //   player bascule au lieu de rester bloqué sur un CDN mort.
-                            putStringArrayListExtra(
-                                com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_URLS,
-                                ArrayList(urls),
-                            )
-                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_KEY, key)
-                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_TITLE, args.title)
-                        }
-                        startActivity(intent)
-                        findNavController().popBackStack()
-                    } else {
-                        Log.w("PlayerMobileFragment", "OTF: pas d'URL pour key=$key, fallback Media3")
-                    }
-                }
-            }
-            return
-        }
+        // 2026-09-19 : le renvoi des flux OTF vers OtfPlayerActivity (ExoPlayer 2.19.1) a été
+        //   SUPPRIMÉ. Motif d'origine (2026-06-04) : l'AudioSink strict de Media3 refusait les
+        //   discontinuités de timestamp des flux OTF servis par le CDN `dencreak` — MediaCodec
+        //   bouclait jusqu'à l'OOM. Ce CDN est mort depuis (NXDOMAIN mondial) ; sur les flux
+        //   `blcco.linkip.org` qui l'ont remplacé, Media3 tient sans broncher — mesuré le
+        //   2026-09-19 sur France 2 et France 5 (READY en 1,2 s, 60 s de lecture, mémoire plate,
+        //   zéro erreur), puis validé par le user sur la Chromecast. OTF passe donc par le
+        //   lecteur normal, mini-player compris.
 
         // 2026-06-03 (user "Miracast / AirPlay 2 → il faut qu'on ajoute ça") :
         //   Le bouton Cast actuel ne détecte QUE les Chromecast. On étend le

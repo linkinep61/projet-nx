@@ -179,13 +179,8 @@
             android:label="Connexion Replay"
             android:theme="@style/Theme.AppCompat.NoActionBar" />
 
-        <!-- 2026-06-04 : Activity OTF TV dédiée — ExoPlayer 2.19.1 strict pattern. -->
-        <activity
-            android:name=".activities.player.OtfPlayerTvActivity"
-            android:exported="false"
-            android:hardwareAccelerated="true"
-            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
-            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+        <!-- 2026-09-19 : OtfPlayerTvActivity supprimée — OTF passe par le lecteur Media3
+             normal (voir OtfTvService.kt). -->
 
         <service
             android:name=".download.DownloadService"

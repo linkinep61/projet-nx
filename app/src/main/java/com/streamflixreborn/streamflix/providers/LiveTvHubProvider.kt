@@ -1175,10 +1175,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   ~40 chaînes FR, liste Supabase + lecture avec Referer, cf. ReneveoTv. Contenu
             //   chargé au clic (LiveHubFolderDialog, clé `reneveo`), carte toujours affichée.
             FolderDef(com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "RénéVéo", Regex("^RénéVéo - .*")),
-            // 2026-09-10 (user : « il faut faire ça directement par le navigateur ») : dossier Bowd.
-            //   689 chaînes FR listées via un jeton anonyme ; lecture dans leur page player en
-            //   WebView (leur /stream est fermé en anonyme, cf. BowdTv). Contenu chargé au clic.
-            FolderDef(com.streamflixreborn.streamflix.utils.BowdTv.FOLDER_KEY, "Bowd", Regex("^Bowd - .*")),
+            // 2026-09-20 : dossier Bowd RETIRÉ (user : « pas vraiment stable »). Il listait
+            //   689 chaînes FR via un jeton anonyme et lisait dans leur page player en
+            //   WebView, leur /stream étant fermé en anonyme. Tout Bowd est parti le même
+            //   jour — dossier, compte, lecteur WebView et source de films.
             // 2026-07-08 : dossier NetMirror TV hub MIS DE CÔTÉ (archivé C:\Users\guill\Desktop\ONYX).
             //   Lecture WebView pas finalisée (CORS/hls.js). Provider natif NetMirror = OK par ailleurs.
             FolderDef("documentaire", "Documentaire", Regex("^Documentaire$")),
@@ -1266,7 +1266,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   Il partait du principe que « aucune section à ranger » = « rien à
         //   afficher ». C'est faux depuis `alwaysShowKeys` : les cartes Replay
         //   TF1+/M6+/BFM/France TV/Arte, Musique, Autres Replays, OTF, RénéVéo,
-        //   Bowd, Stream4Free, Ciné Films… sont affichées SANS section source,
+        //   Stream4Free, Ciné Films… sont affichées SANS section source,
         //   leur contenu étant chargé au clic. Ce `return` les sautait toutes.
         //   Pourquoi ça ne se voyait pas avant : au démarrage à froid en mode
         //   lazy, la seule section non-« visible directe » était « Sport » (les
@@ -1317,7 +1317,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, com.streamflixreborn.streamflix.utils.BowdTv.FOLDER_KEY, "vegetavod") +
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "vegetavod") +
             // ⚠ 2026-08-17 — CORRIGÉ (user « le dossier série/film n'est pas
             //   stable, regarde pourquoi il disparaît »).
             //   « Film / série » était VOLONTAIREMENT exclu d'ici, au motif
@@ -1357,7 +1357,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
             "stream4cf"      to "https://www.stream4free.tv/images/logos4f.png",
             // 2026-09-06 : dossier RénéVéo (favicon du site).
             com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.ReneveoTv.LOGO,
-            com.streamflixreborn.streamflix.utils.BowdTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.BowdTv.LOGO,
             // 2026-08-17 : dossier des fichiers perso (icone bibliotheque).
             "ma_bibliotheque" to "https://cdn-icons-png.flaticon.com/512/2991/2991108.png",
             // 2026-09-06 : carte « Ciné Films » (clap de cinéma).
@@ -1938,10 +1937,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-09-06 : chaîne RénéVéo → fiche synthétique « En Direct » (cf. ReneveoTv).
         if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(id)) {
             return com.streamflixreborn.streamflix.utils.ReneveoTv.fiche(id)
-        }
-        // 2026-09-10 : chaîne Bowd → fiche synthétique « En Direct » (cf. BowdTv).
-        if (com.streamflixreborn.streamflix.utils.BowdTv.estChaine(id)) {
-            return com.streamflixreborn.streamflix.utils.BowdTv.fiche(id)
         }
         // 2026-06-24 : FAST channel (= Samsung TV+, Pluto TV, Plex TV, LG Channels, etc.)
         //   ID = "livehub::fast::<hash>" → TvShow synthétique "En Direct".
@@ -2723,10 +2718,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
         if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(id)) {
             return com.streamflixreborn.streamflix.utils.ReneveoTv.serveurs(id)
         }
-        // 2026-09-10 : Bowd → un seul « serveur », leur page player ouverte en WebView.
-        if (com.streamflixreborn.streamflix.utils.BowdTv.estChaine(id)) {
-            return com.streamflixreborn.streamflix.utils.BowdTv.serveurs(id)
-        }
         // 2026-06-24 : FAST channel = id "livehub::fast::<hash>"
         //   → retourne l'URL stream directe depuis fastChannelUrls map.
         if (id.startsWith("livehub::fast::")) {
@@ -2815,6 +2806,23 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
         }
 
+        // 2026-09-19 (user « au pire tu mets ça dans le TV Hub, tout en bas dans Autres Replays ») :
+        //   FILMS du catalogue OTF. L'id porte le nom de fichier ; l'URL complète est reconstruite
+        //   depuis le catalogue en mémoire (base = MoviesLink, cf. OtfTvService.parserFilms).
+        //   Fichier .mkv direct servi en Range : aucun extracteur, Media3 le lit tel quel.
+        if (id.startsWith("livehub::otffilm::")) {
+            val fichier = id.removePrefix("livehub::otffilm::").substringBefore("::")
+            val film = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.streamflixreborn.streamflix.utils.OtfTvService.filmParFichier(fichier)
+            }
+            if (film == null) {
+                Log.w(TAG, "OTF film introuvable dans le catalogue : $fichier")
+                return emptyList()
+            }
+            return listOf(
+                Video.Server(id = id, name = "OTF TV (VF)", src = film.url)
+            )
+        }
         // 2026-05-31 : OTF TV — chaînes directes depuis le catalogue OTF
         if (id.startsWith("livehub::otf::")) {
             val key = id.removePrefix("livehub::otf::").split("::").first()
@@ -2956,28 +2964,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-09-06 : RénéVéo → HLS direct, Referer du site obligatoire sur ses proxys (cf. ReneveoTv.video).
         if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(server.id)) {
             return com.streamflixreborn.streamflix.utils.ReneveoTv.video(server)
-        }
-        // 2026-09-10 : Bowd. Connecté → vrai flux HLS rendu par leur API, joué en natif
-        //   (mini-lecteur, favoris et D-pad fonctionnent normalement). Pas de session →
-        //   repli sur leur page player en WebView, qui invite à se connecter ; on coupe
-        //   alors le flux ExoPlayer par une exception, comme NetMirror.
-        if (com.streamflixreborn.streamflix.utils.BowdTv.estChaine(server.id)) {
-            // Session présente → vrai flux HLS, lu nativement par ExoPlayer.
-            if (!com.streamflixreborn.streamflix.utils.BowdTv.estServeurWeb(server.id)) {
-                return Video(
-                    source = server.src,
-                    subtitles = emptyList(),
-                )
-            }
-            val page = com.streamflixreborn.streamflix.utils.BowdTv.pagePlayerDe(server.id)
-            withContext(kotlinx.coroutines.Dispatchers.Main) {
-                com.streamflixreborn.streamflix.activities.tools.BowdWebPlayerActivity.launch(
-                    context = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext,
-                    url = page,
-                    title = com.streamflixreborn.streamflix.utils.BowdTv.chainesSiDejaChargees().firstOrNull { page.endsWith(it.id) }?.nom,
-                )
-            }
-            throw IllegalStateException("Bowd : lecture dans le lecteur WebView intégré")
         }
         // 2026-09-05 : Vegeta VOD → URL Xtream directe (mkv/mp4), UA navigateur mobile.
         if (server.id.startsWith(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SRC)) {
@@ -3129,6 +3115,16 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
         // 2026-05-15 : bonus channels — délègue à Extractor.extract qui route
         // vers Hoca8Extractor (bolaloca/cartelive/embedme) ou DailymotionExtractor.
+        // 2026-09-19 : FILM OTF — `src` EST le fichier .mkv, rien à résoudre. Pas de `type` :
+        //   on laisse Media3 reconnaître le conteneur Matroska tout seul (H.264 + AAC).
+        if (server.id.startsWith("livehub::otffilm::")) {
+            return Video(
+                source = server.src,
+                headers = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36",
+                ),
+            )
+        }
         // 2026-05-31 : OTF TV — URLs directes m3u8, pas d'extraction
         if (server.id.startsWith("livehub::otf::")) {
             // 2026-05-31 : User-Agent = celui d'ExoPlayer 2.19.1 (l'app OTF originale).
@@ -4786,6 +4782,36 @@ object LiveTvHubProvider : Provider, IptvProvider {
     /** 2026-06-27 (user "Mix FR dans le dossier Autres Replays") : fetch + parse
      *  data.m3u (mix m3u xdata-mix/nx-data, auto-refresh via refresh.yml) →
      *  catégories par group-title. Cache RAM 30 min. */
+    /**
+     * 2026-09-19 (user « au pire tu mets ça dans le TV Hub, tout en bas dans Autres Replays ») :
+     * les films VF du catalogue OTF, sous forme de sections du Hub.
+     *
+     * Aucune requête propre : le catalogue arrive avec les chaînes OTF (même réponse `authV4`).
+     * Deux sections seulement — les ajouts récents, que l'API sert en tête de liste, puis tout le
+     * reste par ordre alphabétique. La grille du dossier a sa barre de recherche, c'est elle qui
+     * sert à retrouver un titre parmi les 839.
+     */
+    suspend fun fetchOtfFilmsCategoriesPublic(): List<Category> {
+        val films = try {
+            com.streamflixreborn.streamflix.utils.OtfTvService.fetchFilmsFrancais()
+        } catch (_: Throwable) { emptyList() }
+        if (films.isEmpty()) return emptyList()
+
+        fun tuile(f: com.streamflixreborn.streamflix.utils.OtfTvService.OtfMovie) =
+            TvShow(id = "livehub::otffilm::${f.fichier}", title = f.titreAffiche).apply {
+                providerName = "TV Hub"
+                poster = f.poster
+                banner = f.poster
+            }
+
+        val recents = films.take(40).map(::tuile)
+        val tous = films.sortedBy { it.titreAffiche.lowercase() }.map(::tuile)
+        return listOf(
+            Category(name = "OTF Films — derniers ajouts", list = recents),
+            Category(name = "OTF Films — tout le catalogue (${films.size})", list = tous),
+        )
+    }
+
     suspend fun fetchMixFrCategoriesPublic(): List<Category> {
         val now = System.currentTimeMillis()
         if (mixFrCacheSections.isNotEmpty() && now - mixFrCacheTs < MIX_FR_TTL_MS) {

@@ -384,16 +384,9 @@ class HomeMobileFragment : Fragment() {
 
         // Set the IPTV click interceptor
         MiniPlayerController.onIptvChannelClick = { tvShow ->
-            // 2026-06-04 (user "il y a bien un bug avec le mini Player et pour
-            //   OTF faire un clic et ça ouvre directement le plein écran") :
-            //   OTF n'utilise pas le mini player (= OtfPlayerActivity full screen
-            //   ne peut pas cohabiter avec un mini player). Clic = direct fullscreen.
-            if (tvShow.id.startsWith("livehub::otf::")) {
-                Log.d("HomeMobile", "OTF: bypass mini player → fullscreen direct (${tvShow.title})")
-                MiniPlayerController.stopAsync()
-                try { binding.miniPlayerContainer.visibility = View.GONE } catch (_: Exception) {}
-                false  // false = pas intercepté → flux nav classique → PlayerMobileFragment → OtfPlayerActivity
-            } else if (tvShow.id == MiniPlayerController.currentChannelId) {
+            // 2026-09-19 : le court-circuit OTF (clic = plein écran direct, sans mini-player)
+            //   a été SUPPRIMÉ avec les activités dédiées — OTF est une chaîne comme les autres.
+            if (tvShow.id == MiniPlayerController.currentChannelId) {
                 // 2026-07-05 : NE PAS appeler stopAsync() ici — ça détruit le player
                 //   avant que PlayerMobileFragment.transferPlayer() ne puisse le récupérer.
                 //   Même pattern que navigateToFullPlayer() : on met le flag de transition

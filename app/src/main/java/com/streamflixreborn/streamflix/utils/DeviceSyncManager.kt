@@ -49,8 +49,9 @@ object DeviceSyncManager {
      *  les COMPTES sont désormais transférables. Ce sont les seuls fichiers concernés.
      *  2026-09-11 (user : « tu pouvais pas laisser ça comme avant avec le code simple ») :
      *  ils voyagent dans le payload ordinaire, le code reste à 6 caractères. */
+    // 2026-09-20 : « bowd_creds » RETIRÉ de la liste avec le reste de Bowd — on ne
+    //   transporte plus le mot de passe d'un service que l'application ne sert plus.
     private val FICHIERS_COMPTES = listOf(
-        "bowd_creds",
         "replay_auth_tf1_creds",
         "replay_auth_m6_creds",
         "replay_auth_bfm_creds",
@@ -315,7 +316,7 @@ object DeviceSyncManager {
             )
         }
         if (wlSourcesObj.length() > 0) root.put("worldLiveSources", wlSourcesObj)
-        // 13. Comptes (Bowd, TF1+, M6+, BFM). Ce sont des mots de passe : ils transitent
+        // 13. Comptes (TF1+, M6+, BFM). Ce sont des mots de passe : ils transitent
         //     par le Worker comme le reste du transfert, et le code expire en 5 minutes.
         //     L'ecran d'envoi avertit l'utilisateur de ne le donner qu'a ses appareils.
         collectComptes(context)?.let { root.put("comptes", it) }
