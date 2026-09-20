@@ -75,6 +75,7 @@ object BackupRegistry {
         "ONYX" to "ONYX (mes fichiers hébergés)",
         "Partage" to "Partage de la communauté (fichiers des amis)",
         "Ciné Films" to "Ciné Films (films et séries FR)",
+        "Cinélux" to "Cinélux (films et séries FR des portails OLA)",
         "Tokyvideo" to "Tokyvideo (vieilles séries et films en VF)",
         "Cloudstream" to "Cloudstream",
         "ok.ru" to "ok.ru (VF/VOSTFR)",
@@ -166,7 +167,7 @@ object BackupRegistry {
     //   VAGUE 2 : tout le reste (5 à 10 s), léger décalage.
     private val SOURCES_VAGUE_1 = setOf(
         // 2026-08-17 : mes propres fichiers passent devant tout le reste.
-        "ONYX", "Partage", "Ciné Films", "Tokyvideo",
+        "ONYX", "Partage", "Ciné Films", "Cinélux", "Tokyvideo",
         "NetMirror", "Vidzy", "Frembed", "Movix", "Embed", "Yablom",
         "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios", "Rutube",
     )
@@ -1316,7 +1317,7 @@ object BackupRegistry {
         //   n'importe quel provider. Rattachement par identifiant TMDB, sinon titre exact,
         //   sinon préfixe de titre pour les séries. URL directe, lue par VegetaVod.video.
         launch { emit("Ciné Films") {
-            VegetaVod.serveursPour(
+            val vegeta = VegetaVod.serveursPour(
                 tmdbId = resolvedTmdbId,
                 titresConnus = knownTitles,
                 annee = key.year,
@@ -1324,6 +1325,16 @@ object BackupRegistry {
                 saison = key.season,
                 episode = key.episode,
             )
+            vegeta
+        } }
+        // 2026-09-26 (user : « les serveurs… leur trouver un nom différent, car ils ne sont pas au
+        //   même endroit, comme Cinélux ») : films + séries FR des portails OLA (cf. OlaVod) —
+        //   SOURCE À PART de Ciné Films (Vegeta), désactivable séparément, « Cinélux · serveur N ».
+        launch { emit("Cinélux") {
+            runCatching {
+                if (key.isMovie) OlaVod.serveursPour(resolvedTmdbId, knownTitles, key.year)
+                else OlaVod.serveursEpisodePour(resolvedTmdbId, knownTitles, key.season ?: 0, key.episode ?: 0)
+            }.getOrDefault(emptyList())
         } }
         // 2026-09-06 (user : « un site avec des vieilles séries… juste un backup ») : Tokyvideo —
         //   Columbo, X-Files, Code Quantum, Magnum, Goldorak… + collections de films, index
@@ -2514,7 +2525,9 @@ object BackupRegistry {
             "archive.org" -> com.streamflixreborn.streamflix.providers.ArchiveOrgProvider.getVideo(server)
             // 2026-09-06 : Vegeta VOD — `src` est l'URL Xtream directe (mkv/mp4), l'extension
             //   est le dernier segment de l'id d'origine (cf. VegetaVod.video).
-            "Ciné Films" -> VegetaVod.video(orig)
+            "Ciné Films" -> if (orig.id.startsWith(OlaVod.PREFIX_SRC)) OlaVod.video(orig) else VegetaVod.video(orig)
+            // 2026-09-26 : portails OLA (Stalker) — lien demandé au portail à la lecture.
+            "Cinélux" -> OlaVod.video(orig)
             // 2026-09-06 : Tokyvideo — page de la vidéo → MP4 signé (cf. TokyVideo.video).
             "Tokyvideo" -> TokyVideo.video(orig)
             else -> {

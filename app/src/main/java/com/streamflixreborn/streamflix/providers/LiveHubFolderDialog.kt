@@ -375,11 +375,22 @@ object LiveHubFolderDialog {
             val vv = com.streamflixreborn.streamflix.utils.VegetaVod
             fun niveau(): List<TvShow> {
                 val idx = vv.indexSiCharge() ?: return emptyList()
+                // 2026-09-26 (user « deux dossiers supplémentaires dans Ciné Films, mais tu gardes
+                //   le nom comme si c'était Ciné Films ») : films des portails OLA (cf. OlaVod),
+                //   dans leur propre dossier « Plus de films » pour ne pas mélanger les deux.
+                val ov = com.streamflixreborn.streamflix.utils.OlaVod
+                val ola = ov.indexSiCharge()
                 return when {
-                    chemin.isBlank() -> listOf(
+                    chemin.isBlank() -> listOfNotNull(
                         vv.tuileDossier("films", "Films", idx.films.size),
                         vv.tuileDossier("series", "Séries", idx.series.size),
+                        ola?.takeIf { it.films.isNotEmpty() }?.let { vv.tuileDossier("olafilms", "Plus de films", it.films.size) },
+                        ola?.takeIf { it.series.isNotEmpty() }?.let { vv.tuileDossier("olaseries", "Plus de séries", it.series.size) },
                     )
+                    chemin == "olaseries" -> ov.categoriesSeries().map { (c, n) -> vv.tuileDossier("olaseries/$c", c, n) }
+                    chemin.startsWith("olaseries/") -> ov.seriesDe(chemin.removePrefix("olaseries/")).map { ov.tuileSerie(it) }
+                    chemin == "olafilms" -> ov.categories().map { (c, n) -> vv.tuileDossier("olafilms/$c", c, n) }
+                    chemin.startsWith("olafilms/") -> ov.filmsDe(chemin.removePrefix("olafilms/")).map { ov.tuileFilm(it) }
                     chemin == "films" -> vv.categoriesFilms().map { (c, n) -> vv.tuileDossier("films/$c", c, n) }
                     chemin == "series" -> vv.categoriesSeries().map { (c, n) -> vv.tuileDossier("series/$c", c, n) }
                     chemin.startsWith("films/") -> vv.filmsDe(chemin.removePrefix("films/")).map { vv.tuileFilm(it) }
@@ -387,7 +398,8 @@ object LiveHubFolderDialog {
                     else -> emptyList()
                 }
             }
-            val immediat = niveau()
+            val olaPret = com.streamflixreborn.streamflix.utils.OlaVod.indexSiCharge() != null
+            val immediat = if (!olaPret && (chemin.isBlank() || chemin.startsWith("ola"))) emptyList() else niveau()
             if (immediat.isNotEmpty()) {
                 afficherNiveau(ctx, folderName, immediat, onChannelSelected)
                 return
@@ -396,6 +408,7 @@ object LiveHubFolderDialog {
             att.show()
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
                 runCatching { vv.index() }
+                runCatching { com.streamflixreborn.streamflix.utils.OlaVod.index() }
                 att.cancel()
                 if ((ctx as? android.app.Activity)?.isFinishing == true) return@launch
                 val items = niveau()
@@ -1290,7 +1303,10 @@ object LiveHubFolderDialog {
     //   = "Arte Cinéma", "Arte Histoire", etc. PAS de préfixe "Replay ".
     private val arteRegex = Regex("^Arte.*", RegexOption.IGNORE_CASE)
     // 2026-06-21 : BFM Play = BFM TV, RMC Story, RMC Découverte, BFM Business, RMC Life
-    private val bfmPlayRegex = Regex("^Replay (BFM TV|BFM Business|RMC Story|RMC Découverte|RMC Life)(\\s.*)?$")
+    // 2026-09-24 : + les autres chaînes de BFM Play (RMC Radio, 100% Docs, 100% Crime,
+    //   Top Mecanic, Exclus BFM Play), qui tombaient dans Autres Replays → « Replays ».
+    //   Doit rester aligné sur le FolderDef "bfmplay" de LiveTvHubProvider.
+    private val bfmPlayRegex = Regex("^Replay (BFM TV|BFM Business|RMC Story|RMC Découverte|RMC Life|RMC Radio|100% DOCS|100% Crime|Top Mecanic|Exclus BFM Play)(\\s.*)?$", RegexOption.IGNORE_CASE)
 
     private fun filterReplayByFolder(
         allReplays: List<Category>,
@@ -1646,10 +1662,39 @@ object LiveHubFolderDialog {
             show(ctx, "ma_bibliotheque", "Film / série", onChannelSelected)
         })
         com.streamflixreborn.streamflix.utils.VegetaVod.prechauffer()
+        com.streamflixreborn.streamflix.utils.OlaVod.prechauffer()
 
         // 2026-09-19 (user « au pire tu mets ça dans le TV Hub, tout en bas dans Autres
         //   Replays ») : films VF d'OTF, ajoutés EN DERNIER pour être vraiment en bas de la
         //   liste des sous-dossiers.
+        // 2026-09-24 (user « on l'ajoute avec un nouveau dossier dans le TV Hub, dans Autres
+        //   Replays — juste les chaînes françaises ») : chaînes FR de la source World Live
+        //   « IPTV du web » (panel Xtream). Entrée toujours présente, liste chargée au clic ;
+        //   lecture par le chemin World Live (DNS de l'app + relais).
+        folders.add("\uD83D\uDCE1 IPTV du web (FR)" to {
+            android.widget.Toast.makeText(
+                ctx, "Chargement d'IPTV du web\u2026", android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                val cats = try {
+                    com.streamflixreborn.streamflix.providers.WorldLiveTvProvider.categoriesIptvDuWebFr()
+                } catch (e: Throwable) {
+                    android.util.Log.w("LiveHubFolderDialog", "IPTV du web (FR) KO : ${e.message}")
+                    emptyList()
+                }
+                withContext(Dispatchers.Main) {
+                    if (cats.isEmpty()) {
+                        android.widget.Toast.makeText(
+                            ctx, "IPTV du web ne répond pas pour l'instant",
+                            android.widget.Toast.LENGTH_SHORT,
+                        ).show()
+                    } else {
+                        displayCategories(ctx, "IPTV du web (FR)", cats, onChannelSelected)
+                    }
+                }
+            }
+        })
+
         if (otfFilmCategories.isNotEmpty()) folders.add("🎬 OTF Films (VF)" to {
             displayCategories(ctx, "OTF Films (VF)", otfFilmCategories, onChannelSelected) })
 

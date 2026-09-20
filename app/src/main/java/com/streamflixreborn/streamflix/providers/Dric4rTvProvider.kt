@@ -255,7 +255,7 @@ object Dric4rTvProvider {
         try {
             // 1) Récupère la playlist principale (1.json)
             val playlistJson = httpFetch(PLAYLIST_URL) ?: return@withContext
-            val obj = JSONObject(playlistJson.trim())
+            val obj = JSONObject(com.streamflixreborn.streamflix.utils.DricJson.repare(playlistJson).trim())
             val groups = obj.optJSONArray("groups") ?: return@withContext
 
             // 2) Filter les catégories LIVE et lance les fetchs en parallèle
@@ -343,7 +343,7 @@ object Dric4rTvProvider {
     private fun fetchCategoryChannels(catName: String, catUrl: String): List<DricChannel> {
         return try {
             val body = httpFetch(catUrl) ?: return emptyList()
-            val obj = JSONObject(body.trim())
+            val obj = JSONObject(com.streamflixreborn.streamflix.utils.DricJson.repare(body).trim())
 
             val stationsArr = obj.optJSONArray("stations")
             if (stationsArr != null) {

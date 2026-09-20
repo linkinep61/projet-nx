@@ -68,6 +68,7 @@ class SearchMobileFragment : Fragment() {
         binding.btnBack.setOnClickListener { androidx.navigation.Navigation.findNavController(it).navigateUp() }
 
         initializeSearch()
+        installerMiniLecteur()
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
@@ -135,6 +136,174 @@ class SearchMobileFragment : Fragment() {
         super.onConfigurationChanged(newConfig)
         val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
         (binding.rvSearch.layoutManager as? GridLayoutManager)?.spanCount = spanCount
+    }
+
+    /**
+     * 2026-09-22 (demande user : « au niveau de la recherche pour les lives, faire
+     * apparaitre le mini lecteur aussi, pour voir le contenu qui fonctionne direct ;
+     * mais pas sur les VOD »).
+     *
+     * La barre du mini-lecteur n'existait que dans quatre ecrans (accueil et chaines,
+     * mobile et TV) : depuis la recherche, cliquer une chaine partait donc directement en
+     * plein ecran, sans pouvoir enchainer les essais. On pose ici exactement la meme
+     * mecanique que `TvShowsMobileFragment`.
+     *
+     * ⚠ Rien a ajouter pour exclure les VOD : l'intercepteur n'est consulte que depuis
+     *   `TvShowViewHolder.handleDirectPlay`, lui-meme garde par `isIptvProvider()`, qui
+     *   teste l'IDENTIFIANT de l'element (`ola::`, `vegeta::`, `livehub::`…) et exclut
+     *   deja les films et les programmes de replay. Un resultat film ou serie ne passe
+     *   jamais par ce chemin.
+     */
+    private fun installerMiniLecteur() {
+        // Meme garde que les autres ecrans : provider IPTV et reglage actif, sinon rien.
+        val estIptv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+            com.streamflixreborn.streamflix.providers.IptvProvider
+        if (!estIptv || !com.streamflixreborn.streamflix.utils.UserPreferences.miniPlayerEnabled) {
+            binding.miniPlayerContainer.visibility = View.GONE
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.onIptvChannelClick = null
+            return
+        }
+
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.initPlayer(requireContext())
+        binding.miniPlayerView.player = com.streamflixreborn.streamflix.utils.MiniPlayerController.getPlayer()
+
+        // Une chaine tournait deja (on revient d'un autre ecran) : on la reprend telle quelle.
+        if (com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId != null) {
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+            binding.miniPlayerChannelName.text = com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelName ?: ""
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelPoster?.let { poster ->
+                com.bumptech.glide.Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
+            }
+        }
+
+        // C'est CET observateur qui fait descendre la grille : le conteneur passe de GONE a
+        //   VISIBLE, et `TransitionManager` anime le glissement. Sans lui, le flux jouait
+        //   mais l'image restait derriere les resultats.
+        viewLifecycleOwner.lifecycleScope.launch {
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { etat ->
+                val etaitVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
+                fun animer() {
+                    androidx.transition.TransitionManager.beginDelayedTransition(
+                        binding.root as ViewGroup,
+                        androidx.transition.AutoTransition().apply { duration = 300 }
+                    )
+                }
+                when (etat) {
+                    is com.streamflixreborn.streamflix.utils.MiniPlayerController.State.Idle -> {
+                        if (etaitVisible) animer()
+                        binding.miniPlayerContainer.visibility = View.GONE
+                    }
+                    is com.streamflixreborn.streamflix.utils.MiniPlayerController.State.Loading -> {
+                        if (!etaitVisible) animer()
+                        // 2026-09-22 : un ExoPlayer ne dessine que sur UNE surface a la fois,
+                        //   celle de la derniere PlayerView a laquelle il a ete rattache. Le
+                        //   mini-lecteur ayant demarre depuis un autre onglet, l'image restait
+                        //   sur la vue de CET onglet et la notre restait noire, alors que le son
+                        //   sortait (mesure : « DIAG decodeur mini: rendu=0 saute=365 »).
+                        //   Le detacher puis le rattacher RAMENE la surface ici. Sans condition :
+                        //   l'objet lecteur est le meme, c'est sa surface qui doit changer de vue.
+                        binding.miniPlayerView.player = null
+                        binding.miniPlayerView.player = com.streamflixreborn.streamflix.utils.MiniPlayerController.getPlayer()
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+                        binding.miniPlayerChannelName.text = etat.channelName
+                        binding.miniPlayerLoading.visibility = View.VISIBLE
+                    }
+                    is com.streamflixreborn.streamflix.utils.MiniPlayerController.State.Playing -> {
+                        if (!etaitVisible) animer()
+                        // 2026-09-22 : un ExoPlayer ne dessine que sur UNE surface a la fois,
+                        //   celle de la derniere PlayerView a laquelle il a ete rattache. Le
+                        //   mini-lecteur ayant demarre depuis un autre onglet, l'image restait
+                        //   sur la vue de CET onglet et la notre restait noire, alors que le son
+                        //   sortait (mesure : « DIAG decodeur mini: rendu=0 saute=365 »).
+                        //   Le detacher puis le rattacher RAMENE la surface ici. Sans condition :
+                        //   l'objet lecteur est le meme, c'est sa surface qui doit changer de vue.
+                        binding.miniPlayerView.player = null
+                        binding.miniPlayerView.player = com.streamflixreborn.streamflix.utils.MiniPlayerController.getPlayer()
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+                        binding.miniPlayerChannelName.text = etat.channelName
+                        binding.miniPlayerLoading.visibility = View.GONE
+                        etat.channelPoster?.let { poster ->
+                            com.bumptech.glide.Glide.with(this@SearchMobileFragment)
+                                .load(poster).into(binding.miniPlayerChannelLogo)
+                        }
+                    }
+                    is com.streamflixreborn.streamflix.utils.MiniPlayerController.State.Error -> {
+                        binding.miniPlayerLoading.visibility = View.GONE
+                        android.util.Log.e("SearchMobile", "mini lecteur : ${etat.message}")
+                        Toast.makeText(
+                            requireContext(),
+                            "Stream indisponible \u2014 essaie une autre chaine",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+        }
+
+        binding.miniPlayerClose.setOnClickListener { com.streamflixreborn.streamflix.utils.MiniPlayerController.stop() }
+        binding.miniPlayerPause.setOnClickListener { com.streamflixreborn.streamflix.utils.MiniPlayerController.togglePause() }
+        binding.miniPlayerFullscreen.setOnClickListener { allerAuGrandLecteur() }
+
+        com.streamflixreborn.streamflix.utils.MiniPlayerBarre.installer(
+            zoneVideo = binding.miniPlayerView,
+            barre = binding.miniPlayerOverlay,
+            boutonPrecedent = binding.miniPlayerPrev,
+            boutonSuivant = binding.miniPlayerNext,
+            progression = binding.miniPlayerSeek,
+            surPleinEcran = { allerAuGrandLecteur() },
+            proprietaire = viewLifecycleOwner,
+            retour = requireActivity().onBackPressedDispatcher,
+        )
+
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.onIptvChannelClick = { tvShow ->
+            if (tvShow.id == com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId) {
+                // Meme chaine re-cliquee : on passe la main au plein ecran.
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.transitioningToFullscreen = true
+                if (_binding != null) { binding.miniPlayerView.player = null }
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.stopAsync()
+                false
+            } else {
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.playChannel(
+                    tvShow.id, tvShow.title, tvShow.poster
+                )
+                true
+            }
+        }
+    }
+
+    /** Bascule du mini-lecteur vers le grand lecteur (action globale du graphe). */
+    private fun allerAuGrandLecteur() {
+        com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.dismissAllPublic()
+        val mpc = com.streamflixreborn.streamflix.utils.MiniPlayerController
+        val channelId = mpc.currentChannelId ?: return
+        val channelName = mpc.currentChannelName ?: channelId
+        val channelPoster = mpc.currentChannelPoster
+
+        mpc.releasePlayerKeepState()
+
+        val videoType = com.streamflixreborn.streamflix.models.Video.Type.Episode(
+            id = channelId, number = 1, title = channelName, poster = channelPoster,
+            overview = null,
+            tvShow = com.streamflixreborn.streamflix.models.Video.Type.Episode.TvShow(
+                id = channelId, title = channelName, poster = channelPoster,
+                banner = null, releaseDate = null, imdbId = null
+            ),
+            season = com.streamflixreborn.streamflix.models.Video.Type.Episode.Season(
+                number = 1, title = "Live"
+            ),
+        )
+        val args = Bundle().apply {
+            putString("id", channelId)
+            putString("title", channelName)
+            putString("subtitle", channelName)
+            putSerializable("videoType", videoType)
+        }
+        try {
+            androidx.navigation.fragment.NavHostFragment.findNavController(this)
+                .navigate(R.id.action_global_player, args)
+        } catch (e: Exception) {
+            android.util.Log.e("SearchMobile", "plein ecran impossible: ${e.message}", e)
+        }
     }
 
     override fun onDestroyView() {

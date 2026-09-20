@@ -88,8 +88,12 @@ class ProvidersTvFragment : Fragment() {
 
         initializeProviders()
 
-        // Downloads disabled on TV — not enough storage on these devices
-        binding.btnProvidersDownloads.visibility = View.GONE
+        // 2026-09-26 (user) : l'ancien bouton Téléchargements (masqué sur TV) devient la loupe
+        //   de la nouvelle recherche Films / Séries / Live (cf. RechercheUnifiee).
+        binding.btnProvidersDownloads.visibility = View.VISIBLE
+        binding.btnProvidersDownloads.setOnClickListener {
+            com.streamflixreborn.streamflix.utils.RechercheUnifiee.show(this)
+        }
 
         // 2026-05-08 : raccourci Paramètres depuis le Home Fournisseur (TV).
         // Focusable D-pad (bg_tv_button_focus appliqué dans le XML).

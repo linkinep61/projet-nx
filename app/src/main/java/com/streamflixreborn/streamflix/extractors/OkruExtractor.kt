@@ -18,6 +18,31 @@ class OkruExtractor : Extractor() {
             ?.attr("data-options")
             ?: throw Exception("No se encontró 'data-options' en la página de Ok.ru")
 
+        // 2026-09-23 : DIRECTS ok.ru (demande testeur : TMF RUS pour le dossier Musique,
+        //   https://ok.ru/videoembed/6195706404393). Sur un direct, `metadata.videos` est
+        //   VIDE (mesuré : videos=[], isLive=true) — l'ancien parsing ne trouvait donc rien
+        //   et levait « No se encontraron videos ». Le flux est dans `hlsMasterPlaylistUrl`
+        //   (master HLS, 5 qualités, 200 mesuré). Ce lien est signé avec l'IP du client et
+        //   une date d'expiration : il DOIT être relu à chaque lecture, jamais figé dans un m3u.
+        //   Les vidéos classiques n'ont pas ce champ → comportement d'avant inchangé.
+        val estDirect = Regex("""isLive\\*"\s*:\s*true""").containsMatchIn(videoString)
+        val liveHls = if (!estDirect) null else Regex("""hlsMasterPlaylistUrl\\*"\s*:\s*\\*"(https?:.*?)\\*"""")
+            .find(videoString)?.groupValues?.get(1)
+            ?.replace("\\\\u0026", "&")
+            ?.replace("\\u0026", "&")
+            ?.replace("\\/", "/")
+            ?.replace("\\", "")
+        if (liveHls != null && liveHls.startsWith("https://")) {
+            return Video(
+                source = liveHls,
+                type = "application/vnd.apple.mpegurl",
+                headers = mapOf(
+                    "Referer" to "$mainUrl/",
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+                )
+            )
+        }
+
         val arrayData = videoString.substringAfterLast("\\\"videos\\\":[{\\\"name\\\":\\\"").substringBefore("]")
         val videos = arrayData.split("{\\\"name\\\":\\\"").reversed().mapNotNull {
             val videoUrl = it.substringAfter("url\\\":\\\"").substringBefore("\\\"").replace("\\\\u0026", "&")

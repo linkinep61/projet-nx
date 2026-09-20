@@ -137,6 +137,8 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .callTimeout(45, TimeUnit.SECONDS)
+            // 2026-09-24 : DNS de l'app (DoH) — certains FAI bloquent des sources IPTV par DNS.
+            .dns(com.streamflixreborn.streamflix.utils.DnsResolver.doh)
             .build()
     }
 
@@ -149,10 +151,19 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             .readTimeout(90, TimeUnit.SECONDS)
             .callTimeout(120, TimeUnit.SECONDS)
             .writeTimeout(90, TimeUnit.SECONDS)
+            // 2026-09-24 (user « IPTV du web ne charge pas chez moi ») : panels Xtream
+            //   bloqués par DNS chez certains FAI (ultimateiptv.me → fausse adresse).
+            .dns(com.streamflixreborn.streamflix.utils.DnsResolver.doh)
             .build()
     }
 
     // ───────── Models ─────────
+
+    /** 2026-09-24 (user « la source Dric4rTV ne marche pas dans World Live ») : depuis
+     *  sa MAJ du 22/09, Dric4rTV écrit les chaînes DIRECTEMENT dans chaque bouquet
+     *  (`{name, stations:[…]}`) au lieu d'un lien `url` vers un fichier séparé. Ces
+     *  bouquets reçoivent une adresse interne `inline://…` et leur contenu est gardé ici. */
+    private val groupesInline = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     data class WlGroup(
         val name: String,
@@ -586,7 +597,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                     if (out.isNotEmpty()) return out
                 } catch (_: Throwable) { /* fall through */ }
             }
-            val obj = try { JSONObject(trimmed) } catch (e: Throwable) {
+            val obj = try { JSONObject(com.streamflixreborn.streamflix.utils.DricJson.repare(trimmed)) } catch (e: Throwable) {
                 Log.w(TAG, "fetchTopLevel: body not JSON nor M3U, first 200 chars: ${trimmed.take(200)}")
                 return emptyList()
             }
@@ -599,8 +610,13 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 val out = ArrayList<WlGroup>(arr.length())
                 for (i in 0 until arr.length()) {
                     val g = arr.optJSONObject(i) ?: continue
-                    val url = g.optString("url").trim()
-                    if (url.isBlank()) continue
+                    var url = g.optString("url").trim()
+                    if (url.isBlank()) {
+                        // Bouquet sans lien mais avec ses chaînes écrites dedans (Dric4rTV 09/2026)
+                        if (g.optJSONArray("stations") == null && g.optJSONArray("groups") == null) continue
+                        url = "inline://$i/" + g.optString("name").trim()
+                        groupesInline[url] = g.toString()
+                    }
                     out.add(
                         WlGroup(
                             name = g.optString("name").trim(),
@@ -628,6 +644,12 @@ object WorldLiveTvProvider : Provider, IptvProvider {
      *   https://stream.url/playlist.m3u8
      */
     private fun fetchM3uChannels(g: WlGroup, depth: Int = 0): List<WlChannel> {
+        // 2026-09-24 : bouquet « inline » (chaînes écrites dans la liste principale).
+        if (g.url.startsWith("inline://")) {
+            val corps = groupesInline[g.url] ?: run { fetchTopLevel(); groupesInline[g.url] }
+                ?: return emptyList()
+            return parseNestedJsonChannels(corps, g, depth)
+        }
         // 2026-06-14 : si URL = Xtream Codes panel
         //   (host:port/get.php?username=X&password=Y), on bascule sur le
         //   parser dédié (= player_api.php), qui donne les catégories
@@ -1107,7 +1129,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         val seen = HashSet<String>()
         val groupSlug = slugify(g.name)
         try {
-            val root = JSONObject(body)
+            val root = JSONObject(com.streamflixreborn.streamflix.utils.DricJson.repare(body))
             // 2026-06-10 (user "Dric4rTV n'affiche que 3 catégories sur 9") :
             //   format Dric4rTV `{stations:[...]}` direct top-level (sans
             //   wrapper groups). On parse stations comme si c'était dans
@@ -1688,10 +1710,22 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         //   modestes). On affiche juste une vingtaine de jaquettes ; l'utilisateur tape
         //   pour trouver ce qu'il veut (le filtre ci-dessous couvre TOUT le registre).
         if (q.isBlank()) return channelRegistry.take(20).map { channelToTvShow(it) }
-        return channelRegistry
+        val exacts = channelRegistry
             .asSequence()
             .filter { it.name.lowercase().contains(q) }
             .take(300)  // borne les résultats de frappe (évite de mapper 10k+ matches)
+            .map { channelToTvShow(it) }
+            .toList()
+        if (exacts.isNotEmpty()) return exacts
+        // 2026-09-22 : passage exact d'abord (inchange, donc aucun cout en usage normal).
+        //   Ce n'est QUE s'il ne rend rien qu'on retente en tolerant accents et fautes de
+        //   frappe : « amelie » trouve « Amelie », « bien sport » trouve « beIN Sports ».
+        //   Registre enorme ici (des dizaines de milliers de chaines) : le second passage
+        //   ne tourne donc que lorsque la recherche exacte est bredouille.
+        return channelRegistry
+            .asSequence()
+            .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(it.name, query) }
+            .take(300)
             .map { channelToTvShow(it) }
             .toList()
     }
@@ -2024,6 +2058,63 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         )
     }
 
+    // ──────── 2026-09-24 : « IPTV du web (FR) » dans TV Hub → Autres Replays ────────
+    // User : « on l'ajoute avec un nouveau dossier dans le TV Hub, dans Autres Replays —
+    //   juste les chaînes françaises ». On réutilise le parseur Xtream de World Live (liste
+    //   via player_api, DoH) et on ne garde que les catégories / chaînes françaises.
+    //   Les TvShow portent l'id `livehub::worldlivetv::<id>` → lecture par le chemin World
+    //   Live (getServers/getVideo), que channelById sait retrouver via [iptvWebFr].
+    @Volatile private var iptvWebFr: List<WlChannel> = emptyList()
+    @Volatile private var iptvWebFrTs = 0L
+    private const val IPTV_WEB_FR_TTL_MS = 6 * 60 * 60 * 1000L
+    private val MARQUEUR_FR = Regex("""(^|[^A-Z])(FR|FRANCE|FRENCH|FRANÇAIS|FRANCAIS)([^A-Z]|$)""")
+
+    private fun estChaineFr(categorie: String, nom: String): Boolean {
+        val c = categorie.uppercase()
+        val n = nom.trim().uppercase()
+        return MARQUEUR_FR.containsMatchIn(c) ||
+            n.startsWith("|FR|") || n.startsWith("FR:") || n.startsWith("FR |") ||
+            n.startsWith("FR-") || n.startsWith("[FR]")
+    }
+
+    /** 2026-09-24 (user « dans IPTV du web il y a un truc qui affiche trois mails et un
+     *  Telegram, je ferais disparaître ça ») : les panels glissent des fausses « chaînes »
+     *  publicitaires (adresses mail, Telegram, WhatsApp, lignes de séparation ####).
+     *  On les écarte du dossier. */
+    private val PUB_CONTACT = Regex("""@|t\.me/|telegram|whatsapp|wa\.me|contact|---|===|\|\||^[\s#=*_\-|.~]+$""", RegexOption.IGNORE_CASE)
+    private fun estPubContact(texte: String): Boolean = PUB_CONTACT.containsMatchIn(texte.trim())
+
+    suspend fun categoriesIptvDuWebFr(): List<Category> = withContext(Dispatchers.IO) {
+        val url = WorldLiveSourcesStore.BUILTIN_SOURCES
+            .firstOrNull { it.name == "IPTV du web" }?.url ?: return@withContext emptyList()
+        val maintenant = System.currentTimeMillis()
+        if (iptvWebFr.isEmpty() || maintenant - iptvWebFrTs > IPTV_WEB_FR_TTL_MS) {
+            val tout = try {
+                fetchXtreamChannels(WlGroup(name = "IPTV du web", image = null, url = url))
+            } catch (t: Throwable) {
+                Log.w(TAG, "IPTV du web (FR) : chargement KO (${t.message})")
+                emptyList()
+            }
+            val fr = tout.filter {
+                estChaineFr(it.groupName, it.name) && !estPubContact(it.name) && !estPubContact(it.groupName)
+            }
+            Log.d(TAG, "IPTV du web (FR) : ${fr.size} chaînes FR sur ${tout.size}")
+            if (fr.isNotEmpty()) { iptvWebFr = fr; iptvWebFrTs = maintenant }
+        }
+        iptvWebFr.groupBy { it.groupName }.map { (cat, liste) ->
+            Category(
+                name = cat,
+                list = liste.map { ch ->
+                    TvShow(id = "livehub::worldlivetv::${ch.id}", title = ch.name).apply {
+                        providerName = "TV Hub"
+                        poster = ch.logo
+                        banner = ch.logo
+                    }
+                },
+            )
+        }
+    }
+
     private fun channelById(id: String): WlChannel? {
         // 2026-06-10 (user "20 Min TV marche sur Wiseplay pas chez nous") :
         //   les chaînes dans les sub-bouquets sont stockées dans folderContents
@@ -2032,6 +2123,8 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         for (items in folderContents.values) {
             items.firstOrNull { it.id == id }?.let { return it }
         }
+        // 2026-09-24 : chaînes du dossier TV Hub « IPTV du web (FR) ».
+        iptvWebFr.firstOrNull { it.id == id }?.let { return it }
         // ⚠ 2026-08-09 (user : « une fois les chaînes en favoris, on dirait qu'elles
         //   retrouvent pas le chemin ») — RATTRAPAGE D'IDENTIFIANT PÉRIMÉ.
         //   L'id d'une chaîne contient le slug de sa SOURCE : `wltv::<source>::<chaîne>`.

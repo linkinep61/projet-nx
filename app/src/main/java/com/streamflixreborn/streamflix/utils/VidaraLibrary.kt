@@ -384,7 +384,7 @@ object VidaraLibrary {
     //  gouvernée par VIDARA_API_KEY). Caches distincts. Ici : zéro clé, un GET.
 
     private const val INDEX_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/vidara.json"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/vidara.json"
     /** L'index est régénéré une fois par jour : inutile de le retélécharger souvent. */
     private const val TTL_NAV_MS = 6 * 60 * 60 * 1000L
     /** Séparateur de chemin, aligné sur VoeLibrary pour que enfantsDe marche pareil. */

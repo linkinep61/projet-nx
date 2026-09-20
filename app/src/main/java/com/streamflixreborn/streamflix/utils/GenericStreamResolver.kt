@@ -43,6 +43,10 @@ object GenericStreamResolver {
             .connectTimeout(6, TimeUnit.SECONDS)
             .readTimeout(8, TimeUnit.SECONDS)
             .callTimeout(30, TimeUnit.SECONDS)
+            // 2026-09-24 (user « IPTV du web ne marche pas chez moi, mais chez d'autres ») :
+            //   certains FAI français bloquent des serveurs IPTV par DNS (fausse adresse →
+            //   page offrelegalesports.fr). Notre DoH renvoie la vraie adresse.
+            .dns(DnsResolver.doh)
             .build()
     }
 

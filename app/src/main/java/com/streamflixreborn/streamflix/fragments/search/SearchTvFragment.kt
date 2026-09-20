@@ -91,6 +91,7 @@ class SearchTvFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         initializeSearch()
+        installerMiniLecteur()
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
@@ -151,6 +152,121 @@ class SearchTvFragment : Fragment() {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * 2026-09-22 (demande user : « au niveau de la recherche pour les lives, faire
+     * apparaitre le mini lecteur aussi ; mais pas sur les VOD »). Pendant TV.
+     *
+     * Sur TV, l'encart est FLOTTANT en haut a droite (comme dans l'onglet des chaines) :
+     * il ne pousse pas la grille et ne prend pas le focus, donc la navigation a la
+     * telecommande n'est pas modifiee.
+     *
+     * ⚠ Aucune garde a ajouter pour exclure les VOD : l'intercepteur n'est consulte que
+     *   depuis `TvShowViewHolder.handleDirectPlay`, garde par `isIptvProvider()` qui teste
+     *   l'IDENTIFIANT de l'element et exclut deja films et programmes de replay.
+     */
+    private fun installerMiniLecteur() {
+        val estIptv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+            com.streamflixreborn.streamflix.providers.IptvProvider
+        if (!estIptv || !com.streamflixreborn.streamflix.utils.UserPreferences.miniPlayerEnabled) {
+            binding.miniPlayerContainer.visibility = View.GONE
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.onIptvChannelClick = null
+            return
+        }
+
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.initPlayer(requireContext())
+        binding.miniPlayerView.player = com.streamflixreborn.streamflix.utils.MiniPlayerController.getPlayer()
+
+        if (com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId != null) {
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+            binding.miniPlayerChannelName.text = com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelName ?: ""
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelPoster?.let { poster ->
+                com.bumptech.glide.Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
+            }
+        }
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { etat ->
+                val etaitVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
+                fun animer() {
+                    androidx.transition.TransitionManager.beginDelayedTransition(
+                        binding.root as ViewGroup,
+                        androidx.transition.AutoTransition().apply { duration = 300 }
+                    )
+                }
+                when (etat) {
+                    is com.streamflixreborn.streamflix.utils.MiniPlayerController.State.Idle -> {
+                        if (etaitVisible) animer()
+                        binding.miniPlayerContainer.visibility = View.GONE
+                        binding.miniPlayerOverlay.visibility = View.GONE
+                    }
+                    is com.streamflixreborn.streamflix.utils.MiniPlayerController.State.Loading -> {
+                        if (!etaitVisible) animer()
+                        // 2026-09-22 : sur TV, `MiniPlayerBarre` n'affiche la rangee de
+                        //   commandes qu'apres un appui sur la video — geste qui n'existe pas
+                        //   a la telecommande. On la montre donc des que le lecteur tourne.
+                        binding.miniPlayerOverlay.visibility = View.VISIBLE
+                        // 2026-09-22 : un ExoPlayer ne dessine que sur UNE surface a la fois,
+                        //   celle de la derniere PlayerView a laquelle il a ete rattache. Le
+                        //   mini-lecteur ayant demarre depuis un autre onglet, l'image restait
+                        //   sur la vue de CET onglet et la notre restait noire, alors que le son
+                        //   sortait (mesure : « DIAG decodeur mini: rendu=0 saute=365 »).
+                        //   Le detacher puis le rattacher RAMENE la surface ici. Sans condition :
+                        //   l'objet lecteur est le meme, c'est sa surface qui doit changer de vue.
+                        binding.miniPlayerView.player = null
+                        binding.miniPlayerView.player = com.streamflixreborn.streamflix.utils.MiniPlayerController.getPlayer()
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+                        binding.miniPlayerChannelName.text = etat.channelName
+                        binding.miniPlayerLoading.visibility = View.VISIBLE
+                    }
+                    is com.streamflixreborn.streamflix.utils.MiniPlayerController.State.Playing -> {
+                        if (!etaitVisible) animer()
+                        // 2026-09-22 : sur TV, `MiniPlayerBarre` n'affiche la rangee de
+                        //   commandes qu'apres un appui sur la video — geste qui n'existe pas
+                        //   a la telecommande. On la montre donc des que le lecteur tourne.
+                        binding.miniPlayerOverlay.visibility = View.VISIBLE
+                        // 2026-09-22 : un ExoPlayer ne dessine que sur UNE surface a la fois,
+                        //   celle de la derniere PlayerView a laquelle il a ete rattache. Le
+                        //   mini-lecteur ayant demarre depuis un autre onglet, l'image restait
+                        //   sur la vue de CET onglet et la notre restait noire, alors que le son
+                        //   sortait (mesure : « DIAG decodeur mini: rendu=0 saute=365 »).
+                        //   Le detacher puis le rattacher RAMENE la surface ici. Sans condition :
+                        //   l'objet lecteur est le meme, c'est sa surface qui doit changer de vue.
+                        binding.miniPlayerView.player = null
+                        binding.miniPlayerView.player = com.streamflixreborn.streamflix.utils.MiniPlayerController.getPlayer()
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+                        binding.miniPlayerChannelName.text = etat.channelName
+                        binding.miniPlayerLoading.visibility = View.GONE
+                        etat.channelPoster?.let { poster ->
+                            com.bumptech.glide.Glide.with(this@SearchTvFragment)
+                                .load(poster).into(binding.miniPlayerChannelLogo)
+                        }
+                    }
+                    is com.streamflixreborn.streamflix.utils.MiniPlayerController.State.Error -> {
+                        binding.miniPlayerLoading.visibility = View.GONE
+                        android.util.Log.e("SearchTv", "mini lecteur : ${etat.message}")
+                        Toast.makeText(
+                            requireContext(),
+                            "Stream indisponible \u2014 essaie une autre chaine",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+        }
+
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.onIptvChannelClick = { tvShow ->
+            if (tvShow.id == com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId) {
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.transitioningToFullscreen = true
+                if (_binding != null) { binding.miniPlayerView.player = null }
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.stopAsync()
+                false
+            } else {
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
+                true
             }
         }
     }

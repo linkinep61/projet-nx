@@ -1062,6 +1062,11 @@ object BoxXtemusProvider : Provider, IptvProvider {
             //   proxy fera les calls m3u8/segments. Sans ça SFR rejette la
             //   requête m3u8 si le cookie session manque.
             .cookieJar(com.streamflixreborn.streamflix.utils.LocalHlsProxy.getCookieJar())
+            // 2026-09-24 (user « les chaînes Dric4rTV ne sont pas lues ») : les FAI
+            //   français bloquent ultimateiptv.me par DNS (réponse truquée → page
+            //   offrelegalesports.fr, port 8080 fermé). On résout via notre DoH, qui
+            //   renvoie la vraie adresse ; le serveur redirige ensuite vers une IP.
+            .dns(com.streamflixreborn.streamflix.utils.DnsResolver.doh)
             .build()
 
         // 2026-05-12 : SKIP resolve step si src est déjà un stream URL identifié.
@@ -1090,7 +1095,13 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val resp = resolveClient.newCall(req).execute()
             val finalUrl = resp.request.url.toString()
             val contentType = resp.header("Content-Type", "").orEmpty().lowercase()
-            val body = resp.body?.string() ?: ""
+            // 2026-09-24 (user « IPTV du web ne se lit pas ») : les serveurs Xtream servent
+            //   un flux vidéo CONTINU (video/mp2t) sur /user/pass/id. Lire son corps ne se
+            //   termine jamais → callTimeout 30 s → échec de la résolution. Pour un flux
+            //   binaire on ne lit rien : l'URL finale (après redirection) suffit au lecteur.
+            val fluxBinaire = contentType.startsWith("video/") || contentType.startsWith("audio/") ||
+                contentType.contains("octet-stream")
+            val body = if (fluxBinaire) "" else (resp.body?.string() ?: "")
             resp.close()
             Log.d(TAG, "Resolved $src → $finalUrl (Content-Type=$contentType, body=${body.length} chars)")
 

@@ -88,7 +88,7 @@ class WebViewResolver(private val context: Context) {
     //   throttler l'IP par Cloudflare → tout en 403, jaquettes comprises).
     private val MAX_BYPASS_ATTEMPTS = 1
 
-    suspend fun get(url: String, headers: Map<String, String> = emptyMap(), silent: Boolean = false, contentMarker: String? = null, rscFetchUrl: String? = null, clearanceOnly: Boolean = false, markerTimeoutMs: Long = 12_000L): String = mutex.withLock {
+    suspend fun get(url: String, headers: Map<String, String> = emptyMap(), silent: Boolean = false, contentMarker: String? = null, rscFetchUrl: String? = null, clearanceOnly: Boolean = false, markerTimeoutMs: Long = 12_000L, challengeTimeoutMs: Long = 13_000L): String = mutex.withLock {
         requiredMarker = contentMarker
         this.rscFetchUrl = rscFetchUrl
         this.clearanceOnly = clearanceOnly
@@ -121,7 +121,7 @@ class WebViewResolver(private val context: Context) {
             //   providers (aplouf, Wiflix…) bloqués derrière. On CAPE le challenge silencieux à
             //   13s : s'il ne passe pas, échec rapide → le main thread se libère → les autres
             //   repartent. À chaud (cookie présent) le contenu arrive en <2s, non concerné.
-            result = withTimeoutOrNull(13000) {
+            result = withTimeoutOrNull(challengeTimeoutMs) {
                 suspendCancellableCoroutine { continuation ->
                     mainHandler.post { setupWebView(url, headers, continuation) }
                     continuation.invokeOnCancellation { cleanup() }
@@ -637,7 +637,13 @@ class WebViewResolver(private val context: Context) {
             //   inchangé). markerTimeoutMs plus grand (détail tv) → on étend proportionnellement.
             // 2026-07-07 : cap silencieux à ~43 polls (~13s à 300ms) — cohérent avec le timeout
             //   13s ci-dessus. Ne mouline plus 30-45s sur le main thread pour un CF récalcitrant.
-            val maxPolls = if (silentMode) 43 else 400
+            // 2026-09-25 : cap silencieux = 43 (~13s) par défaut, INCHANGÉ. Mais un appelant
+            //   qui demande explicitement un markerTimeoutMs plus long (ex. BotBlocker Coflix,
+            //   preuve-de-travail JS > 13s) obtient proportionnellement plus de polls. Les
+            //   autres providers (markerTimeoutMs=12000 par défaut) gardent exactement 43.
+            val maxPolls = if (silentMode) {
+                if (markerTimeoutMs > 12_000L) ((markerTimeoutMs / 300L).toInt() + 8) else 43
+            } else 400
             if (pollingCount < maxPolls) {
                 mainHandler.postDelayed({ checkChallengeStatus(view, currentUrl, continuation) }, 300)
             } else {

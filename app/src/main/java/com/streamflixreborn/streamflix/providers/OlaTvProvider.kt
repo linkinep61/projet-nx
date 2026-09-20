@@ -59,7 +59,7 @@ object OlaTvProvider : Provider, IptvProvider {
     //   probe handshake Stalker toutes les 4h). L'app filtre le scan Phase 3 dessus →
     //   on ne teste plus ~1269 cids morts à chaque ouverture, seulement les vivants.
     private const val OLA_LIVE_CIDS_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/olatv/live-cids.json"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/olatv/live-cids.json"
 
     // ───────── HTTP ─────────
 
@@ -255,9 +255,25 @@ object OlaTvProvider : Provider, IptvProvider {
     //   pour ne plus les re-scanner pendant 3 jours. Sur ~60 candidats Phase 3,
     //   typiquement 30-40 sont morts → 30-40 probes économisés = boot ~2x plus
     //   rapide quand on est en fresh scan (= cache 24h expiré OU clearCache).
-    private const val OLA_BANNED_CIDS_FILE = "olatv_banned_cids.json"
-    private const val OLA_BANNED_CIDS_TTL_MS = 3L * 24L * 60L * 60L * 1000L // 3 jours
+    // 2026-09-26 (user : « sur certaines télévisions, les gens sont obligés d'effacer les données
+    //   pour avoir les chaînes » — « fais la meilleure correction pour que ça ne se reproduise pas »).
+    //   CAUSE, trois défauts cumulés de ce ban-set :
+    //   1. une simple ERREUR RÉSEAU bannissait le cid (TV qui démarre avant le Wi-Fi, box lente
+    //      qui dépasse le délai, API OLA qui ne répond pas une fois) → des serveurs sains bannis
+    //      par paquets ;
+    //   2. la date était UNIQUE pour toute la liste et réécrite à chaque ajout → les « 3 jours »
+    //      repartaient de zéro à chaque nouveau ban : la liste n'expirait JAMAIS ;
+    //   3. aucun garde-fou : tout banni = plus aucun serveur FR, jusqu'à « effacer les données ».
+    //   REMÈDE : on ne bannit plus que sur une réponse CLAIRE (cid joint, mais sans aucune chaîne
+    //   FR), chaque cid garde SA date et expire seul au bout de 24 h (l'app tourne de toute façon
+    //   sur les autres serveurs), et si trop peu de serveurs restent éligibles on repart de zéro.
+    //   Nouveau fichier : l'ancien (celui qui bloquait les appareils) est supprimé au 1er lancement.
+    private const val OLA_BANNED_CIDS_FILE = "olatv_banned_cids_v2.json"
+    private const val OLA_BANNED_CIDS_ANCIEN = "olatv_banned_cids.json"
+    private const val OLA_BANNED_CIDS_TTL_MS = 24L * 60L * 60L * 1000L // 24 h, PAR cid
+    private const val OLA_MIN_ELIGIBLES = 15   // en dessous → on oublie les bans et on re-teste tout
     private val olaBannedCids = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val olaBannedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     @Volatile private var bannedCidsLoaded = false
 
     // Cap on the "Autres chaînes" home row to keep the TV RecyclerView responsive
@@ -1648,21 +1664,21 @@ object OlaTvProvider : Provider, IptvProvider {
     private fun loadBannedCids() {
         if (bannedCidsLoaded) return
         try {
+            // Ancien format (date unique qui ne vieillissait jamais) : on le jette.
+            java.io.File(StreamFlixApp.instance.filesDir, OLA_BANNED_CIDS_ANCIEN).let {
+                if (it.exists()) { it.delete(); Log.d(TAG, "Ancien ban-set OLA supprimé") }
+            }
             val f = bannedCidsFile()
             if (!f.exists()) { bannedCidsLoaded = true; return }
-            val obj = JSONObject(f.readText())
-            val ts = obj.optLong("ts", 0)
-            if (System.currentTimeMillis() - ts > OLA_BANNED_CIDS_TTL_MS) {
-                Log.d(TAG, "Banned CIDs cache expired (>3j) — clearing")
-                f.delete()
-                bannedCidsLoaded = true
-                return
+            val obj = JSONObject(f.readText()).optJSONObject("cids") ?: run { bannedCidsLoaded = true; return }
+            val now = System.currentTimeMillis()
+            for (cid in obj.keys()) {
+                val ts = obj.optLong(cid, 0)
+                if (cid.isNotBlank() && now - ts < OLA_BANNED_CIDS_TTL_MS) {
+                    olaBannedCids.add(cid); olaBannedAt[cid] = ts
+                }
             }
-            val arr = obj.optJSONArray("cids") ?: run { bannedCidsLoaded = true; return }
-            for (i in 0 until arr.length()) {
-                arr.optString(i).takeIf { it.isNotBlank() }?.let { olaBannedCids.add(it) }
-            }
-            Log.d(TAG, "Loaded ${olaBannedCids.size} banned CIDs from cache")
+            Log.d(TAG, "Loaded ${olaBannedCids.size} banned CIDs from cache (encore valides)")
         } catch (_: Exception) {}
         bannedCidsLoaded = true
     }
@@ -1670,10 +1686,13 @@ object OlaTvProvider : Provider, IptvProvider {
     private fun saveBannedCids() {
         try {
             val f = bannedCidsFile()
-            val obj = JSONObject().apply {
-                put("ts", System.currentTimeMillis())
-                put("cids", JSONArray(olaBannedCids.toList()))
+            val now = System.currentTimeMillis()
+            val cids = JSONObject()
+            for (cid in olaBannedCids) {
+                val ts = olaBannedAt.getOrPut(cid) { now }
+                if (now - ts < OLA_BANNED_CIDS_TTL_MS) cids.put(cid, ts)
             }
+            val obj = JSONObject().apply { put("cids", cids) }
             f.writeText(obj.toString())
             Log.d(TAG, "Banned CIDs cache saved: ${olaBannedCids.size} cids")
         } catch (e: Exception) {
@@ -1685,7 +1704,9 @@ object OlaTvProvider : Provider, IptvProvider {
     private fun clearBannedCids() {
         try {
             olaBannedCids.clear()
+            olaBannedAt.clear()
             bannedCidsFile().delete()
+            java.io.File(StreamFlixApp.instance.filesDir, OLA_BANNED_CIDS_ANCIEN).delete()
             Log.d(TAG, "Banned CIDs cache cleared (user reset)")
         } catch (_: Throwable) {}
     }
@@ -1801,9 +1822,15 @@ object OlaTvProvider : Provider, IptvProvider {
                         }
                     }.awaitAll()
                 }
-                phase3Done = true
-                Log.d(TAG, "Phase 3 (cached) done in ${System.currentTimeMillis() - t0}ms — ${frCids.size} FR cids active")
-                return@withLock
+                if (frCids.isNotEmpty()) {
+                    phase3Done = true
+                    Log.d(TAG, "Phase 3 (cached) done in ${System.currentTimeMillis() - t0}ms — ${frCids.size} FR cids active")
+                    return@withLock
+                }
+                // 2026-09-26 : aucun cid du cache n'a répondu → le cache est périmé. On le jette et on
+                //   enchaîne sur un scan frais au lieu de rester 24 h sans serveur.
+                Log.w(TAG, "Phase 3 : aucun cid du cache ne répond → cache jeté, scan frais")
+                runCatching { frCidsCacheFile().delete() }
             }
 
             // No cache → fresh scan. 2026-06-15 : skip les CIDs persistés DOWN
@@ -1829,7 +1856,14 @@ object OlaTvProvider : Provider, IptvProvider {
                     .filter { it != primaryCid && it !in olaBannedCids }
                     .shuffled()
             }
-            val firstWave = eligible.take(PHASE3_MAX_CANDIDATES)
+            // 2026-09-26 : garde-fou — si les bans ont vidé la liste, on les oublie et on re-teste tout.
+            val eligibleFinal = if (eligible.size < OLA_MIN_ELIGIBLES && olaBannedCids.isNotEmpty()) {
+                Log.w(TAG, "Phase 3 : seulement ${eligible.size} cids éligibles (${olaBannedCids.size} bannis) → bans oubliés")
+                clearBannedCids()
+                if (usingLive) live.filter { it != primaryCid && it in olaTvServerMap.keys }
+                else olaTvServerMap.keys.filter { it != primaryCid }.shuffled()
+            } else eligible
+            val firstWave = eligibleFinal.take(PHASE3_MAX_CANDIDATES)
             Log.d(TAG, "Phase 3 fresh scan: probing ${firstWave.size} candidate cids " +
                     "(skipped $bannedBefore DOWN, live-cids=${if (live.isEmpty()) "off" else "${live.size} classés"}, éligibles=${eligible.size})…")
 
@@ -1850,10 +1884,9 @@ object OlaTvProvider : Provider, IptvProvider {
                                 newlyBanned.add(cid)
                                 return@async
                             }
-                            val creds = getMacCredentials(cid) ?: run {
-                                newlyBanned.add(cid)
-                                return@async
-                            }
+                            // Pas d'identifiants = l'API OLA n'a pas répondu (souvent passager) :
+                            //   on ne bannit PAS, le cid sera re-testé au prochain lancement.
+                            val creds = getMacCredentials(cid) ?: return@async
                             val n = ingestCidChannels(cid, creds, forceAllGenres = false)
                             if (n > 0) {
                                 foundCids.add(cid)
@@ -1869,8 +1902,8 @@ object OlaTvProvider : Provider, IptvProvider {
                                 newlyBanned.add(cid)
                             }
                         } catch (e: Exception) {
-                            Log.w(TAG, "  Phase 3 cid=$cid failed: ${e.message}")
-                            newlyBanned.add(cid)
+                            // Erreur réseau / délai dépassé : pas une preuve que le serveur est mort.
+                            Log.w(TAG, "  Phase 3 cid=$cid failed (pas banni) : ${e.message}")
                         } finally { sem.release() }
                     }
                 }
@@ -1884,7 +1917,7 @@ object OlaTvProvider : Provider, IptvProvider {
             //   on tente une 2ᵉ vague des 30 cids suivants. Léger d'habitude, résilient les mauvais
             //   jours (sans repasser à 60 systématiques).
             if (foundCids.size <= 1) {
-                val secondWave = eligible.drop(PHASE3_MAX_CANDIDATES).take(PHASE3_MAX_CANDIDATES)
+                val secondWave = eligibleFinal.drop(PHASE3_MAX_CANDIDATES).take(PHASE3_MAX_CANDIDATES)
                 if (secondWave.isNotEmpty()) {
                     Log.d(TAG, "Phase 3 : 1ʳᵉ vague vide (que le primaire) → 2ᵉ vague de ${secondWave.size} cids (secours)")
                     probeBatch(secondWave)
@@ -1897,7 +1930,10 @@ object OlaTvProvider : Provider, IptvProvider {
                 saveBannedCids()
                 Log.d(TAG, "Phase 3: banned ${newlyBanned.size} new DOWN cids (total banned: ${olaBannedCids.size})")
             }
-            saveFrCidsCache(foundCids.toList())
+            // Un scan qui n'a trouvé que le primaire n'est PAS gardé 24 h : le prochain lancement
+            //   re-scannera au lieu de rester bloqué sur ce mauvais résultat.
+            if (foundCids.size > 1) saveFrCidsCache(foundCids.toList())
+            else Log.w(TAG, "Phase 3 : aucun cid supplémentaire trouvé → cache non enregistré")
             phase3Done = true
             Log.d(TAG, "Phase 3 fresh done in ${System.currentTimeMillis() - t0}ms — ${foundCids.size} FR cids active")
         }
@@ -2240,6 +2276,17 @@ object OlaTvProvider : Provider, IptvProvider {
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (page > 1) return emptyList()
+        // ── 2026-09-22 — LA RECHERCHE NE CHARGEAIT PAS LE CATALOGUE ────────────────
+        //   Retours Telegram (Cooper, Dim, Bob) : en recherche globale depuis un autre
+        //   provider IPTV, ce provider ne rend rien ; on ouvre son dossier, on refait la
+        //   MEME recherche en local, et la chaine sort. Relancer une 2e fois « marche »
+        //   parfois — c'est le registre rempli entre-temps.
+        //   Cause : `search` lisait `channelRegistry`, qui n'est peuple QUE si l'utilisateur
+        //   a ouvert le provider. A froid, seules les chaines curees pouvaient sortir.
+        //   Vavoo et World Live appellent deja `ensureRegistry()` en tete de leur `search` ;
+        //   ici l'appel manquait, alors que la fonction existe. Le cache disque repond en
+        //   <100 ms, et un echec est avale : on rend au pire les chaines curees, comme avant.
+        runCatching { ensureRegistry() }
         return try {
             // Curated list first (instantaneous), then any registry channel that matches
             // but isn't already in the curated set — covers chaînes "Autres". Capped at
@@ -2247,7 +2294,7 @@ object OlaTvProvider : Provider, IptvProvider {
             // and ANR the TV RecyclerView on logo loads.
             val curatedKeys = curatedChannels.map { it.key }.toSet()
             val curatedHits = curatedChannels
-                .filter { it.displayName.contains(query, ignoreCase = true) }
+                .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(it.displayName, query) }
                 .map { c ->
                     TvShow(
                         id = "ola::${c.key}",
@@ -2259,7 +2306,7 @@ object OlaTvProvider : Provider, IptvProvider {
             // Snapshot under lock, allocate outside to keep the lock short.
             val registrySnapshot = synchronized(registryLock) {
                 channelRegistry.entries
-                    .filter { (key, info) -> key !in curatedKeys && info.displayName.contains(query, ignoreCase = true) }
+                    .filter { (key, info) -> key !in curatedKeys && com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(info.displayName, query) }
                     .map { (key, info) -> Triple(key, info.displayName, info.logo) }
             }
             val registryHits = registrySnapshot

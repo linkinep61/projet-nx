@@ -23,7 +23,7 @@
         android:background="@drawable/bg_search_edittext"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent">
+        app:layout_constraintTop_toBottomOf="@id/mini_player_container">
 
         <ImageView
             android:id="@+id/ic_search"
@@ -108,6 +108,142 @@
         app:layout_constraintStart_toStartOf="@id/cl_search"
         app:layout_constraintTop_toBottomOf="@id/cl_search" />
 
+    <!-- 2026-09-22 (demande user : « au niveau de la recherche pour les lives, faire
+         apparaitre le mini lecteur aussi, pour voir le contenu qui fonctionne direct ;
+         mais pas sur les VOD ») : meme barre que l'accueil et l'onglet des chaines.
+         Masquee par defaut ; seules les chaines live la font apparaitre — un resultat
+         film ou serie ne passe pas par ce chemin (cf. TvShowViewHolder.isIptvProvider). -->
+    <FrameLayout
+        android:id="@+id/mini_player_container"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        android:background="#FF000000"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <androidx.media3.ui.PlayerView
+            android:id="@+id/mini_player_view"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/mini_player_height_mobile"
+            app:use_controller="false"
+            app:show_buffering="when_playing"
+            app:resize_mode="fit"
+            app:surface_type="texture_view" />
+
+        <!-- Bandeau de commandes — masqué par défaut, cf. MiniPlayerBarre
+             (identique à fragment_home_mobile.xml). -->
+        <LinearLayout
+            android:id="@+id/mini_player_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:background="#B0000000"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="2dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:id="@+id/mini_player_channel_logo"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginEnd="8dp"
+                android:scaleType="fitCenter"
+                tools:ignore="ContentDescription" />
+
+            <TextView
+                android:id="@+id/mini_player_channel_name"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:maxLines="1"
+                android:ellipsize="end" />
+
+            <ProgressBar
+                android:id="@+id/mini_player_loading"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginStart="8dp"
+                android:visibility="gone"
+                android:indeterminateTintMode="src_in"
+                android:indeterminateTint="#FFFFFF" />
+
+            <ImageView
+                android:id="@+id/mini_player_prev"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginStart="4dp"
+                android:padding="4dp"
+                android:src="@android:drawable/ic_media_previous"
+                android:scaleType="fitCenter"
+                android:contentDescription="Précédent"
+                app:tint="#FFFFFF" />
+
+            <ImageView
+                android:id="@+id/mini_player_pause"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginStart="4dp"
+                android:padding="4dp"
+                android:src="@drawable/ic_mini_player_pause"
+                android:scaleType="fitCenter"
+                android:contentDescription="Pause" />
+
+            <ImageView
+                android:id="@+id/mini_player_next"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginStart="4dp"
+                android:padding="4dp"
+                android:src="@android:drawable/ic_media_next"
+                android:scaleType="fitCenter"
+                android:contentDescription="Suivant"
+                app:tint="#FFFFFF" />
+
+            <ImageView
+                android:id="@+id/mini_player_fullscreen"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginStart="4dp"
+                android:padding="4dp"
+                android:src="@drawable/ic_mini_player_fullscreen"
+                android:scaleType="fitCenter"
+                android:contentDescription="Fullscreen" />
+
+            <ImageView
+                android:id="@+id/mini_player_close"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginStart="4dp"
+                android:padding="4dp"
+                android:src="@android:drawable/ic_menu_close_clear_cancel"
+                android:scaleType="fitCenter"
+                android:contentDescription="Close"
+                app:tint="#FFFFFF" />
+        </LinearLayout>
+
+            <SeekBar
+                android:id="@+id/mini_player_seek"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="1000"
+                android:paddingTop="2dp"
+                android:paddingBottom="0dp" />
+        </LinearLayout>
+    </FrameLayout>
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_search"
         android:layout_width="0dp"
@@ -148,7 +284,7 @@
         android:contentDescription="Retour"
         android:elevation="16dp"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/mini_player_container"
         tools:ignore="ContentDescription" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

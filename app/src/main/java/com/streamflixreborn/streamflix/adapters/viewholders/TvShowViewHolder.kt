@@ -623,7 +623,7 @@ class TvShowViewHolder(
         // 2026-09-05 : série Vegeta VOD → fiche synopsis (saisons / épisodes), exactement
         //   comme une série TF1+/M6+ (dialogues fermés, mini-lecteur arrêté). Les FILMS
         //   Vegeta, eux, suivent la voie normale plus bas (mini-lecteur).
-        if (selected.id.startsWith("livehub::vegetavod::serie::")) {
+        if (selected.id.startsWith("livehub::vegetavod::serie::") || selected.id.startsWith("livehub::olavod::serie::")) {
             val currentProvider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
             if (currentProvider?.name != "TV Hub" && currentProvider?.name != "World Live") {
                 com.streamflixreborn.streamflix.providers.Provider.findByName("TV Hub")?.let {

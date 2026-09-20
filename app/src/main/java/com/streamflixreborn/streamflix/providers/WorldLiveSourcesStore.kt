@@ -54,16 +54,16 @@ object WorldLiveSourcesStore {
         //   Codeberg public saturés en permanence). GitHub Actions
         //   ubuntu-latest = beaucoup plus fiable, cron */30 garanti,
         //   refresh autonome. Org name neutre (pas de username perso).
-        Source("mix m3u", "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data.m3u", isBuiltin = true),
+        Source("mix m3u", "https://raw.githubusercontent.com/rikital/onyxia-data/main/data.m3u", isBuiltin = true),
         // 2026-06-17 (Phase 1 port Catchup TV & More Kotlin) : replay France.tv
         //   généré toutes les 6h par scripts/refresh_replays.py. URLs dans le
         //   M3U sont `francetv://<si_id>` — résolues à la lecture par
         //   FrancetvResolver (= k7.ftven.fr + hdfauth.ftven.fr depuis IP user FR).
-        Source("Replay FR", "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-replay.m3u", isBuiltin = true),
+        Source("Replay FR", "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-replay.m3u", isBuiltin = true),
         // 2026-06-24 : chaînes FAST (Samsung TV+, Pluto TV, Plex TV, LG Channels,
         //   Rakuten TV, Sony One). Fichier autonome rafraîchi par refresh_fast.yml
         //   toutes les 6h, indépendant de data.m3u et data-replay.m3u.
-        Source("FAST FR", "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-fast.m3u", isBuiltin = true),
+        Source("FAST FR", "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-fast.m3u", isBuiltin = true),
         // 2026-06-16 (user "ils ont bien un m3u permanent mis tout le temps à jour
         //   pourquoi on n'a pas mis directement ce lien M3U") : ajout source
         //   ParaTV direct = playlist principale du mainteneur Paradise-91 (~850

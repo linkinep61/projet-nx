@@ -22,14 +22,16 @@ object InAppUpdater {
      * supprimé, ou erreur réseau), elle passe à la suivante sans bloquer
      * l'utilisateur.
      *
-     * - Source #0 (primaire) : Xx-nanico-xX/mobile-client-v2 — repo public
-     *   officiel, accédé AVEC le token read-only embarqué dans l'app
-     *   (rate limit 5000 req/h, scope verrouillé sur ce repo).
+     * - 2026-09-20 : MESURÉ — le jeton embarqué dans GitHub.kt était RÉVOQUÉ
+     *   (401 sur /user comme sur le dépôt). La source privée
+     *   Xx-nanico-xX/mobile-client-v2, qui exigeait ce jeton, ne pouvait donc
+     *   plus aboutir : c'est la source PUBLIQUE qui servait déjà réellement
+     *   toutes les mises à jour. Sur décision du user, on ne garde que celle-ci
+     *   et le jeton mort a été retiré de l'app.
      *
-     * - Source #1 (backup) : Logami61/mobile-client-v2-backup — accédé SANS
-     *   token (le token de l'app n'a pas le scope sur ce repo). Pour que ce
-     *   fallback marche en production, ce repo backup doit être PUBLIC
-     *   (il peut rester privé tant que la source #0 fonctionne).
+     * - Source unique : linkinep61/mobile-client-v2-backup — accédée SANS
+     *   authentification. Ce dépôt DOIT rester PUBLIC : s'il passe en privé,
+     *   plus aucune mise à jour n'atteint le parc, et il n'y a plus de repli.
      */
     private data class UpdateSource(
         val owner: String,
@@ -38,7 +40,6 @@ object InAppUpdater {
     )
 
     private val UPDATE_SOURCES = listOf(
-        UpdateSource(owner = "Xx-nanico-xX", repo = "mobile-client-v2", useAuth = true),
         UpdateSource(owner = "linkinep61", repo = "mobile-client-v2-backup", useAuth = false),
     )
 

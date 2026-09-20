@@ -36,7 +36,7 @@ import org.json.JSONObject
 object VegetaVod {
 
     private const val TAG = "VegetaVod"
-    private const val RAW = "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/vegetatv"
+    private const val RAW = "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/vegetatv"
     private const val INDEX_URL = "$RAW/vegeta-vod-fr.json"
     private const val TTL_MS = 6 * 60 * 60 * 1000L
     private const val NB_SHARDS = 64
@@ -44,6 +44,9 @@ object VegetaVod {
     const val PREFIX_SERIE = "livehub::vegetavod::serie::"
     const val PREFIX_SAISON = "livehub::vegetavod::saison::"
     const val PREFIX_SRC = "livehub::vegetavod::src::"
+    // 2026-09-26 : id d'ÉPISODE sans « livehub:: » (sinon le lecteur le traite en direct
+    //   et « épisode suivant » ne marche pas). getServers le ramène vers PREFIX_SRC.
+    const val PREFIX_EP = "vegetavodep::"
     const val PREFIX_DOSSIER = "livehub::folder::vegetavod_"
     const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 

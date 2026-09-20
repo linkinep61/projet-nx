@@ -35,7 +35,7 @@ object TokyVideo {
 
     private const val TAG = "TokyVideo"
     private const val SITE = "https://www.tokyvideo.com"
-    private const val INDEX_URL = "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/tokyvideo/index.json"
+    private const val INDEX_URL = "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/tokyvideo/index.json"
     private const val TTL_MS = 6 * 60 * 60 * 1000L
     const val PREFIX_SRV = "tokyvideo::"
     private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"

@@ -1,10 +1,13 @@
 package com.streamflixreborn.streamflix.providers
 
 import android.util.Log
+import android.webkit.CookieManager
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.TitleNormalizer
 import com.streamflixreborn.streamflix.utils.TmdbUtils
+import com.streamflixreborn.streamflix.utils.WebViewResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -39,8 +42,6 @@ import java.util.Base64
 object CoflixSourceProvider {
 
     private const val TAG = "CoflixSourceProvider"
-    private const val USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     /** Miroirs de repli si l'auto-découverte (CoflixMirrorDiscovery) échoue.
      *  On essaie dans l'ordre jusqu'à un 200.
@@ -77,46 +78,118 @@ object CoflixSourceProvider {
     private const val COOLDOWN_AFTER_429_MS = 30L * 60L * 1000L // 30 min
     @Volatile private var coflixCooldownUntilMs: Long = 0L
 
+    /** 2026-09-25 — UA alignée sur celle du WebView (WebViewResolver.STEALTH_UA).
+     *  BotBlocker (le nouvel anti-bot de coflix.esq/.cloud, distinct de Cloudflare)
+     *  lie le cookie de passage à l'User-Agent qui a résolu le challenge. Le challenge
+     *  n'est franchissable qu'en WebView (JS + preuve de travail), donc OkHttp DOIT
+     *  rejouer avec exactement la même UA que le WebView, sinon le cookie est refusé. */
+    private val stealthUa: String get() = WebViewResolver.STEALTH_UA
+
     /** Headers communs pour les calls Coflix. */
     private fun headers(): Map<String, String> = mapOf(
-        "User-Agent" to USER_AGENT,
+        "User-Agent" to stealthUa,
         "Accept-Language" to "fr-FR,fr;q=0.9",
         "Referer" to "$lastWorkingMirror/",
     )
 
     private val httpClient by lazy { Extractor.sharedClient }
 
-    private suspend fun httpGet(url: String, customReferer: String? = null): String? = withContext(Dispatchers.IO) {
-        try {
+    /** 2026-09-25 — Détecte l'interstitiel BotBlocker (« Checking your browser before
+     *  accessing the site », « Loading… », « Connection ID »). Une réponse vide ou
+     *  minuscule est aussi un challenge (le serveur ne rend rien tant qu'on n'a pas le
+     *  cookie). Sert à décider s'il faut passer par le WebView. */
+    private fun isBotBlockerChallenge(html: String?): Boolean {
+        if (html.isNullOrBlank()) return true
+        val l = html.lowercase()
+        if (l.contains("checking your browser") ||
+            l.contains("botblocker") ||
+            l.contains("just a moment") ||
+            l.contains("please wait while") ||
+            (l.contains("connection id") && html.length < 4000)
+        ) return true
+        // Page-coquille ultra-courte sans contenu réel = challenge JS pas encore résolu.
+        return html.length < 600 && !l.contains("suggest") && !l.contains("[") && !l.contains("{")
+    }
+
+    /** Lecture du cookie posé par le WebView (BotBlocker) pour ce domaine. */
+    private fun cookieFor(url: String): String? =
+        try { CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() } }
+        catch (_: Exception) { null }
+
+    /** Requête OkHttp brute avec l'UA furtive + le cookie CookieManager (s'il existe). */
+    private fun okGet(url: String, customReferer: String?): Pair<String?, Int> {
+        return try {
             val req = Request.Builder()
                 .url(url)
                 .apply {
                     headers().forEach { (k, v) ->
                         // 2026-06-02 : Referer overridable. lecteurvideo.com renvoie 403/520
-                        // (CF bloque) si on envoie le Referer global (lastWorkingMirror) au lieu
-                        // de l'URL de la page Coflix d'origine. Validé par curl : sans Referer
-                        // 403, avec Referer = coflix.cymru/film/X → 200.
+                        // si on envoie le Referer global (lastWorkingMirror) au lieu de
+                        // l'URL de la page Coflix d'origine.
                         if (k == "Referer" && customReferer != null) header(k, customReferer)
                         else header(k, v)
                     }
+                    cookieFor(url)?.let { header("Cookie", it) }
                 }
                 .build()
             httpClient.newCall(req).execute().use { resp ->
+                val code = resp.code
                 if (!resp.isSuccessful) {
-                    Log.d(TAG, "GET $url → HTTP ${resp.code}")
-                    if (resp.code == 429) {
-                        // Coflix CF rate-limit. On gèle tous les appels pour 30 min.
+                    Log.d(TAG, "GET $url → HTTP $code")
+                    if (code == 429) {
                         coflixCooldownUntilMs = System.currentTimeMillis() + COOLDOWN_AFTER_429_MS
                         Log.w(TAG, "Coflix global cooldown 30 min apres HTTP 429")
                     }
-                    return@withContext null
+                    return null to code
                 }
-                resp.body?.string()
+                resp.body?.string() to code
             }
         } catch (e: Exception) {
             Log.d(TAG, "GET $url failed: ${e.message}")
-            null
+            null to -1
         }
+    }
+
+    /** Origine (scheme://host) d'une URL, pour cibler la page d'accueil du bon domaine. */
+    private fun originOf(url: String): String? =
+        try { val u = java.net.URL(url); "${u.protocol}://${u.host}" } catch (_: Exception) { null }
+
+    /** 2026-09-25 — Franchit BotBlocker via le résolveur dédié (WebView ATTACHÉ à la fenêtre, la
+     *  preuve-de-travail JS a besoin d'une surface de rendu). On vise la PAGE D'ACCUEIL du domaine :
+     *  BotBlocker pose un cookie valable pour TOUT le domaine, réutilisé ensuite par OkHttp sur
+     *  l'API comme sur les pages. On ne rejoue le WebView qu'une fois par fenêtre de 5 min (le
+     *  cookie de passage est réutilisable). */
+    @Volatile private var lastBotBlockerPassMs: Long = 0L
+    private suspend fun passBotBlocker(url: String) {
+        val home = (originOf(url) ?: lastWorkingMirror).trimEnd('/') + "/"
+        val ok = try {
+            CoflixBotBlockerResolver.ensurePass(home)
+        } catch (e: Exception) {
+            Log.w(TAG, "BotBlocker: résolveur échec: ${e.message}"); false
+        }
+        if (ok) {
+            lastBotBlockerPassMs = System.currentTimeMillis()
+            Log.d(TAG, "BotBlocker: franchi, cookie=${cookieFor(home) != null}")
+        } else {
+            Log.w(TAG, "BotBlocker: non franchi (timeout résolveur)")
+        }
+    }
+
+    private suspend fun httpGet(url: String, customReferer: String? = null): String? = withContext(Dispatchers.IO) {
+        // 1) OkHttp avec cookie + UA furtive (marche si le cookie BotBlocker est déjà posé).
+        val (html1, _) = okGet(url, customReferer)
+        if (html1 != null && !isBotBlockerChallenge(html1)) return@withContext html1
+
+        // 2) Challenge BotBlocker (ou réponse vide) → on le franchit au WebView attaché (pose le
+        //    cookie de passage, valable pour tout le domaine).
+        passBotBlocker(url)
+
+        // 3) Retry OkHttp : le cookie est maintenant dans CookieManager → l'API JSON
+        //    (suggest.php, wp-json…) comme les pages HTML repassent en HTTP brut.
+        val (html2, _) = okGet(url, customReferer)
+        if (html2 != null && !isBotBlockerChallenge(html2)) return@withContext html2
+
+        html1 ?: html2
     }
 
     /**

@@ -51,7 +51,7 @@ object RadioBrowserClient {
     // rechargeable par cron. Utilisé quand TOUS les miroirs RadioBrowser échouent
     // (DNS bloqué par AdGuard/Fritz!Box sur le réseau du user).
     private const val GITHUB_FALLBACK =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/radio-fr.json"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/radio-fr.json"
 
     /** Fetch les stations FR (cap 2000 par défaut, triées par votes décroissants
      *  = popularité). Safe : retourne emptyList en cas d'échec.

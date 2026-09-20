@@ -9,32 +9,22 @@ import retrofit2.http.Path
 
 object GitHub {
 
-    // 2026-05-03 : remplacement du PAT admin (qui pouvait push/admin sur le repo
-    // = risque distribution de malware via update auto si extrait de l'APK) par
-    // un PAT fine-grained read-only (Contents:Read + Metadata:Read uniquement,
-    // scope = mobile-client-v2 seulement). Si extrait, l'attaquant peut juste
-    // lire le repo, aucun écriture/admin possible.
-    // Ancien token à révoquer côté GitHub après que les users aient updaté.
-    val token: String by lazy {
-        val parts = arrayOf(
-            "github_pat_11BMK",
-            "YM6Q0q1tpN5tn7m1G",
-            "_QD0NmpXJCOaMhffZ",
-            "rgRi7TeuggjQtGQ25",
-            "TQq3EMqgvhB42MDC",
-            "IClSQgtdVn"
-        )
-        parts.joinToString("")
-    }
-
-    private val service = ApiService.build()
+    // 2026-09-20 : le PAT embarqué (découpé en 6 morceaux pour l'obfusquer) a été
+    // RETIRÉ. Mesure faite avant retrait : il répondait 401 sur /user comme sur le
+    // dépôt, il était donc déjà révoqué et l'app n'accédait plus à rien avec.
+    // Le découpage n'obfusquait rien d'utile : le scanner de secrets de GitHub le
+    // détectait quand même, et n'importe qui l'extrayait d'un APK.
+    // NE PAS réintroduire de jeton ici : un secret embarqué dans une app client
+    // n'en est pas un. Si un accès authentifié redevient nécessaire, le faire
+    // passer par le Worker Cloudflare.
+    // Tout passe désormais par le service SANS Authorization (dépôts publics).
+    private val service = ApiService.buildPublic()
 
     /**
-     * 2026-05-03: service "public" sans Authorization header. Sert au fallback
-     * dans InAppUpdater quand le repo principal (Xx-nanico-xX) n'est pas
-     * joignable et qu'on tape un repo backup PUBLIC (ex: Logami61). Le token
-     * read-only de l'app a un scope verrouillé sur mobile-client-v2 et renvoie
-     * 401 sur les autres repos — sans auth on accède à tout repo public.
+     * Service sans Authorization header. Depuis le 2026-09-20 c'est le SEUL
+     * chemin : InAppUpdater n'interroge plus qu'un dépôt public, donc aucune
+     * authentification n'est nécessaire. Identique à `service` ci-dessus ; les
+     * deux noms sont conservés pour ne pas toucher aux appelants existants.
      */
     private val publicService = ApiService.buildPublic()
 
@@ -86,35 +76,13 @@ object GitHub {
     private interface ApiService {
 
         companion object {
-            fun build(): ApiService {
-                val client = OkHttpClient.Builder()
-                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .addInterceptor { chain ->
-                        val request = chain.request().newBuilder()
-                            .addHeader("Authorization", "Bearer $token")
-                            .addHeader("Accept", "application/vnd.github+json")
-                            .build()
-                        chain.proceed(request)
-                    }
-                    .build()
-
-                val retrofit = Retrofit.Builder()
-                    .baseUrl("https://api.github.com/")
-                    .client(client)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .build()
-
-                return retrofit.create(ApiService::class.java)
-            }
+            // 2026-09-20 : build() (variante AVEC header Authorization) RETIRÉE
+            //   en même temps que le jeton. Il ne reste que buildPublic().
 
             /**
-             * Variante SANS Authorization header — utilisée par le fallback de
-             * InAppUpdater pour interroger un repo backup public (Logami61) si
-             * le repo principal (Xx-nanico-xX) est indisponible. Le token de
-             * l'app a un scope verrouillé sur Xx-nanico-xX/mobile-client-v2 et
-             * renverrait 401 sur tout autre repo, même public.
+             * Seule variante restante : aucun header Authorization. Suffit pour
+             * interroger les publications d'un dépôt PUBLIC, ce qui est le cas
+             * de la source de mise à jour depuis le 2026-09-20.
              */
             fun buildPublic(): ApiService {
                 val client = OkHttpClient.Builder()

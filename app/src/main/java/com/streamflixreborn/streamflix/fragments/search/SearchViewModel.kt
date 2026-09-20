@@ -164,17 +164,31 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
         items: List<com.streamflixreborn.streamflix.adapters.AppAdapter.Item>,
         query: String
     ): List<com.streamflixreborn.streamflix.adapters.AppAdapter.Item> {
-        val nq = query.lowercase().replace(Regex("[^a-z0-9]"), "")
+        // 2026-09-22 : la normalisation EFFACAIT les accents au lieu de les deplier
+        //   (`[^a-z0-9]` ne garde pas le « e »), si bien que « Amelie » tape sans accent
+        //   ne correspondait pas a « Amelie » affiche avec. Mesure avant correction :
+        //   "Amelie" -> "amlie", "Les Bronzes" -> "lesbronzs", "Le Pere Noel" -> "leprenol".
+        //   `RechercheFloue.normaliser` deplie les accents (NFD) avant de filtrer.
+        val nq = com.streamflixreborn.streamflix.utils.RechercheFloue.normaliser(query)
         if (nq.length < 2) return items
-        fun norm(it: com.streamflixreborn.streamflix.adapters.AppAdapter.Item): String = (when (it) {
+        fun titre(it: com.streamflixreborn.streamflix.adapters.AppAdapter.Item): String = when (it) {
             is Movie -> it.title
             is TvShow -> it.title
             else -> ""
-        }).lowercase().replace(Regex("[^a-z0-9]"), "")
+        }
+        fun norm(it: com.streamflixreborn.streamflix.adapters.AppAdapter.Item): String =
+            com.streamflixreborn.streamflix.utils.RechercheFloue.normaliser(titre(it))
         val starts = items.filter { norm(it).startsWith(nq) }
         if (starts.isNotEmpty()) return starts
         val contains = items.filter { norm(it).contains(nq) }
-        return if (contains.isNotEmpty()) contains else items
+        if (contains.isNotEmpty()) return contains
+        // Dernier recours AVANT de tout rendre : une correspondance approchee (faute de
+        //   frappe). Mieux vaut trois titres proches que le catalogue entier en vrac.
+        val flous = items.filter {
+            com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(titre(it), query)
+        }
+        if (flous.isNotEmpty()) return flous
+        return items
     }
 
     fun searchGlobal(query: String, currentLanguage: String, group: Provider.Companion.ProviderGroup? = null) = viewModelScope.launch(Dispatchers.IO) {

@@ -1304,10 +1304,42 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
      * qui sera auto-play (trié en premier par orderByFrenchBuckets).
      * Les autres langues restent accessibles en serveurs secondaires.
      */
+    /**
+     * 2026-09-20 — LA PLATEFORME NETFLIX NE PROPOSE PLUS DE SERVEUR.
+     *   (user : « fais en sorte de pas afficher le serveur NetMirror Netflix »)
+     *
+     * POURQUOI. Leur backend a MIGRÉ le stockage de son catalogue Netflix. Avant : des segments
+     * vidéo nus, en accès libre, qu'on devinait à partir de l'adresse du son — c'est ce que fait
+     * reconstructRealFilm, et c'est ce qui marche encore sur Prime Video / Hotstar / Disney+.
+     * Maintenant : un vrai HLS protégé. Mesuré le 2026-09-20 :
+     *     Prime   → manifeste sans jeton : « File Has been Removed. »  (il n'existe pas)
+     *     Netflix → manifeste sans jeton : « Only Valid Users Allowed » (il existe, il est gardé)
+     * et côté Netflix les segments nus rendent un vrai 404. Le son, lui, reste libre chez les deux.
+     * Ça touche TOUT le catalogue Netflix, films compris (vérifié sur l'id 81788481) — ce n'était
+     * donc ni « les séries », ni une panne passagère.
+     *
+     * Le jeton signé qui ouvre ce manifeste n'est délivré qu'à un visiteur porteur des cookies du
+     * site ; un visiteur neuf tombe d'abord sur une vérification anti-robot. L'application démarre
+     * vierge à chaque lecture : elle ne peut pas l'obtenir. Détail complet des mesures et piste
+     * restante (« err: 1003 » sur net52/play.php) dans le CLAUDE.md du projet.
+     *
+     * CE QUE ÇA CHANGE. Plus aucun serveur « NetMirror Netflix » proposé, au lieu d'une source qui
+     * échoue sous les yeux de l'utilisateur. Coupé ICI, en amont : aucun appel réseau inutile non
+     * plus. Prime Video, Hotstar et Disney+ ne sont PAS touchés.
+     * ⚠ Le jour où ils migreront ces trois-là de la même façon, ils tomberont pareil.
+     *
+     * POUR LE RÉACTIVER quand ils rouvrent : passer NETFLIX_HS à false. Rien d'autre.
+     */
+    private const val NETFLIX_HS = true
+
     private suspend fun fetchServersForPlatform(
         platform: OttPlatform,
         ids: NmIds,
     ): List<Video.Server> = withContext(Dispatchers.IO) {
+        if (NETFLIX_HS && platform == OttPlatform.NETFLIX) {
+            Log.d(TAG, "plateforme Netflix masquée (dossier vidéo verrouillé chez eux)")
+            return@withContext emptyList()
+        }
         try {
             // 1) Recherche sur cette plateforme — titre FR d'abord, puis fallback titre original EN
             val cacheKey = normalizeTitle(ids.title) + (ids.year?.let { "_$it" } ?: "")

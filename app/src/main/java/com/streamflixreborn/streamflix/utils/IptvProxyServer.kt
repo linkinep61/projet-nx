@@ -81,6 +81,10 @@ object IptvProxyServer {
             .followRedirects(true)
             .followSslRedirects(true)
             .retryOnConnectionFailure(true)
+            // 2026-09-24 (user « IPTV du web ne se lit pas ») : le relais passait par le
+            //   DNS de la box, qui renvoie une fausse adresse pour certains serveurs IPTV
+            //   (blocage FAI, ex. ultimateiptv.me). On résout via le DoH de l'app.
+            .dns(DnsResolver.doh)
             .build()
     }
 

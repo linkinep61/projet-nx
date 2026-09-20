@@ -138,17 +138,19 @@
         app:layout_constraintTop_toTopOf="@id/btn_global_favorites"
         tools:ignore="UseAppTint" />
 
+    <!-- 2026-09-26 : loupe de la nouvelle recherche (ex-Téléchargements, masqué sur TV),
+         tout à droite ; le cadenas se range juste à sa gauche. -->
     <ImageView
         android:id="@+id/btn_providers_downloads"
         android:layout_width="48dp"
         android:layout_height="48dp"
         android:layout_marginEnd="32dp"
         android:padding="10dp"
-        android:src="@drawable/ic_tv_download"
+        android:src="@drawable/ic_search"
         android:tint="#FFFFFF"
-        android:focusable="false"
-        android:focusableInTouchMode="false"
-        android:visibility="gone"
+        android:focusable="true"
+        android:contentDescription="Rechercher"
+        android:visibility="visible"
         android:background="@drawable/bg_tv_button_focus"
         app:layout_constraintBottom_toBottomOf="@id/btn_providers_settings"
         app:layout_constraintEnd_toEndOf="parent"
@@ -202,7 +204,7 @@
         android:id="@+id/btn_providers_lock"
         android:layout_width="48dp"
         android:layout_height="48dp"
-        android:layout_marginEnd="32dp"
+        android:layout_marginEnd="8dp"
         android:padding="10dp"
         android:src="@drawable/ic_tv_lock"
         android:tint="#FFFFFF"
@@ -211,7 +213,7 @@
         android:contentDescription="Contrôle parental"
         android:background="@drawable/bg_tv_button_focus"
         app:layout_constraintBottom_toBottomOf="@id/btn_providers_settings"
-        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/btn_providers_downloads"
         app:layout_constraintTop_toTopOf="@id/btn_providers_settings"
         tools:ignore="UseAppTint" />
 

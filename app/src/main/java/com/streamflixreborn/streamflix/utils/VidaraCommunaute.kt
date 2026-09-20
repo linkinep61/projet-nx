@@ -53,7 +53,7 @@ object VidaraCommunaute {
     private val RE_PREFIXE_ID = Regex("""^\d{2,8}\s*-\s*""")
     private const val BASE = "https://vidara.to"
     private const val INDEX_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/vidara_amis.json"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/vidara_amis.json"
 
     /** L'index est regenere une fois par jour : inutile de le retelecharger souvent. */
     private const val TTL_MS = 6 * 60 * 60 * 1000L

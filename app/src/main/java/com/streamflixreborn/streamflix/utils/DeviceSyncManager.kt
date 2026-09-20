@@ -51,9 +51,39 @@ object DeviceSyncManager {
      *  ils voyagent dans le payload ordinaire, le code reste à 6 caractères. */
     // 2026-09-20 : « bowd_creds » RETIRÉ de la liste avec le reste de Bowd — on ne
     //   transporte plus le mot de passe d'un service que l'application ne sert plus.
+    // ── 2026-09-22 — LA LISTE ETAIT INCOMPLETE, LES COMPTES NE SUIVAIENT PAS ────────
+    //   Signalement testeur : « la synchronisation permet de transferer les comptes avec un
+    //   seul code qui ne marche plus ». Reproduit Honor -> Oppo : tout passe (Room, IPTV,
+    //   favoris, reglages, World Live) SAUF les comptes, et aucun log « comptes » n'apparait.
+    //
+    //   Cause mesuree : `collectComptes` ne lit que les fichiers listes ici. Or la session
+    //   TF1+ et la session M6 vivent chacune dans DEUX fichiers, et un seul des deux etait
+    //   liste. `collectComptes` renvoie null quand il ne trouve rien -> aucun bloc « comptes »
+    //   dans le payload -> le recepteur n'a rien a appliquer, en silence.
+    //
+    //   Inventaire reel, verifie constante par constante dans le code :
+    //     replay_auth_tf1        TF1Auth          jeton JWT + refresh + exp + account_id
+    //     replay_auth_tf1_creds  TF1GigyaAuth     identifiants Gigya (etait deja la)
+    //     replay_auth_tf1_gigya  TF1GigyaSession  les cookies compte.tf1.fr — INDISPENSABLES
+    //                                             depuis le 18/09 : sans eux la session TF1
+    //                                             est incomplete et le service se deconnecte
+    //     replay_auth_m6         M6Auth           jeton + account_id + signature Gigya
+    //     replay_auth_m6_creds   M6GigyaAuth      identifiants (etait deja la)
+    //     rmcplus_auth           RmcPlusAuth      session RMC+ — BFM y est passe le 05/09
+    //     replay_auth_bfm_creds  BfmSsoAuth       ancien SSO CAS, hors service depuis le 05/09.
+    //                                             Conserve pour qu'un emetteur ancien reste
+    //                                             compris ; ne sert plus a rien de neuf.
+    //
+    //   ⚠ `applyComptes` ignore tout nom absent de cette liste. Les DEUX appareils doivent donc
+    //     tourner sur cette version : une box restee en arriere continuera d'ignorer les comptes
+    //     meme si le telephone les envoie correctement.
     private val FICHIERS_COMPTES = listOf(
+        "replay_auth_tf1",
         "replay_auth_tf1_creds",
+        "replay_auth_tf1_gigya",
+        "replay_auth_m6",
         "replay_auth_m6_creds",
+        "rmcplus_auth",
         "replay_auth_bfm_creds",
     )
 
@@ -446,6 +476,15 @@ object DeviceSyncManager {
         // Comptes : uniquement si l'émetteur en a envoyé.
         payload.optJSONObject("comptes")?.let {
             runCatching { applyComptes(context, it) }
+            // 2026-09-22 : les cookies TF1 fraichement ecrits ne servent a rien tant qu'ils ne
+            //   sont pas reinjectes dans la WebView. Sans cet appel il faut redemarrer l'app
+            //   (c'est `ProviderCacheRefresh` qui le fait au boot) avant que TF1+ fonctionne.
+            //   Garde-fou : tout echec est avale, la synchronisation ne doit jamais echouer
+            //   a cause de ca.
+            runCatching {
+                val n = TF1GigyaSession.restaurer(context)
+                Log.i(TAG, "session TF1 reinjectee : $n cookie(s)")
+            }
         }
 
         // 1. Profils

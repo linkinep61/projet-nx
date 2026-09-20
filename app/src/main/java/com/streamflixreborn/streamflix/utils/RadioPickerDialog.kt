@@ -66,13 +66,20 @@ object RadioPickerDialog {
      * l'étoile de tous les autres. On retombe désormais sur l'identifiant de la ligne, qui est
      * unique (`zfartist::473`, `zfalbum::81491`…). Chaîne vide = ligne non favorisable.
      */
+    // 2026-09-23 : les artistes/albums Monochrome (`mcartist::` / `mcalbum::`) sont des
+    //   « ensembles » au même titre que ceux de Zeffyr : favorisables, sans URL de flux.
+    private fun estEnsembleMusique(id: String): Boolean =
+        id.startsWith("zfartist::") || id.startsWith("zfalbum::") ||
+            id.startsWith(com.streamflixreborn.streamflix.providers.MonochromeMusic.PREFIXE_ARTISTE) ||
+            id.startsWith(com.streamflixreborn.streamflix.providers.MonochromeMusic.PREFIXE_ALBUM)
+
     private fun cleFavori(s: RadioCatalog.RadioStation): String =
         s.streamUrl
-            ?: s.id.takeIf { it.startsWith("zfartist::") || it.startsWith("zfalbum::") }
+            ?: s.id.takeIf { estEnsembleMusique(it) }
             ?: ""
 
     private fun trackToStation(t: MusicFavoritesStore.Track): RadioCatalog.RadioStation {
-        val estEnsemble = t.url.startsWith("zfartist::") || t.url.startsWith("zfalbum::")
+        val estEnsemble = estEnsembleMusique(t.url)
         return RadioCatalog.RadioStation(
             id = if (estEnsemble) t.url else "music::" + t.url,
             name = t.title,
@@ -644,6 +651,31 @@ object RadioPickerDialog {
                 )
             }
 
+            // 2026-09-23 : lignes Monochrome (complément FLAC). Même rendu que Zeffyr
+            //   (🎤 / 💿 + pochette), suffixées « · FLAC » pour distinguer la source.
+            fun mcArtisteEnLigne(a: com.streamflixreborn.streamflix.providers.MonochromeMusic.Artiste) =
+                RadioCatalog.RadioStation(
+                    id = com.streamflixreborn.streamflix.providers.MonochromeMusic.PREFIXE_ARTISTE + a.id,
+                    name = "🎤 ${a.nom}" + com.streamflixreborn.streamflix.providers.MonochromeMusic.MENTION,
+                    poster = a.image,
+                    streamUrl = null,
+                )
+
+            fun mcAlbumEnLigne(alb: com.streamflixreborn.streamflix.providers.MonochromeMusic.Album): RadioCatalog.RadioStation {
+                val genre = when (alb.type?.uppercase()) { "SINGLE" -> "single"; "EP" -> "EP"; else -> null }
+                val detail = listOfNotNull(
+                    alb.artiste.takeIf { it.isNotBlank() },
+                    listOfNotNull(alb.annee, genre).joinToString(", ").takeIf { it.isNotBlank() }?.let { "($it)" },
+                ).joinToString(" ")
+                return RadioCatalog.RadioStation(
+                    id = com.streamflixreborn.streamflix.providers.MonochromeMusic.PREFIXE_ALBUM + alb.id,
+                    name = (if (detail.isBlank()) "💿 ${alb.titre}" else "💿 ${alb.titre} — $detail") +
+                        com.streamflixreborn.streamflix.providers.MonochromeMusic.MENTION,
+                    poster = alb.pochette,
+                    streamUrl = null,
+                )
+            }
+
             fun ligneRetour() = RadioCatalog.RadioStation(
                 id = "zfback::", name = "⬅ Retour", poster = null, streamUrl = null)
 
@@ -684,6 +716,12 @@ object RadioPickerDialog {
                 var lignesArtistes: List<RadioCatalog.RadioStation> = emptyList()
                 var lignesAlbums: List<RadioCatalog.RadioStation> = emptyList()
                 val titresBruts = mutableListOf<FileSearchProvider.AudioResult>()
+                // 2026-09-23 : Monochrome (FLAC) = COMPLÉMENT de Zeffyr (décision user). Ses
+                //   artistes, albums et titres sont gardés à part pour s'afficher APRÈS ceux de
+                //   Zeffyr, quel que soit l'ordre d'arrivée des réponses.
+                var artistesFlac: List<RadioCatalog.RadioStation> = emptyList()
+                var albumsFlac: List<RadioCatalog.RadioStation> = emptyList()
+                var titresFlac: List<FileSearchProvider.AudioResult> = emptyList()
                 var enCours = true
 
                 // ⚠ 2026-08-04 — DEUX GARDE-FOUS AVANT TOUT RAFRAÎCHISSEMENT. Ne pas les retirer.
@@ -696,8 +734,8 @@ object RadioPickerDialog {
                 val gen = ++generationRecherche
                 fun recomposer() {
                     if (gen != generationRecherche || pileMusique.isNotEmpty()) return
-                    val titres = titresBruts.distinctBy { it.url }.take(300).map { audioToStation(it) }
-                    musicResults = lignesArtistes + lignesAlbums + titres
+                    val titres = (titresBruts + titresFlac).distinctBy { it.url }.take(300).map { audioToStation(it) }
+                    musicResults = lignesArtistes + artistesFlac + lignesAlbums + albumsFlac + titres
                     refresh()
                 }
 
@@ -749,6 +787,18 @@ object RadioPickerDialog {
                         try { com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider.searchAlbums(q) }
                         catch (_: Throwable) { emptyList() }
                     }
+                    // 2026-09-23 : 2ᵉ source, Monochrome (FLAC Hi-Res). UNE seule requête rend ses
+                    //   artistes, albums et titres ; lancée en parallèle, elle ne retarde pas Zeffyr.
+                    //   Affichée DÈS qu'elle répond, sans attendre Zeffyr (mesuré : Zeffyr peut
+                    //   dépasser 15 s) ; sa PLACE reste derrière Zeffyr grâce à recomposer().
+                    val flacJob = launch {
+                        val mc = try { com.streamflixreborn.streamflix.providers.MonochromeMusic.rechercher(q) }
+                            catch (_: Throwable) { null } ?: return@launch
+                        artistesFlac = mc.artistes.map { mcArtisteEnLigne(it) }
+                        albumsFlac = mc.albums.map { mcAlbumEnLigne(it) }
+                        titresFlac = mc.titres
+                        recomposer()
+                    }
                     lignesArtistes = artistesD.await().map { art ->
                         RadioCatalog.RadioStation(
                             id = "zfartist::${art.id}",
@@ -799,7 +849,10 @@ object RadioPickerDialog {
                     //   Décision user : on ne l'interroge QUE si les deux autres n'ont RIEN
                     //   rendu. Un seuil intermédiaire avait été envisagé puis écarté — autant
                     //   ne payer sa lenteur que lorsqu'il n'y a rien d'autre à montrer.
-                    if (titresBruts.isEmpty()) {
+                    // 2026-09-23 : les titres Monochrome comptent aussi — NewPipe ne part que si
+                    //   AUCUNE des deux sources (Zeffyr, Monochrome) n'a rien rendu.
+                    flacJob.join()   // Monochrome doit avoir répondu avant de décider pour NewPipe
+                    if (titresBruts.isEmpty() && titresFlac.isEmpty()) {
                         val yt = try {
                             com.streamflixreborn.streamflix.providers.NewPipeAudio.search(q)
                         } catch (_: Throwable) { emptyList() }
@@ -1191,6 +1244,53 @@ object RadioPickerDialog {
                                     Toast.makeText(
                                         ctx,
                                         "${pistes.size} titres — ▶ Tout lire pour l'album entier",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                            }
+                            return@setOnItemClickListener
+                        }
+                        // ── 2026-09-23 : mêmes niveaux pour Monochrome (artiste → albums → pistes) ──
+                        if (r.id.startsWith(com.streamflixreborn.streamflix.providers.MonochromeMusic.PREFIXE_ARTISTE)) {
+                            val idArtiste = r.id.removePrefix(com.streamflixreborn.streamflix.providers.MonochromeMusic.PREFIXE_ARTISTE)
+                            val nom = r.name.removePrefix("🎤 ")
+                                .removeSuffix(com.streamflixreborn.streamflix.providers.MonochromeMusic.MENTION)
+                            val ecranPrecedent = titreNiveau
+                            headerTitle.text = "Albums de $nom…"
+                            lifecycleOwner.lifecycleScope.launch {
+                                val albums = try {
+                                    com.streamflixreborn.streamflix.providers.MonochromeMusic.albumsArtiste(idArtiste)
+                                } catch (_: Throwable) { emptyList() }
+                                titreNiveau = ecranPrecedent
+                                if (albums.isEmpty()) {
+                                    Toast.makeText(ctx, "Aucun album pour $nom", Toast.LENGTH_SHORT).show()
+                                    refresh()
+                                } else {
+                                    ouvrirNiveau("🎤 $nom", albums.map { mcAlbumEnLigne(it) })
+                                }
+                            }
+                            return@setOnItemClickListener
+                        }
+                        if (r.id.startsWith(com.streamflixreborn.streamflix.providers.MonochromeMusic.PREFIXE_ALBUM)) {
+                            val idAlbum = r.id.removePrefix(com.streamflixreborn.streamflix.providers.MonochromeMusic.PREFIXE_ALBUM)
+                            val titreAlbum = r.name.removePrefix("💿 ")
+                                .removeSuffix(com.streamflixreborn.streamflix.providers.MonochromeMusic.MENTION)
+                                .substringBefore(" — ")
+                            val ecranPrecedent = titreNiveau
+                            headerTitle.text = "Chargement de l'album…"
+                            lifecycleOwner.lifecycleScope.launch {
+                                val pistes = try {
+                                    com.streamflixreborn.streamflix.providers.MonochromeMusic.pistesAlbum(idAlbum)
+                                } catch (_: Throwable) { emptyList() }
+                                titreNiveau = ecranPrecedent
+                                if (pistes.isEmpty()) {
+                                    Toast.makeText(ctx, "Album indisponible", Toast.LENGTH_SHORT).show()
+                                    refresh()
+                                } else {
+                                    ouvrirNiveau("💿 $titreAlbum", pistes.map { audioToStation(it) })
+                                    Toast.makeText(
+                                        ctx,
+                                        "${pistes.size} titres FLAC — ▶ Tout lire pour l'album entier",
                                         Toast.LENGTH_SHORT,
                                     ).show()
                                 }

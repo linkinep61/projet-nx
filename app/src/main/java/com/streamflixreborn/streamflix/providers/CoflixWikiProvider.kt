@@ -331,7 +331,15 @@ object CoflixWikiProvider {
                 else -> c.type != "movie"
             }
         }
-        val pool = typed.ifEmpty { candidates }
+        // 2026-09-26 (user : « coflix.wiki fait du mauvais matching : avec SILO, le film, il me donne
+        //   la série, épisode 1 ») — le suggest de « silo » ne renvoie QUE les fiches de la série
+        //   (« Silo - Saison 3 », meta « Series 2023 »). Le filtre par type les écartait bien, mais
+        //   `typed.ifEmpty { candidates }` les REPRENAIT toutes quand plus rien ne restait, et le
+        //   titre « Silo - Saison 3 » passe titleMatches (la saison est retirée à la normalisation).
+        //   Plus de repli sur l'autre type : aucun serveur plutôt qu'un mauvais contenu. Les fiches
+        //   de type inconnu restent admises (elles sont déjà dans `typed`), sauf un slug « saison »
+        //   pour un film.
+        val pool = if (isMovie) typed.filter { !it.slug.contains("saison", ignoreCase = true) } else typed
 
         val titleForMatch = strictTitle ?: rawTitle
         val yearTolerance = if (isMovie) 1 else 5

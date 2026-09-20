@@ -62,7 +62,8 @@ object VavooProvider : Provider, IptvProvider {
         get() = try {
             VavooMirrorSettings.getOrderedSites(com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext)
         } catch (_: Exception) {
-            listOf("https://vavoo.net", "https://kool.ws", "https://vavoo.to", "https://kool.to", "https://oha.to", "https://huhu.to")
+            // 2026-09-23 : seuls miroirs encore vivants (voir VavooMirrorSettings.list).
+            listOf("https://vavoo.net", "https://vavoo.to", "https://kool.ws", "https://vavoo.top")
         }
 
     // 2026-06-12 (décompil VYPN bundle) : `www.vypn.net/api/app/ping` est le
@@ -1009,9 +1010,21 @@ object VavooProvider : Provider, IptvProvider {
             val headers = catalogHeaders(signature)
             val seenHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
             val ordered = java.util.Collections.synchronizedList(mutableListOf<String>())
-            coroutineScope {
-                BASE_SITES.map { base ->
-                    async {
+            // 2026-09-23 (user : « les chaînes mettent beaucoup de temps à arriver, avant
+            //   c'était instantané, et sur la version PC ça change instantanément ») :
+            //   mesuré sur TF1 — vavoo.net répond en 0,4 s, mais la liste n'arrivait au
+            //   lecteur que 15 s plus tard : `kool.ws` ne répond plus (échec de connexion
+            //   après 15 000 ms) et `awaitAll()` attendait TOUS les miroirs.
+            //   Désormais : dès qu'un miroir rend un flux, on laisse 1,5 s aux autres pour
+            //   fournir des edges de secours, puis on rend la main. Les requêtes partent
+            //   dans une portée DÉTACHÉE : un appel OkHttp bloqué n'obéit pas à
+            //   l'annulation, et `coroutineScope` l'attendrait quand même jusqu'au bout.
+            //   Si aucun miroir ne répond, on attend la fin de tous, comme avant.
+            val premier = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val portee = CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+            run {
+                val requetes = BASE_SITES.map { base ->
+                    portee.async {
                         try {
                             val resolveUrl = "${base.trimEnd('/')}/mediahubmx-resolve.json"
                             val body = JSONObject().apply {
@@ -1034,12 +1047,20 @@ object VavooProvider : Provider, IptvProvider {
                                     synchronized(ordered) { ordered.add(streamUrl) }
                                     Log.d(TAG, "✓ edge '${channel.name}' via $base host=$host")
                                 }
+                                premier.complete(Unit)
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "resolveMulti via $base KO: ${e.message}")
                         }
                     }
-                }.awaitAll()
+                }
+                // Le premier des deux : un flux obtenu, ou tous les miroirs terminés.
+                val tousFinis = portee.launch { requetes.joinAll(); premier.complete(Unit) }
+                premier.await()
+                // Tous déjà finis → rien à attendre. Sinon 1,5 s de grâce pour les edges de secours.
+                if (!tousFinis.isCompleted) {
+                    withTimeoutOrNull(1_500L) { requetes.joinAll() }
+                }
             }
             synchronized(ordered) { ordered.take(max).toList() }
         }
@@ -1348,9 +1369,16 @@ object VavooProvider : Provider, IptvProvider {
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (query.isBlank()) return emptyList()
         ensureRegistry()
+        // 2026-09-22 : passage exact d'abord (inchange, donc aucun cout en usage normal).
+        //   Ce n'est QUE s'il ne rend rien qu'on retente en tolerant accents et fautes de
+        //   frappe : « amelie » trouve « Amelie », « bien sport » trouve « beIN Sports ».
         val q = query.lowercase()
-        return synchronized(registryLock) {
+        val exacts = synchronized(registryLock) {
             channelRegistry.filter { it.name.lowercase().contains(q) }
+        }
+        if (exacts.isNotEmpty()) return exacts.map { it.toTvShow() }
+        return synchronized(registryLock) {
+            channelRegistry.filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(it.name, query) }
         }.map { it.toTvShow() }
     }
 

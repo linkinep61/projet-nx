@@ -575,7 +575,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //     même si dric4rt.free.fr meurt.
         //   - Les chaînes TV intéressantes (178 chaînes Nature/Muzik/Sports/
         //     Locales/Horse + "90 Is Good IT") sont migrées vers le data.m3u
-        //     externe (raw.githubusercontent.com/xdata-mix/nx-data/main/data.m3u
+        //     externe (raw.githubusercontent.com/rikital/onyxia-data/main/data.m3u
         //     — migré depuis Codeberg en 2026-06-15 car ubuntu-latest plus fiable)
         //     accessible via le provider World Live (MyIptvProvider URL externe).
         //   - 23 "Live & DJ set" droppées (= .mp4 statiques sur la Freebox
@@ -1069,6 +1069,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  était dans `sections` avant le regroupement). LiveHubFolderDialog lit
      *  ce registre au clic sur un dossier. */
     val folderContents = java.util.concurrent.ConcurrentHashMap<String, List<Category>>()
+    /** Clé de dossier → nom affiché (« OTF TV », « Stream4Free »…), rempli au rangement. */
+    val libellesDossiers = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /** Regroupe les sections détaillées en dossiers cliquables.
      *  2026-06-19 v2 (user "tout le reste est encore affiché Du coup charge
@@ -1116,7 +1118,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   (TF1+ Premium) est exclu en amont par KEEP_CHANNELS dans le script.
             FolderDef("tf1plus", "Replay TF1+", Regex("^Replay (TF1|TMC|TFX|TF1 Séries Films|LCI)(\\s.*)?$|^Replay TF1\\+ (Films|Séries|Émissions|Complement) - .*$")),
             FolderDef("m6plus", "Replay M6+", Regex("^Replay (M6|W9|6ter|Gulli|Paris Première|Téva)(\\s.*)?$|^Thématique M6\\+ - .*$")),
-            FolderDef("bfmplay", "Replay BFM Play", Regex("^Replay (BFM TV|RMC Story|RMC Découverte|BFM Business|RMC Life)(\\s.*)?$")),
+            // 2026-09-24 (user « un dossier Replay contient les chaînes RMC — le but c'est qu'elles
+        //   aillent dans le bon dossier, et que celui-là disparaisse ») : les autres chaînes de
+        //   BFM Play (RMC Radio, 100% Docs, 100% Crime, Top Mecanic, Exclus BFM Play) tombaient
+        //   dans Autres Replays → « Replays ». Une fois rangées ici, ce sous-dossier est vide
+        //   et n'est plus affiché.
+        FolderDef("bfmplay", "Replay BFM Play", Regex("^Replay (BFM TV|RMC Story|RMC Découverte|BFM Business|RMC Life|RMC Radio|100% DOCS|100% Crime|Top Mecanic|Exclus BFM Play)(\\s.*)?$", RegexOption.IGNORE_CASE)),
             // 2026-09-12 (user « Option A » : un bon dossier « Mix FR » rangé) :
             //   dossier dédié pour des sources ParaTV que nx-data ne tirait pas
             //   (famille TF1+ + famille RMC/BFM, pointeurs github auto-rafraîchis).
@@ -1302,6 +1309,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   sections (en amont, là où la liste est encore mutable), jamais en recopiant une
         //   Category déjà rangée dans les deux structures.
         for ((sec, def) in sectionToFolder) {
+            libellesDossiers[def.key] = def.label
             val existing = folderContents.getOrDefault(def.key, emptyList())
             folderContents[def.key] = existing + sec
         }
@@ -1494,69 +1502,114 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     override suspend fun search(query: String, page: Int): List<TvShow> {
         if (page > 1) return emptyList()
+        return rechercheParDossier(query).flatMap { it.second }
+    }
+
+    /**
+     * 2026-09-26 (user : « le dossier TV Hub, il faudrait l'organiser correctement par rapport à
+     *   tout ce qu'il y a dedans ») : la recherche du TV Hub rendue PAR DOSSIER d'origine, pour
+     *   que la nouvelle recherche (RechercheUnifiee) affiche une rangée par dossier. [search]
+     *   aplatit simplement ces groupes. Un même id n'apparaît que dans le premier groupe.
+     */
+    suspend fun rechercheParDossier(query: String): List<Pair<String, List<TvShow>>> {
         val q = query.trim().lowercase()
         val all = allHomeChannels()
-        if (q.isBlank()) return all
+        if (q.isBlank()) return listOf("Chaînes" to all)
         val liveHits = all.filter { (it.title ?: "").lowercase().contains(q) }
-        // 2026-07-23 (user "cale une recherche à l'ouverture du replay BFM pour
-        //   retrouver une série/film rapidement — mais dans notre playlist déjà
-        //   scrapée, sinon ça ne marchera pas") : la recherche couvre désormais
-        //   AUSSI le catalogue REPLAY (data-replay.m3u déjà en cache disque) →
-        //   TF1+, M6+, BFM/RMC, France.tv, Arte. Tout ce qui remonte est déjà
-        //   jouable (on NE fait PAS de recherche RMC live = ids non résolubles).
-        val replayHits = try {
-            fetchReplayCategories()
-                .asSequence()
-                .flatMap { it.list.asSequence() }
-                .filterIsInstance<TvShow>()
-                .filter { (it.title ?: "").lowercase().contains(q) }
-                .distinctBy { it.id }
-                .take(150)
-                .toList()
+        // Sources parcourues (historique) :
+        //  · 2026-07-23 — catalogue REPLAY déjà en cache (TF1+, M6+, BFM/RMC, France.tv, Arte) ;
+        //  · 2026-08-17 — « Ma bibliothèque » en tête (cache VidaraLibrary) ;
+        //  · 2026-09-24 — chaînes « IPTV du web (FR) » ;
+        //  · 2026-09-26 (user : « quand on cherche Ligue 1, il n'y a que Rutube qui répond au lieu
+        //    d'aller dans les dossiers… la recherche vidéo ne devrait même pas être prise en
+        //    compte ») — recherche libre RUTUBE RETIRÉE (elle reste DANS le dossier Rutube) ; on
+        //    cherche dans le CONTENU DES DOSSIERS : Mix FR / Multi Live (data.m3u), FAST, WorldWide,
+        //    OTF TV, Stream4Free, Reneveo, et chaque dossier rangé par getHome (folderContents).
+        //  · 2026-09-26 (user : « pourquoi moins de résultats sur la TV que sur le téléphone ») —
+        //    ces sources étaient interrogées L'UNE APRÈS L'AUTRE (jusqu'à ~6 s chacune) : sur une
+        //    box plus lente, le total dépassait le délai de la recherche et TOUT le TV Hub était
+        //    perdu. Elles partent maintenant EN PARALLÈLE, chacune avec son propre garde-fou.
+        fun filtrer(cats: List<Category>?, max: Int): List<TvShow> = cats.orEmpty().asSequence()
+            .flatMap { it.list.asSequence() }
+            .filterIsInstance<TvShow>()
+            .filter { !it.id.startsWith("livehub::folder::") && (it.title ?: "").lowercase().contains(q) }
+            .distinctBy { it.id }
+            .take(max)
+            .toList()
+        suspend fun chainesDe(nom: String, delai: Long = 8_000, max: Int = 60,
+                              charge: suspend () -> List<Category>): List<TvShow> = try {
+            filtrer(withTimeoutOrNull(delai) { charge() }, max)
         } catch (e: Exception) {
-            Log.w(TAG, "search: replay filter failed: ${e.message}")
-            emptyList()
+            Log.w(TAG, "search: $nom KO: ${e.message}"); emptyList()
         }
-        // 2026-08-13 : RECHERCHE LIBRE RUTUBE — appended après live+replay. Contrairement aux
-        //   serveurs (matching strict), ici on trouve n'importe quoi (« Inspecteur Colombo »)
-        //   comme sur le site. Cap 30, jamais bloquant.
-        val rutubeHits = try {
-            com.streamflixreborn.streamflix.providers.RutubeProvider
-                .searchClips(query.trim())
-                .take(30)
-                .map { rutubeClipToTvShow(it) }
-        } catch (e: Exception) {
-            Log.w(TAG, "search: Rutube libre KO: ${e.message}"); emptyList()
-        }
-        // 2026-08-17 (user « le but c'est que quand on fait une recherche avec
-        //   l'application, on trouve les films et les séries ») : la bibliothèque
-        //   perso passe EN TÊTE des résultats — c'est notre propre copie, elle est
-        //   toujours plus pertinente qu'un replay homonyme. Lecture depuis le cache
-        //   de VoeLibrary (10 min), donc pas d'appel réseau à chaque frappe.
-        // 2026-08-19 : depuis que l'accueil ne charge plus la bibliothèque
-        //   (user « à la première ouverture il ne devrait pas impacter »), le cache
-        //   peut être froid ici. On accepte d'attendre 5 s au plus : au-delà, la
-        //   recherche répond sans la bibliothèque plutôt que de figer l'écran —
-        //   le chargement continue en fond, la frappe suivante en profitera.
-        val voeHits = try {
-            kotlinx.coroutines.withTimeoutOrNull(5_000) {
-                com.streamflixreborn.streamflix.utils.VidaraLibrary.toutNav()
-            }.orEmpty()
-                // On cherche dans titreAffiche (sans l'identifiant TMDB) : taper
-                //   « mojave » doit trouver « 237584 - Mojave.avi ». Chercher dans
-                //   `titre` marcherait aussi, mais un utilisateur qui tape un
-                //   nombre tomberait sur des identifiants au lieu de titres.
-                .filter {
-                    val v = com.streamflixreborn.streamflix.utils.VidaraLibrary
-                    it.titreAffiche.lowercase().contains(q) ||
-                        v.titrePour(it).lowercase().contains(q)
+        val nomsLazy = mapOf("otf" to "OTF TV", "autres_replay" to "Autres Replays", "musique" to "Musique")
+        return coroutineScope {
+            val io = kotlinx.coroutines.Dispatchers.IO
+            val replay = async(io) { chainesDe("Replays", 10_000, 150) { fetchReplayCategories() } }
+            val mix = async(io) { chainesDe("Mix FR") { fetchMixFrCategoriesPublic() } }
+            val fast = async(io) { chainesDe("FAST") { fetchFastCategoriesPublic() } }
+            val ww = async(io) { chainesDe("WorldWide") { fetchWorldwideCategoriesPublic() } }
+            val iptvWeb = async(io) {
+                chainesDe("IPTV du web", max = 100) {
+                    com.streamflixreborn.streamflix.providers.WorldLiveTvProvider.categoriesIptvDuWebFr()
                 }
-                .take(100)
-                .map { com.streamflixreborn.streamflix.utils.VidaraLibrary.tuileFilm(it) }
-        } catch (e: Exception) {
-            Log.w(TAG, "search: bibliothèque KO: ${e.message}"); emptyList()
+            }
+            val otf = async(io) {
+                chainesDe("OTF TV") {
+                    val svc = com.streamflixreborn.streamflix.utils.OtfTvService
+                    val groupe = svc.selectedGroup.ifBlank { "France" }
+                    val chaines = svc.sortChannelsFrenchTntOrder(
+                        svc.fetchChannels().filter { it.group.ifBlank { "Autres" } == groupe })
+                    listOf(Category(name = "OTF TV", list = chaines.distinctBy { it.normalizedKey }.map { ch ->
+                        TvShow(id = "livehub::otf::${ch.normalizedKey}", title = ch.name).apply {
+                            providerName = "TV Hub"; poster = ch.logo; banner = ch.logo
+                        }
+                    }))
+                }
+            }
+            // Stream4Free : cache ou liste locale UNIQUEMENT. Passer par fetchStream4CfCategoriesLive()
+            //   lançait en fond le chauffage Cloudflare (WebView) + la pré-résolution de 53 chaînes :
+            //   42 s de charge mesurés sur la box pendant une simple recherche.
+            val s4f = async(io) {
+                chainesDe("Stream4Free") {
+                    stream4CfCache.ifEmpty {
+                        parseFastM3u(com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.BAKED_CHANNELS_M3U_PROXIED)
+                    }
+                }
+            }
+            val reneveo = async(io) {
+                chainesDe("Reneveo") {
+                    val rv = com.streamflixreborn.streamflix.utils.ReneveoTv
+                    rv.categories(rv.chainesSiDejaChargees())
+                }
+            }
+            val voe = async(io) {
+                try {
+                    withTimeoutOrNull(5_000) { com.streamflixreborn.streamflix.utils.VidaraLibrary.toutNav() }.orEmpty()
+                        .filter {
+                            val v = com.streamflixreborn.streamflix.utils.VidaraLibrary
+                            it.titreAffiche.lowercase().contains(q) || v.titrePour(it).lowercase().contains(q)
+                        }
+                        .take(100)
+                        .map { com.streamflixreborn.streamflix.utils.VidaraLibrary.tuileFilm(it) }
+                } catch (e: Exception) {
+                    Log.w(TAG, "search: bibliothèque KO: ${e.message}"); emptyList()
+                }
+            }
+            val dossiers = folderContents.keys
+                .filter { !it.startsWith("__") && !it.startsWith("vegetavod") && it != "ma_bibliotheque" }
+                .sorted()
+                .map { k -> (libellesDossiers[k] ?: nomsLazy[k] ?: k) to async(io) { chainesDe(k) { folderContents[k].orEmpty() } } }
+            val vus = HashSet<String>()
+            (listOf("Ma bibliothèque" to voe.await(), "Chaînes" to liveHits,
+                "Mix FR · Multi Live" to mix.await(), "IPTV du web" to iptvWeb.await(),
+                "OTF TV" to otf.await(), "Stream4Free" to s4f.await(), "Reneveo" to reneveo.await()) +
+                dossiers.map { (nom, d) -> nom to d.await() } +
+                listOf("FAST · Rakuten, Pluto…" to fast.await(), "Replays" to replay.await(), "WorldWide" to ww.await()))
+                .map { (nom, l) -> nom to l.filter { vus.add(it.id) } }
+                .filter { it.second.isNotEmpty() }
+                .also { r -> Log.d(TAG, "rechercheParDossier « $q » : " + r.joinToString { "${it.first}=${it.second.size}" }) }
         }
-        return (voeHits + liveHits + replayHits + rutubeHits).distinctBy { it.id }
     }
 
     /**
@@ -1631,6 +1684,48 @@ object LiveTvHubProvider : Provider, IptvProvider {
         throw UnsupportedOperationException("LiveTvHub n'a pas de films")
 
     override suspend fun getTvShow(id: String): TvShow {
+        // 2026-09-26 : séries « Plus de séries » (portails OLA) — saisons demandées au portail.
+        if (id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_SERIE)) {
+            val ov = com.streamflixreborn.streamflix.utils.OlaVod
+            val cle = id.removePrefix(ov.PREFIX_SERIE)
+            val s = ov.serieDe(cle) ?: run { runCatching { ov.index() }; ov.serieDe(cle) }
+                ?: return TvShow(id = id, title = "Ciné Films").apply { providerName = "TV Hub" }
+            val saisons = runCatching { ov.saisons(s) }.getOrDefault(emptyList())
+            val listeSaisons = saisons.map { sa ->
+                Season(
+                    id = "livehub::olavod::saison::${s.id}::${sa.num}",
+                    number = sa.num,
+                    title = "Saison ${sa.num}",
+                    episodes = sa.episodes.map { e ->
+                        Episode(
+                            id = ov.idEpisode(sa, e),
+                            number = e,
+                            title = "S${"%02d".format(sa.num)}E${"%02d".format(e)}",
+                            poster = s.img,
+                        )
+                    },
+                )
+            }
+            for (sn in listeSaisons) olaSeasonEpisodesCache[sn.id] = sn.episodes
+            return TvShow(id = id, title = if (s.annee > 0) "${s.titre} (${s.annee})" else s.titre).copy(
+                poster = s.img, banner = s.img, seasons = listeSaisons,
+            ).apply { providerName = "TV Hub" }
+        }
+        // 2026-09-26 : films « Plus de films » de Ciné Films (portails OLA, cf. OlaVod).
+        if (id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_FILM)) {
+            val ov = com.streamflixreborn.streamflix.utils.OlaVod
+            val cle = id.removePrefix(ov.PREFIX_FILM)
+            val f = ov.filmDe(cle) ?: run { runCatching { ov.index() }; ov.filmDe(cle) }
+            return TvShow(id = id, title = f?.let { ov.titreFilm(it) } ?: "Ciné Films").copy(
+                poster = f?.img, banner = f?.img,
+                seasons = listOf(
+                    Season(
+                        id = id, number = 1, title = "Film",
+                        episodes = listOf(Episode(id = id, number = 1, title = "Lire", poster = f?.img)),
+                    ),
+                ),
+            ).apply { providerName = "TV Hub" }
+        }
         // 2026-06-19 (user "OTF et Adrar ne marchent pas au clic dossier") :
         //   pour les IDs `livehub::folder::*` (= cards dossier), retourne un
         //   TvShow synthétique sans saisons. Évite IllegalArgumentException
@@ -1715,7 +1810,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     title = "Saison $num",
                     episodes = m.values.map { (pos, e) ->
                         Episode(
-                            id = "${vv.PREFIX_SRC}$pos::series::${e.id}::${e.ext}",
+                            id = "${vv.PREFIX_EP}$pos::series::${e.id}::${e.ext}",
                             number = e.num,
                             title = "S${"%02d".format(num)}E${"%02d".format(e.num)}" +
                                 (if (e.titre.isNotBlank()) " — ${e.titre}" else ""),
@@ -1842,7 +1937,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 try {
                     val tv = com.streamflixreborn.streamflix.providers
                         .Dric4rTvProvider.getTvShow(id)
-                    tv.apply { providerName = "TV Hub" }
+                    // 2026-09-24 : JSON Dric4rTV illisible → « Chaîne inconnue ». Pour
+                    //   les chaînes curées (90 Is Good, radios en dur), on garde leur nom.
+                    val nomCure = fastChannelNames[id]
+                    (if (tv.title == "Chaîne inconnue" && nomCure != null)
+                        TvShow(id = id, title = nomCure).apply {
+                            fastChannelLogos[id]?.let { poster = it; banner = it }
+                        } else tv).apply { providerName = "TV Hub" }
                 } catch (e: Exception) {
                     Log.w(TAG, "Dric4rTV getTvShow failed for $id: ${e.message}")
                     null
@@ -2007,6 +2108,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
+        if (seasonId.startsWith("livehub::olavod::saison::")) {
+            olaSeasonEpisodesCache[seasonId]?.let { return it }
+            val cle = seasonId.removePrefix("livehub::olavod::saison::").substringBeforeLast("::")
+            runCatching { getTvShow(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_SERIE + cle) }
+            return olaSeasonEpisodesCache[seasonId] ?: emptyList()
+        }
         // 2026-09-05 : série Vegeta VOD → cache rempli par getTvShow (rebuild si vide).
         if (seasonId.startsWith(com.streamflixreborn.streamflix.utils.VegetaVod.PREFIX_SAISON)) {
             vegetaSeasonEpisodesCache[seasonId]?.let { return it }
@@ -2110,6 +2217,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
     private val ftvSeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
     // 2026-09-05 : cache équivalent pour les séries Vegeta VOD
     private val vegetaSeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
+    private val olaSeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
 
     /**
      * 2026-09-07 : tous les panels Ciné Films qui ont CET épisode (jusqu'à 4 serveurs).
@@ -2120,11 +2228,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
      */
     private suspend fun serveursEpisodeCineFilms(idEpisode: String, posOrigine: Int, premier: Video.Server): List<Video.Server>? {
         val vv = com.streamflixreborn.streamflix.utils.VegetaVod
-        val entree = vegetaSeasonEpisodesCache.entries.firstOrNull { (_, eps) -> eps.any { it.id == idEpisode } } ?: return null
+        val idEp = vv.PREFIX_EP + idEpisode.removePrefix(vv.PREFIX_SRC)
+        val entree = vegetaSeasonEpisodesCache.entries.firstOrNull { (_, eps) -> eps.any { it.id == idEpisode || it.id == idEp } } ?: return null
         val charge = entree.key.removePrefix(vv.PREFIX_SAISON)
         val cleSerie = charge.substringBeforeLast("::")
         val saison = charge.substringAfterLast("::").toIntOrNull() ?: return null
-        val numEp = entree.value.firstOrNull { it.id == idEpisode }?.number ?: return null
+        val numEp = entree.value.firstOrNull { it.id == idEpisode || it.id == idEp }?.number ?: return null
         val s = vv.serieDe(cleSerie) ?: return null
         val out = arrayListOf(premier)
         for ((pos, sid) in s.sources) {
@@ -2566,7 +2675,35 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  olaVegetaKey). Sans ça, marquer ❤ sur Vegeta TV → stocké sous
      *  "canalplus", mais le Hub cherchait sous "canal" (witvKey) → fallback
      *  déclenché à tort, l'user voyait toute la liste agrégée. */
+    /** 2026-09-24 : URL directe d'une chaîne Dric4rTV curée (90 Is Good, radios en
+     *  dur) — depuis la table du dossier Musique, sinon depuis la liste en dur
+     *  (favori ouvert sans avoir ouvert le dossier). null = chaîne du JSON Dric4rTV. */
+    private fun urlDricCuree(id: String): String? {
+        fastChannelUrls[id]?.let { return it }
+        if (id == "livehub::dric4rtv::muzik::90isgoodit") {
+            fastChannelNames[id] = "90 Is Good (IT)"
+            return "https://64b16f23efbee.streamlock.net/isgoodforyou/isgoodforyou/playlist.m3u8"
+        }
+        return com.streamflixreborn.streamflix.utils.RadioCatalog.hardcodedDricRadios()
+            .firstOrNull { it.id == id }?.also { fastChannelNames[id] = it.name }?.streamUrl
+    }
+
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-09-26 : épisode « Plus de séries » → serveur unique (portails du groupe essayés à la lecture).
+        if (id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_EP) || id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_EP_ANCIEN)) return listOf(com.streamflixreborn.streamflix.utils.OlaVod.serveurEpisode(id))
+        if (id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_SERIE)) {
+            val premier = runCatching {
+                getTvShow(id).seasons.minByOrNull { it.number }?.episodes?.minByOrNull { it.number }?.id
+            }.getOrNull()
+            return if (premier != null && premier != id) getServers(premier, videoType) else emptyList()
+        }
+        // 2026-09-26 : films « Plus de films » (portails OLA) — sources du film, lien demandé à la lecture.
+        if (id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_FILM)) {
+            val ov = com.streamflixreborn.streamflix.utils.OlaVod
+            val cle = id.removePrefix(ov.PREFIX_FILM)
+            val f = ov.filmDe(cle) ?: run { runCatching { ov.index() }; ov.filmDe(cle) } ?: return emptyList()
+            return ov.serveursFilm(f)
+        }
         // 2026-09-05 : Vegeta VOD — film (tous ses serveurs) ou épisode (serveur direct).
         run {
             val vv = com.streamflixreborn.streamflix.utils.VegetaVod
@@ -2588,6 +2725,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 if (premierEpisode != null && premierEpisode != id) return getServers(premierEpisode, videoType)
                 return emptyList()
             }
+            if (id.startsWith(vv.PREFIX_EP)) return getServers(vv.PREFIX_SRC + id.removePrefix(vv.PREFIX_EP), videoType)
             if (id.startsWith(vv.PREFIX_SRC)) {
                 // id = livehub::vegetavod::src::<pos>::<movie|series>::<id>::<ext>
                 val parts = id.removePrefix(vv.PREFIX_SRC).split("::")
@@ -2782,6 +2920,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-06-08 : Dric4rTV — Video.Server.id sera préfixé "dric-st::"
         //   qui sera routé dans getVideo() vers Dric4rTvProvider.getVideo().
         if (id.startsWith("livehub::dric4rtv::")) {
+            // 2026-09-24 (user « 90 Is Good ne fonctionne plus ») : le JSON de
+            //   Dric4rTV (dric4rt.free.fr/1.json) est devenu illisible (JSON mal
+            //   formé côté éditeur) → plus aucun serveur pour 90 Is Good ni pour
+            //   les radios en dur, alors que leurs flux marchent. Ces chaînes
+            //   curées ont leur URL directe : on la sert sans dépendre du JSON.
+            urlDricCuree(id)?.let { url ->
+                return listOf(Video.Server(
+                    id = "dric-direct::$id",
+                    name = fastChannelNames[id] ?: "Direct",
+                    src = url,
+                ))
+            }
             return try {
                 com.streamflixreborn.streamflix.providers
                     .Dric4rTvProvider.getServers(id, videoType)
@@ -2961,6 +3111,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
     private val famillesMultiLiveOk = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-09-26 : film Ciné Films servi par un portail OLA (handshake + create_link).
+        if (server.id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_SRC)) {
+            return com.streamflixreborn.streamflix.utils.OlaVod.video(server)
+        }
         // 2026-09-06 : RénéVéo → HLS direct, Referer du site obligatoire sur ses proxys (cf. ReneveoTv.video).
         if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(server.id)) {
             return com.streamflixreborn.streamflix.utils.ReneveoTv.video(server)
@@ -3102,6 +3256,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 .BoxXtemusProvider.getVideo(server)
         }
         // 2026-06-08 : Dric4rTV — délègue, URL directe + headers du JSON
+        if (server.id.startsWith("dric-direct::")) {
+            val cid = server.id.removePrefix("dric-direct::")
+            val u = server.src
+            val mime = when {
+                u.contains(".m3u8", ignoreCase = true) -> "application/vnd.apple.mpegurl"
+                u.contains(".mp3", ignoreCase = true) || u.contains("/mp3", ignoreCase = true) -> "audio/mpeg"
+                u.contains(".aac", ignoreCase = true) -> "audio/aac"
+                else -> null
+            }
+            val entetes = fastChannelHeaders[cid] ?: mapOf(
+                "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            )
+            return Video(source = u, type = mime, headers = entetes)
+        }
         if (server.id.startsWith("dric-st::")) {
             return com.streamflixreborn.streamflix.providers
                 .Dric4rTvProvider.getVideo(server)
@@ -3765,7 +3933,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     // ────────────── 2026-06-17 Phase 1 Replay (Port Catchup TV & More) ──────────────
     private const val REPLAY_M3U_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-replay.m3u"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-replay.m3u"
     @Volatile private var replayCacheTs: Long = 0L
     @Volatile private var replayCacheSections: List<Category> = emptyList()
     /** Map si_id → titre programme, pour réutiliser dans getServers. */
@@ -4337,7 +4505,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     // ────────────── 2026-06-24 FAST Channels (Samsung TV+, Pluto TV, etc.) ──────────────
     private const val FAST_M3U_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-fast.m3u"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-fast.m3u"
     @Volatile private var fastCacheTs: Long = 0L
     @Volatile private var fastCacheSections: List<Category> = emptyList()
     private const val FAST_TTL_MS = 30L * 60 * 1000  // 30 min
@@ -4400,7 +4568,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
     @Volatile private var mixFrCacheTs: Long = 0L
     private val MIX_FR_TTL_MS = 30 * 60 * 1000L
     private const val MIX_FR_M3U_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data.m3u"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data.m3u"
 
     // 2026-06-27 (user "ajouter la playlist WorldWide dans Autres Replays,
     //   mirror sur notre git pour auto-refresh") : la playlist WorldWide
@@ -4410,7 +4578,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
     @Volatile private var worldwideCacheSections: List<Category> = emptyList()
     @Volatile private var worldwideCacheTs: Long = 0L
     private const val WORLDWIDE_M3U_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-worldwide.m3u"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-worldwide.m3u"
 
     // 2026-06-27 (user "nouveau dossier Musique avec tout ce qui traîne de
     //   musique, en sous-dossiers, mirror git auto-refresh") : playlist musique
@@ -4420,7 +4588,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
     @Volatile private var musiqueCacheSections: List<Category> = emptyList()
     @Volatile private var musiqueCacheTs: Long = 0L
     private const val MUSIQUE_M3U_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-musique.m3u"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-musique.m3u"
     private const val MUSIQUE_FALLBACK_URL =
         "https://iptv-org.github.io/iptv/categories/music.m3u"
 
@@ -4481,10 +4649,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return sortie.toString()
     }
 
-    // 2026-06-29 (REPAIR — re-appliqué) : dossier Stream4Free. M3U dédié
-    //   (refs stream4free://<slug>, résolues à la lecture). Cache RAM 30 min.
-    @Volatile private var stream4CacheSections: List<Category> = emptyList()
-    @Volatile private var stream4CacheTs: Long = 0L
+    // 2026-09-20 : le dossier Stream4Free ne passe PLUS par un M3U nx-data. Il est servi
+    //   par BAKED_CHANNELS_M3U_PROXIED (affichage immédiat), puis rafraîchi en direct par
+    //   scrapeChannelsM3u(). L'URL nx-data et son cache RAM dédié étaient devenus morts
+    //   (data-stream4free.m3u n'existe plus dans le dépôt → 404, et plus aucun appelant) :
+    //   retirés. Ne pas les réintroduire sans republier le M3U côté nx-data.
     // 2026-06-29 (REPAIR — user "le fail-safe Stream4Free doit être sur TOUS les
     //   dossiers") : cache + fail-safe pour Pluto et Plex (sinon un seul await()
     //   qui échoue tue tout le dossier à l'ouverture).
@@ -4492,8 +4661,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
     @Volatile private var plutoFolderCacheTs: Long = 0L
     @Volatile private var plexFolderCacheSections: List<Category> = emptyList()
     @Volatile private var plexFolderCacheTs: Long = 0L
-    private const val STREAM4_M3U_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-stream4free.m3u"
     // 2026-07-10 (user "supprime l'intégration LumiChat partout, même sur git") : tous les champs
     //   et helpers LumiChat (cache, M3U URL nx-data, multi-serveurs, rank, normName) RETIRÉS.
 
@@ -4713,22 +4880,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
     ): List<Category> {
         if (sommaireJson.isBlank()) return emptyList()
         return try {
-            val groupes = org.json.JSONObject(sommaireJson.trim()).optJSONArray("groups")
+            val groupes = org.json.JSONObject(com.streamflixreborn.streamflix.utils.DricJson.repare(sommaireJson).trim()).optJSONArray("groups")
                 ?: return emptyList()
             var urlGroupe = ""
+            var groupeInline: org.json.JSONObject? = null
             for (i in 0 until groupes.length()) {
                 val g = groupes.optJSONObject(i) ?: continue
                 val nom = g.optString("name").trim()
-                if (nom.startsWith(DRIC_GROUPE_NATURE, ignoreCase = true)) {
+                // 2026-09-24 : depuis la MAJ Dric4rTV du 22/09, le bouquet s'appelle
+                //   « BOUQUET DECOUVERTE » et ses chaînes sont écrites dedans (pas d'url).
+                if (nom.startsWith(DRIC_GROUPE_NATURE, ignoreCase = true) ||
+                    nom.contains("DECOUVERTE", ignoreCase = true) || nom.contains("DÉCOUVERTE", ignoreCase = true)) {
                     urlGroupe = g.optString("url").trim()
+                    if (urlGroupe.isBlank() && g.optJSONArray("stations") != null) groupeInline = g
                     break
                 }
             }
-            if (urlGroupe.isBlank()) {
+            if (urlGroupe.isBlank() && groupeInline == null) {
                 Log.w(TAG, "Mix FR : groupe Nature absent de la playlist Dric4rTV")
                 return emptyList()
             }
-            val corps = dl(urlGroupe)
+            val corps = groupeInline?.toString() ?: dl(urlGroupe)
             if (corps.isBlank()) return emptyList()
             val racine = org.json.JSONObject(corps.trim())
             val sortie = ArrayList<Category>()
@@ -5001,22 +5173,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
     ) {
         if (sommaireJson.isBlank()) return
         try {
-            val groupes = org.json.JSONObject(sommaireJson.trim()).optJSONArray("groups") ?: return
+            val groupes = org.json.JSONObject(com.streamflixreborn.streamflix.utils.DricJson.repare(sommaireJson).trim()).optJSONArray("groups") ?: return
             var urlGroupe = ""
+            var groupeInline: org.json.JSONObject? = null
             for (i in 0 until groupes.length()) {
                 val g = groupes.optJSONObject(i) ?: continue
-                if (g.optString("name").trim().equals(DRIC_GROUPE_MUSIQUE, ignoreCase = true)) {
+                val nomG = g.optString("name").trim()
+                // 2026-09-24 : MAJ Dric4rTV du 22/09 → « BOUQUET MUSIQUE », chaînes inline.
+                if (nomG.equals(DRIC_GROUPE_MUSIQUE, ignoreCase = true) ||
+                    nomG.equals("BOUQUET MUSIQUE", ignoreCase = true)) {
                     urlGroupe = g.optString("url").trim()
+                    if (urlGroupe.isBlank() && g.optJSONArray("stations") != null) groupeInline = g
                     break
                 }
             }
-            if (urlGroupe.isBlank()) {
+            if (urlGroupe.isBlank() && groupeInline == null) {
                 Log.w(TAG, "Musique : groupe $DRIC_GROUPE_MUSIQUE absent de la playlist Dric4rTV")
                 return
             }
-            val corps = dl(urlGroupe)
+            val corps = groupeInline?.toString() ?: dl(urlGroupe)
             if (corps.isBlank()) return
-            val stations = org.json.JSONObject(corps.trim()).optJSONArray("stations")
+            val stations = org.json.JSONObject(com.streamflixreborn.streamflix.utils.DricJson.repare(corps).trim()).optJSONArray("stations")
                 ?: org.json.JSONObject(corps.trim()).optJSONArray("channels")
                 ?: return
             // Le groupe d'accueil = celui qui pèse le plus lourd à cet instant, donc jamais
@@ -5128,7 +5305,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
                         // Extras CURÉS : dédup par ID (PAS par URL). Avant, dédup par
                         //   URL sautait "90 Is Good" si une entrée iptv-org partageait
                         //   son URL sous un autre nom (→ introuvable à la recherche).
-                        if (fastChannelUrls.containsKey(e.id)) continue
+                        // 2026-09-24 (user « 90 Is Good n'apparaît plus ») : on testait
+                        //   `fastChannelUrls.containsKey(e.id)`, mais cette table n'est
+                        //   jamais vidée → au rechargement du dossier (cache expiré),
+                        //   l'extra était sauté et disparaissait. On déduplique dans le
+                        //   dossier en cours de construction.
+                        if (groups.values.any { l -> l.any { it.id == e.id } }) continue
                         seen.add(e.url)
                         val tv = TvShow(id = e.id, title = e.name).apply {
                             providerName = "TV Hub"; poster = e.poster ?: ""; banner = e.poster ?: ""
@@ -5331,26 +5513,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
     }
 
-    suspend fun fetchStream4CategoriesPublic(): List<Category> {
-        val now = System.currentTimeMillis()
-        if (stream4CacheSections.isNotEmpty() && now - stream4CacheTs < MIX_FR_TTL_MS) {
-            return stream4CacheSections
-        }
-        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val req = okhttp3.Request.Builder().url(STREAM4_M3U_URL)
-                    .header("User-Agent", "Mozilla/5.0").build()
-                val body = replayClient.newCall(req).execute().use { it.body?.string().orEmpty() }
-                val cats = parseFastM3u(body)
-                if (cats.isNotEmpty()) { stream4CacheSections = cats; stream4CacheTs = now }
-                Log.d(TAG, "Stream4Free: ${cats.size} catégories")
-                cats
-            } catch (e: Throwable) {
-                Log.w(TAG, "Stream4 fetch failed: ${e.message}")
-                stream4CacheSections
-            }
-        }
-    }
+    // 2026-09-20 : fetchStream4CategoriesPublic() RETIRÉ — il téléchargeait
+    //   data-stream4free.m3u sur nx-data, fichier qui n'existe plus (404), et plus aucun
+    //   appelant depuis le passage au scrape en direct. Voir le commentaire du dossier
+    //   Stream4Free plus haut.
 
     // 2026-07-10 (user "supprime l'intégration LumiChat partout, même sur git") :
     //   parseLumiChatGrouped + fetchLumiChatCategoriesPublic RETIRÉS (passerelle en panne).

@@ -90,8 +90,10 @@ class ProvidersMobileFragment : Fragment() {
 
         initializeProviders()
 
+        // 2026-09-26 (user) : la loupe remplace Téléchargements — nouvelle recherche
+        //   Films / Séries / Live, résultats rangés par provider (cf. RechercheUnifiee).
         binding.ivDownloads.setOnClickListener {
-            findNavController().navigate(R.id.downloads)
+            com.streamflixreborn.streamflix.utils.RechercheUnifiee.show(this)
         }
 
         // 2026-05-20 : cœur favoris global — favoris de tous les providers (sauf TV)

@@ -239,13 +239,13 @@ object VegetaTvProvider : Provider, IptvProvider {
     //   probe live restent en repli, et le top-up arrière-plan continue comme avant.
     //   Même hôte que VegetaVod.RAW (le runner atteint les panels, pas l'appareil).
     private const val REMOTE_REGISTRY_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/vegetatv/vegeta-fr.json"
+        "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/vegetatv/vegeta-fr.json"
     /** 2026-09-13 bis : même registre SANS plafond de flux par chaîne (~5 Mo, 32 800 flux au lieu
      *  de 20 200). Publié en FICHIER DE RELEASE et non dans le dépôt : une release remplace la
      *  version précédente, donc zéro octet ajouté à l'historique git. Chargé en arrière-plan,
      *  seulement quand l'utilisateur entre dans Vegeta TV (cf. fusionnerRegistreComplet). */
     private const val REMOTE_FULL_URL =
-        "https://github.com/xdata-mix/nx-data/releases/download/vegeta-full/vegeta-fr-full.json"
+        "https://github.com/rikital/onyxia-data/releases/download/vegeta-full/vegeta-fr-full.json"
     /** Au-delà, le JSON distant est considéré périmé (le cron passe toutes les 4 h ;
      *  24 h tolère une panne de runner sans retomber sur le scan complet). */
     private const val REMOTE_REGISTRY_MAX_AGE_MS = 24L * 60 * 60 * 1000L
@@ -1931,12 +1931,23 @@ object VegetaTvProvider : Provider, IptvProvider {
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (page > 1) return emptyList()
+        // ── 2026-09-22 — LA RECHERCHE NE CHARGEAIT PAS LE CATALOGUE ────────────────
+        //   Retours Telegram (Cooper, Dim, Bob) : en recherche globale depuis un autre
+        //   provider IPTV, ce provider ne rend rien ; on ouvre son dossier, on refait la
+        //   MEME recherche en local, et la chaine sort. Relancer une 2e fois « marche »
+        //   parfois — c'est le registre rempli entre-temps.
+        //   Cause : `search` lisait `channelRegistry`, qui n'est peuple QUE si l'utilisateur
+        //   a ouvert le provider. A froid, seules les chaines curees pouvaient sortir.
+        //   Vavoo et World Live appellent deja `ensureRegistry()` en tete de leur `search` ;
+        //   ici l'appel manquait, alors que la fonction existe. Le cache disque repond en
+        //   <100 ms, et un echec est avale : on rend au pire les chaines curees, comme avant.
+        runCatching { ensureRegistry() }
         return try {
             // Curated first, then registry-only matches. Capped at SEARCH_RESULT_LIMIT
             // so a generic query doesn't ANR the TV RecyclerView on logo loads.
             val curatedKeys = curatedChannels.map { it.key }.toSet()
             val curatedHits = curatedChannels
-                .filter { it.displayName.contains(query, ignoreCase = true) }
+                .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(it.displayName, query) }
                 .map { c ->
                     TvShow(
                         id = "vegeta::${c.key}",
@@ -1947,7 +1958,7 @@ object VegetaTvProvider : Provider, IptvProvider {
                 }
             val registrySnapshot = synchronized(registryLock) {
                 channelRegistry.entries
-                    .filter { (key, info) -> key !in curatedKeys && info.displayName.contains(query, ignoreCase = true) }
+                    .filter { (key, info) -> key !in curatedKeys && com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(info.displayName, query) }
                     .map { (key, info) -> Triple(key, info.displayName, info.logo) }
             }
             val registryHits = registrySnapshot
