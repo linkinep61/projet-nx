@@ -13,7 +13,7 @@ import java.io.Serializable
  * @property id identifiant stable utilisé pour le nom de fichier DB. "default"
  *   pour le profil créé automatiquement à la 1re migration (hérite des DBs
  *   existantes via renommage atomique).
- * @property name nom affiché à l'utilisateur (ex: "Guillaume", "Enfants").
+ * @property name nom affiché à l'utilisateur.
  * @property emoji avatar — un emoji unicode (ex: "🎬", "👧", "🍿"). v1 : pas
  *   d'images custom, juste emoji pour rester léger.
  * @property isAdmin si true, ce profil peut créer/modifier/supprimer d'autres

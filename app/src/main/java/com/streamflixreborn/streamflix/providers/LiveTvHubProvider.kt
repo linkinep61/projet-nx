@@ -4481,10 +4481,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return sortie.toString()
     }
 
-    // 2026-06-29 (REPAIR — re-appliqué) : dossier Stream4Free. M3U dédié
-    //   (refs stream4free://<slug>, résolues à la lecture). Cache RAM 30 min.
-    @Volatile private var stream4CacheSections: List<Category> = emptyList()
-    @Volatile private var stream4CacheTs: Long = 0L
+    // 2026-09-20 : le dossier Stream4Free ne passe PLUS par un M3U nx-data. Il est servi
+    //   par BAKED_CHANNELS_M3U_PROXIED (affichage immédiat), puis rafraîchi en direct par
+    //   scrapeChannelsM3u(). L'URL nx-data et son cache RAM dédié étaient devenus morts
+    //   (data-stream4free.m3u n'existe plus dans le dépôt → 404, et plus aucun appelant) :
+    //   retirés. Ne pas les réintroduire sans republier le M3U côté nx-data.
     // 2026-06-29 (REPAIR — user "le fail-safe Stream4Free doit être sur TOUS les
     //   dossiers") : cache + fail-safe pour Pluto et Plex (sinon un seul await()
     //   qui échoue tue tout le dossier à l'ouverture).
@@ -4492,8 +4493,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
     @Volatile private var plutoFolderCacheTs: Long = 0L
     @Volatile private var plexFolderCacheSections: List<Category> = emptyList()
     @Volatile private var plexFolderCacheTs: Long = 0L
-    private const val STREAM4_M3U_URL =
-        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-stream4free.m3u"
     // 2026-07-10 (user "supprime l'intégration LumiChat partout, même sur git") : tous les champs
     //   et helpers LumiChat (cache, M3U URL nx-data, multi-serveurs, rank, normName) RETIRÉS.
 
@@ -5331,26 +5330,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
     }
 
-    suspend fun fetchStream4CategoriesPublic(): List<Category> {
-        val now = System.currentTimeMillis()
-        if (stream4CacheSections.isNotEmpty() && now - stream4CacheTs < MIX_FR_TTL_MS) {
-            return stream4CacheSections
-        }
-        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val req = okhttp3.Request.Builder().url(STREAM4_M3U_URL)
-                    .header("User-Agent", "Mozilla/5.0").build()
-                val body = replayClient.newCall(req).execute().use { it.body?.string().orEmpty() }
-                val cats = parseFastM3u(body)
-                if (cats.isNotEmpty()) { stream4CacheSections = cats; stream4CacheTs = now }
-                Log.d(TAG, "Stream4Free: ${cats.size} catégories")
-                cats
-            } catch (e: Throwable) {
-                Log.w(TAG, "Stream4 fetch failed: ${e.message}")
-                stream4CacheSections
-            }
-        }
-    }
+    // 2026-09-20 : fetchStream4CategoriesPublic() RETIRÉ — il téléchargeait
+    //   data-stream4free.m3u sur nx-data, fichier qui n'existe plus (404), et plus aucun
+    //   appelant depuis le passage au scrape en direct. Voir le commentaire du dossier
+    //   Stream4Free plus haut.
 
     // 2026-07-10 (user "supprime l'intégration LumiChat partout, même sur git") :
     //   parseLumiChatGrouped + fetchLumiChatCategoriesPublic RETIRÉS (passerelle en panne).
