@@ -246,6 +246,9 @@ object VegetaTvProvider : Provider, IptvProvider {
      *  seulement quand l'utilisateur entre dans Vegeta TV (cf. fusionnerRegistreComplet). */
     private const val REMOTE_FULL_URL =
         "https://github.com/rikital/onyxia-data/releases/download/vegeta-full/vegeta-fr-full.json"
+    /** 2026-09-27 : même fichier compressé (gzip), publié à côté par le robot. */
+    private const val REMOTE_FULL_GZ_URL =
+        "https://github.com/rikital/onyxia-data/releases/download/vegeta-full/vegeta-fr-full.json.gz"
     /** Au-delà, le JSON distant est considéré périmé (le cron passe toutes les 4 h ;
      *  24 h tolère une panne de runner sans retomber sur le scan complet). */
     private const val REMOTE_REGISTRY_MAX_AGE_MS = 24L * 60 * 60 * 1000L
@@ -1279,10 +1282,24 @@ object VegetaTvProvider : Provider, IptvProvider {
                 .readTimeout(25, TimeUnit.SECONDS)
                 .callTimeout(40, TimeUnit.SECONDS)
                 .build()
-            val req = Request.Builder().url(REMOTE_FULL_URL)
-                .header("User-Agent", USER_AGENT)
-                .build()
-            val body = clientComplet.newCall(req).execute().use { resp ->
+            // 2026-09-27 : version COMPRESSÉE d'abord (gzip : ~0,55 Mo au lieu de ~10 Mo, soit 17×
+            //   moins à télécharger ; décompression ≈ 0,15-0,5 s). Le JSON brut reste en secours
+            //   (ancien robot, ou .gz absent). OkHttp ne décompresse PAS seul un fichier .gz
+            //   (pas de Content-Encoding) → GZIPInputStream ici.
+            val body = runCatching {
+                clientComplet.newCall(
+                    Request.Builder().url(REMOTE_FULL_GZ_URL).header("User-Agent", USER_AGENT).build()
+                ).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val t0 = System.currentTimeMillis()
+                    val octets = resp.body?.bytes() ?: return@use null
+                    val texte = java.util.zip.GZIPInputStream(octets.inputStream()).bufferedReader().use { it.readText() }
+                    Log.d(TAG, "Registre complet .gz : ${octets.size / 1024} Ko → ${texte.length / 1024} Ko en ${System.currentTimeMillis() - t0} ms")
+                    texte
+                }
+            }.getOrNull() ?: clientComplet.newCall(
+                Request.Builder().url(REMOTE_FULL_URL).header("User-Agent", USER_AGENT).build()
+            ).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     Log.d(TAG, "Registre complet: HTTP ${resp.code} — on garde le registre léger")
                     return@withContext false

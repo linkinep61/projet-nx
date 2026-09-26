@@ -655,6 +655,11 @@ object NakiosProvider : Provider, ProviderConfigUrl {
             val obj = m.value
             val link = unescapeJson(m.groupValues[1])
             if (!link.startsWith("http")) continue
+            // 2026-09-26 (user : « LoiFlix est rouge… quand je fais play sur son lecteur rien ne se
+            //   passe ») : lecteur « Flicky » = embed international vidsrc (anglais par défaut,
+            //   règle de l'app « que du VF/VOSTFR ») dont le domaine vidsrc.xyz n'existe plus
+            //   (NXDOMAIN via DoT, DoH et DNS système). Il ne peut jamais lire → écarté.
+            if (link.contains("vidsrc", ignoreCase = true)) continue
             val serverName = fieldOf(obj, "server_name").ifBlank { fieldOf(obj, "label") }
             val version = fieldOf(obj, "version")
             val label = fieldOf(obj, "label")
@@ -745,7 +750,10 @@ object NakiosProvider : Provider, ProviderConfigUrl {
     //   de ces domaines meurt ou change, Nakios n'est pas affecté. On balaie les 2 domaines et on
     //   déduplique par URL (résilience + pools de hosters éventuellement différents).
     // ─────────────────────────────────────────────────────────────────────────────
-    private val LOIFLIX_DOMAINS = listOf("https://zoolingz.com", "https://movix.bet")
+    // 2026-09-26 (user : « il faut que tu le mettes à la place de LoiFlix ») : movix.bet est
+    //   passé à movix.zip (redirection 301). movix.zip devient l'adresse PRINCIPALE de la source
+    //   LoiFlix ; zoolingz.com n'est plus interrogé qu'en SECOURS, si movix.zip ne rend rien.
+    private val LOIFLIX_DOMAINS = listOf("https://movix.zip", "https://zoolingz.com")
 
     suspend fun fetchLoiflixBackupServers(
         videoType: Video.Type,
@@ -758,6 +766,8 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         val wantMovie = videoType is Video.Type.Movie
         val merged = LinkedHashMap<String, Video.Server>()
         for (base in LOIFLIX_DOMAINS) {
+            // Secours seulement : dès que l'adresse principale a rendu des serveurs, on s'arrête.
+            if (merged.isNotEmpty()) break
             for (t in titles) {
                 val candidates = LinkedHashSet<String>()
                 // Même garde-fou que Nakios : slug deviné seulement si titre spécifique, et

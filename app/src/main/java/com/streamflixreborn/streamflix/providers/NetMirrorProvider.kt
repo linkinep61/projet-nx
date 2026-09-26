@@ -1330,7 +1330,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
      *
      * POUR LE RÉACTIVER quand ils rouvrent : passer NETFLIX_HS à false. Rien d'autre.
      */
-    private const val NETFLIX_HS = true
+    private const val NETFLIX_HS = false   // 2026-09-27 : réactivé (user) — tests de déverrouillage en cours
 
     private suspend fun fetchServersForPlatform(
         platform: OttPlatform,
@@ -1754,6 +1754,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
     private val BACKUPS_ENABLED = !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
+        prechaufferSessionMobile()   // 2026-09-27 : session mobile prête au moment de lire
         val ids = resolveOriginalTitle(parseNmIds(id, videoType))
         Log.d(TAG, "getServers '${ids.title}' (original: '${ids.originalTitle ?: "="}') tmdb=${ids.tmdbId}")
         val native = fetchNativeNetMirrorServers(ids)
@@ -1937,6 +1938,204 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
      * 3. Appelle player.php?id=<contentId> avec le header Ott approprié
      * 4. Retourne le lien M3U8
      */
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    // 2026-09-27 — SESSION « MOBILE » : LA RECETTE DE L'APPLI OFFICIELLE (app.netmirror.nmv2)
+    //   (user : « on se mélange les pinceaux entre la version web et la version mobile » ;
+    //    « la pub n'est qu'une façade… ça finit par se débloquer tout seul »)
+    //
+    // Observé EN DIRECT dans leur appli (WebView débogable), puis rejoué depuis le PC :
+    //   1. GET  net52.cc/mobile/home?app=1   (UA « … /OS.Gatu v3.1 » + X-Requested-With =
+    //      app.netmirror.nmv2) → <body data-addhash="…"> (valable 10 min).
+    //   2. « Clic pub » = GET userver.net52.cc/?ffr455=<addhash>&a=y&t=<hasard>. Le serveur
+    //      note le clic dès CETTE requête (301 vers la régie) : on NE SUIT PAS la redirection,
+    //      aucune page de pub n'est chargée.
+    //   3. POST net52.cc/mobile/verify2.php  verify=<addhash>  → « Waiting for your ads
+    //      click » pendant ~40-60 s, puis « All Done » + Set-Cookie t_hash_t=…::rf::m (12 h).
+    //   4. Avec CE jeton (« ::m »), /mobile/playlist.php → /mobile/hls/<id>.m3u8 donne le VRAI
+    //      film signé (…::myes). Avec l'ancien jeton (faux reCAPTCHA, « ::99 ») le même
+    //      chemin rend la vidéo de pub (asset 220884) : c'était LE verrou Netflix du 20/09.
+    //   Les segments vidéo (.woff2 = vrai TS) sont libres d'accès.
+    // Coût : ~1 min d'attente, une fois toutes les 12 h, lancée en arrière-plan dès l'ouverture
+    //   d'un titre (getServers) pour être prête au moment de lire.
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    private const val NM_APP_UA = "Mozilla/5.0 (Linux; Android 13; CPH2211 Build/TP1A.220905.001; wv) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/152.0.7977.87 Mobile Safari/537.36 /OS.Gatu v3.1"
+    private const val NM_APP_PKG = "app.netmirror.nmv2"
+    private const val PREF_SESSION_MOBILE = "t_hash_m"
+    private const val PREF_SESSION_MOBILE_EXP = "t_hash_m_exp"
+    private val sessionMobileMutex = kotlinx.coroutines.sync.Mutex()
+    @Volatile private var sessionMobile: String? = null
+    @Volatile private var sessionMobileExp = 0L
+
+    /** Client propre : pas d'intercepteur qui écraserait l'UA, pas de redirection suivie. */
+    private val clientMobile: OkHttpClient by lazy {
+        Extractor.sharedClient.newBuilder().apply { interceptors().clear() }
+            .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+            .followRedirects(false).followSslRedirects(false)
+            .build()
+    }
+
+    private fun prefsSessionMobile() = StreamFlixApp.instance.applicationContext
+        .getSharedPreferences("netmirror_session", Context.MODE_PRIVATE)
+
+    /** Lance l'obtention de la session mobile en tâche de fond (sans attendre). */
+    fun prechaufferSessionMobile() {
+        // Renouvelle en avance : s'il reste moins d'1 h, on refait la session en arrière-plan
+        //   (l'ancienne reste utilisée d'ici là) → l'utilisateur n'attend jamais la minute.
+        val valide = sessionMobileValide()
+        if (valide != null && sessionMobileExp - System.currentTimeMillis() > 3600_000L) return
+        if (renouvellementEnCours) return
+        renouvellementEnCours = true
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob()).launch {
+            try { runCatching { ensureSessionMobile(forcer = valide != null) } } finally { renouvellementEnCours = false }
+        }
+    }
+
+    @Volatile private var renouvellementEnCours = false
+
+    private fun sessionMobileValide(): String? {
+        val now = System.currentTimeMillis()
+        sessionMobile?.let { if (now < sessionMobileExp) return it }
+        val sp = prefsSessionMobile()
+        val s = sp.getString(PREF_SESSION_MOBILE, null)
+        val exp = sp.getLong(PREF_SESSION_MOBILE_EXP, 0L)
+        if (s != null && now < exp) { sessionMobile = s; sessionMobileExp = exp; return s }
+        return null
+    }
+
+    /** Cookie « t_hash_t=…::m » de la session mobile, ou null si impossible (~1 min la 1re fois). */
+    suspend fun ensureSessionMobile(forcer: Boolean = false): String? = withContext(Dispatchers.IO) {
+        // forcer = renouvellement anticipé : l'ancienne session reste servie aux lectures pendant ce temps.
+        if (!forcer) sessionMobileValide()?.let { return@withContext it }
+        sessionMobileMutex.withLock {
+            if (!forcer) sessionMobileValide()?.let { return@withLock it }
+            val t0 = System.currentTimeMillis()
+            // 1. page d'accueil mobile → addhash (+ nom du sous-domaine et du paramètre « pub »)
+            val home = clientMobile.newCall(
+                Request.Builder().url("$MAIN_URL/mobile/home?app=1")
+                    .header("User-Agent", NM_APP_UA)
+                    .header("X-Requested-With", NM_APP_PKG)
+                    .build()
+            ).execute().use { it.body?.string().orEmpty() }
+            val addhash = Regex("""data-addhash="([^"]+)"""").find(home)?.groupValues?.get(1)
+            if (addhash.isNullOrBlank()) {
+                Log.w(TAG, "session mobile : pas d'addhash (${home.take(80)})")
+                return@withLock null
+            }
+            val vsite = Regex("""var Vsite2\s*=\s*"(\w+)"""").find(home)?.groupValues?.get(1) ?: "userver"
+            val qury = Regex("""var Qury\s*=\s*"(\w+)"""").find(home)?.groupValues?.get(1) ?: "ffr455"
+            val enc = java.net.URLEncoder.encode(addhash, "UTF-8")
+            val domaine = MAIN_URL.removePrefix("https://")
+            // 2. « clic pub » : une seule requête, redirection NON suivie
+            runCatching {
+                clientMobile.newCall(
+                    Request.Builder().url("https://$vsite.$domaine/?$qury=$enc&a=y&t=${Math.random()}")
+                        .header("User-Agent", NM_APP_UA)
+                        .header("X-Requested-With", NM_APP_PKG)
+                        .build()
+                ).execute().close()
+            }
+            // 3. attente de la validation (le serveur la donne seul après ~40-60 s)
+            for (tour in 0 until 30) {
+                kotlinx.coroutines.delay(if (tour == 0) 2_000L else 5_000L)
+                val rep = runCatching {
+                    clientMobile.newCall(
+                        Request.Builder().url("$MAIN_URL/mobile/verify2.php")
+                            .header("User-Agent", NM_APP_UA)
+                            .header("X-Requested-With", "XMLHttpRequest")
+                            .header("Referer", "$MAIN_URL/mobile/home?app=1")
+                            .header("Origin", MAIN_URL)
+                            .header("Cookie", "addhash=$enc")
+                            .post(FormBody.Builder().addEncoded("verify", enc).build())
+                            .build()
+                    ).execute()
+                }.getOrNull() ?: continue
+                val cookie = rep.use { r ->
+                    r.headers("Set-Cookie").firstOrNull { it.startsWith("t_hash_t=") }?.substringBefore(";")
+                }
+                if (cookie != null) {
+                    val exp = System.currentTimeMillis() + 11L * 3600_000L   // Max-Age 12 h, marge 1 h
+                    sessionMobile = cookie; sessionMobileExp = exp
+                    prefsSessionMobile().edit()
+                        .putString(PREF_SESSION_MOBILE, cookie).putLong(PREF_SESSION_MOBILE_EXP, exp).apply()
+                    Log.d(TAG, "session mobile OK en ${(System.currentTimeMillis() - t0) / 1000} s")
+                    return@withLock cookie
+                }
+            }
+            Log.w(TAG, "session mobile : pas de validation après ${(System.currentTimeMillis() - t0) / 1000} s")
+            null
+        }
+    }
+
+    /**
+     * Lecture par le chemin MOBILE (celui de l'appli officielle). Null si la session mobile
+     * n'est pas disponible ou si la réponse est inattendue → l'appelant garde l'ancien chemin.
+     */
+    private suspend fun lectureMobile(
+        contentId: String,
+        ottCode: String,
+        vostfrDemande: Boolean,
+    ): Video? = withContext(Dispatchers.IO) {
+        val session = withTimeoutOrNull(55_000L) { ensureSessionMobile() } ?: return@withContext null
+        val entetes = mapOf(
+            "User-Agent" to NM_APP_UA,
+            "X-Requested-With" to NM_APP_PKG,
+            "Cookie" to "$session; ott=$ottCode; hd=on",
+            "Referer" to "$MAIN_URL/mobile/home?app=1",
+        )
+        // Même découpage par plateforme que le chemin historique, préfixé /mobile :
+        //   nf /playlist.php → /mobile/playlist.php ; pv /pv/playlist.php → /mobile/pv/playlist.php
+        //   (vérifié : Prime Star Trek → vrai film 1080p direct, là où /pv/ rend la pub 220884).
+        val chemin0 = OttPlatform.entries.find { it.ottCookie == ottCode }?.playlistPath ?: "/playlist.php"
+        val url = "$MAIN_URL/mobile$chemin0?id=$contentId&t=&tm=${System.currentTimeMillis() / 1000}"
+        val body = clientMobile.newCall(
+            Request.Builder().url(url).apply { entetes.forEach { (k, v) -> header(k, v) } }.build()
+        ).execute().use { r -> if (r.isSuccessful) r.body?.string() else null } ?: return@withContext null
+        val entry = runCatching {
+            if (body.trimStart().startsWith("[")) JSONArray(body).optJSONObject(0) else JSONObject(body).optJSONObject("0")
+        }.getOrNull() ?: return@withContext null
+        val file = entry.optJSONArray("sources")?.optJSONObject(0)?.optString("file")
+            ?.takeIf { it.isNotBlank() } ?: return@withContext null
+        // Le jeton du lien doit reprendre l'identifiant de NOTRE session (sinon : lien anonyme = pub).
+        val idSession = java.net.URLDecoder.decode(session.substringAfter("t_hash_t="), "UTF-8").substringBefore("::")
+        if (idSession.isBlank() || !file.contains("in=$idSession")) {
+            Log.w(TAG, "lecture mobile : jeton hors session (${file.take(80)}) → ancien chemin")
+            return@withContext null
+        }
+        // Piste audio par défaut : française pour le serveur VF (le master les contient toutes).
+        val langue = if (vostfrDemande) "eng" else "fra"
+        val chemin = if (file.contains("lang=")) file.replace(Regex("lang=[a-z]+"), "lang=$langue") else "$file&lang=$langue"
+        val master = if (chemin.startsWith("http")) chemin else "$MAIN_URL$chemin"
+        // Sous-titres : mêmes règles que le chemin historique (FR en tête, défaut seulement en VOSTFR).
+        val sousTitres = mutableListOf<Video.Subtitle>()
+        var aDuFrancais = false
+        entry.optJSONArray("tracks")?.let { tr ->
+            for (i in 0 until tr.length()) {
+                val t = tr.optJSONObject(i) ?: continue
+                if (!t.optString("kind").equals("captions", ignoreCase = true)) continue
+                var f = t.optString("file")
+                if (f.isBlank()) continue
+                if (f.startsWith("//")) f = "https:$f"
+                // Leur JSON mobile n'a pas toujours `language` : on le lit dans le nom (…-fr.srt).
+                val lg = t.optString("language").ifBlank {
+                    Regex("""-([a-zA-Z]{2}(?:-[a-zA-Z]+)?)[.(\[]""").find(f.substringAfterLast("/"))?.groupValues?.get(1).orEmpty()
+                }.lowercase()
+                val estFr = lg == "fr" || lg.startsWith("fr-") || lg.startsWith("fr.")
+                if (estFr) aDuFrancais = true
+                sousTitres.add(Video.Subtitle(label = nomLangueSousTitre(lg, t.optString("label")), file = f, default = estFr && vostfrDemande))
+            }
+        }
+        if (vostfrDemande && !aDuFrancais) throw IllegalStateException("NetMirror: aucun sous-titre français pour ce contenu")
+        sousTitres.sortWith(compareBy({ if (it.default || it.label.startsWith("Français")) 0 else 1 }, { it.label }))
+        Log.d(TAG, "lecture MOBILE OK : ${master.take(90)} (sous-titres ${sousTitres.size})")
+        Video(
+            source = master,
+            headers = entetes,
+            type = "application/x-mpegURL",
+            subtitles = if (vostfrDemande) sousTitres else emptyList(),
+        )
+    }
+
     override suspend fun getVideo(server: Video.Server): Video = withContext(Dispatchers.IO) {
         // ── Délégation backup ──
         if (server.id.startsWith("nm_cs__")) {
@@ -2046,6 +2245,15 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             episodeId ?: error("NetMirror : épisode S${seasonNum}E${episodeNum} introuvable")
         } else {
             netmirrorId
+        }
+
+        // 2026-09-27 : chemin MOBILE d'abord (recette de l'appli officielle, cf. ensureSessionMobile).
+        //   Toutes plateformes (vérifié Netflix + Prime) ; l'ancien chemin reste en secours.
+        run {
+            val mobile = runCatching { lectureMobile(contentId, ottCode, vostfrDemande) }
+                .onFailure { Log.w(TAG, "lecture mobile KO : ${it.message}") }
+                .getOrNull()
+            if (mobile != null) return@withContext mobile
         }
 
         // 2026-07-08 (user : « tu prends une partie de leur application qu'on met dans la nôtre ») :

@@ -65,6 +65,45 @@ object GlobalFavorites {
             )
         }
 
+    /**
+     * 2026-09-27 (filtre « Déjà vus » du cœur) : films marqués vus (isWatched) et séries
+     * dont tous les épisodes connus en base sont vus, dans TOUTES les sources non-IPTV.
+     * Renseigne [originByItemId] pour que le clic rouvre la fiche dans la bonne source.
+     */
+    suspend fun loadWatched(context: Context): Pair<List<Movie>, List<TvShow>> =
+        withContext(Dispatchers.IO) {
+            val movies = mutableListOf<Movie>()
+            val tvShows = mutableListOf<TvShow>()
+            val providers = Provider.providers.keys.filter { it !is IptvProvider }
+            for (p in providers) {
+                if (!AppDatabase.providerDbExists(p.name, context)) continue
+                try {
+                    val db = AppDatabase.getInstanceForProvider(p.name, context)
+                    try {
+                        val vus = db.movieDao().getAll().filter { it.isWatched }
+                        vus.forEach { originByItemId.putIfAbsent(it.id, p.name) }
+                        movies += vus
+                        // Séries : épisodes vus groupés par série ; « terminée » = tous vus.
+                        val episodes = db.episodeDao().getAllForBackup()
+                        val parShow = episodes.filter { it.tvShow?.id != null }.groupBy { it.tvShow!!.id }
+                        for ((showId, eps) in parShow) {
+                            if (eps.isEmpty() || !eps.all { it.isWatched }) continue
+                            val show = try { db.tvShowDao().getById(showId) } catch (_: Exception) { null } ?: continue
+                            originByItemId.putIfAbsent(show.id, p.name)
+                            tvShows += show
+                        }
+                    } finally {
+                        try { db.close() } catch (_: Exception) {}
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "  [${p.name}] ERREUR lecture vus: ${e.message}")
+                }
+            }
+            Pair(
+                movies.sortedByDescending { it.watchedDate?.timeInMillis ?: 0L },
+                tvShows,
+            )
+        }
     /** Avant d'ouvrir un favori : bascule sur son provider d'origine pour que la
      *  fiche détail lise la bonne DB / utilise le bon provider. */
     fun switchToOrigin(itemId: String) {

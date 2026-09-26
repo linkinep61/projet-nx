@@ -74,7 +74,7 @@ object TokyVideo {
     private fun telecharger(): Index? {
         val req = okhttp3.Request.Builder()
             .url("$INDEX_URL?h=${System.currentTimeMillis() / 3_600_000L}")
-            .header("Cache-Control", "no-cache")
+            // 2026-09-27 : plus de « Cache-Control: no-cache » : il empêchait OkHttp de reposer la question « modifié ? » (ETag) et forçait le téléchargement complet à chaque fois. Sans lui, le cache disque de NetworkClient répond seul (fichier inchangé = « 304 », 0 octet).
             .header("User-Agent", "Mozilla/5.0")
             .header("Accept", "application/json")
             .build()

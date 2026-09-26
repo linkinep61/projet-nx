@@ -31,6 +31,7 @@ import com.streamflixreborn.streamflix.databinding.ContentMovieRecommendationsMo
 import com.streamflixreborn.streamflix.databinding.ContentMovieRecommendationsTvBinding
 import com.streamflixreborn.streamflix.databinding.ContentMovieTvBinding
 import com.streamflixreborn.streamflix.databinding.ItemCategorySwiperMobileBinding
+import com.streamflixreborn.streamflix.databinding.ItemFavRowMobileBinding
 import com.streamflixreborn.streamflix.databinding.ItemMovieGridMobileBinding
 import com.streamflixreborn.streamflix.databinding.ItemMovieGridTvBinding
 import com.streamflixreborn.streamflix.databinding.ItemMovieMobileBinding
@@ -144,6 +145,7 @@ class MovieViewHolder(
             is ItemMovieMobileBinding -> displayMobileItem(_binding)
             is ItemMovieTvBinding -> displayTvItem(_binding)
             is ItemMovieGridMobileBinding -> displayGridMobileItem(_binding)
+            is ItemFavRowMobileBinding -> displayFavRowMobile(_binding)
             is ItemMovieGridTvBinding -> displayGridTvItem(_binding)
             is ItemCategorySwiperMobileBinding -> displaySwiperMobileItem(_binding)
 
@@ -661,6 +663,98 @@ class MovieViewHolder(
         binding.tvMovieTitle.text = movie.title
     }
 
+    /**
+     * 2026-09-27 : ligne du Cœur (favoris globaux) mobile, style panneau Radio.
+     * Clic/appui long = mêmes comportements que la carte du cœur (reprise film →
+     * lecteur direct, favori → fiche dans sa source d'origine).
+     */
+    private fun displayFavRowMobile(binding: ItemFavRowMobileBinding) {
+        binding.root.apply {
+            setOnClickListener {
+                checkProviderAndRun {
+                    if (movie.itemType == AppAdapter.Type.MOVIE_FAV_RESUME_ROW_MOBILE_ITEM) {
+                        // Reprise de lecture film → switch provider + lecteur direct
+                        com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin("resume_movie_${movie.id}")
+                        findNavController().navigate(
+                            R.id.action_global_player,
+                            Bundle().apply {
+                                putString("id", movie.id)
+                                putString("title", movie.title)
+                                putString("subtitle", movie.released?.format("yyyy") ?: "")
+                                putSerializable(
+                                    "videoType",
+                                    Video.Type.Movie(
+                                        id = movie.id,
+                                        title = movie.title,
+                                        releaseDate = movie.released?.format("yyyy-MM-dd") ?: "",
+                                        poster = movie.poster ?: movie.banner ?: "",
+                                        imdbId = movie.imdbId,
+                                    )
+                                )
+                            }
+                        )
+                        return@checkProviderAndRun
+                    }
+                    com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(movie.id)
+                    if (isDramaOrAnimeProvider()) {
+                        findNavController().navigate(R.id.action_global_tv_show, Bundle().apply {
+                            putString("id", movie.id)
+                            putString("poster", movie.poster)
+                        })
+                    } else {
+                        findNavController().navigate(R.id.action_global_movie, Bundle().apply {
+                            putString("id", movie.id)
+                        })
+                    }
+                }
+            }
+            setOnLongClickListener {
+                val cf = context.toActivity()?.getCurrentFragment()
+                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                    showFavoriteLongPressDialog(context, movie.title, onRemove = {
+                        cf.removeFavorite(movie.id, true)
+                    }, onDownload = {
+                        val activity = context.toActivity()
+                        if (activity != null) {
+                            com.streamflixreborn.streamflix.download.QuickDownload.downloadMovie(context, activity.lifecycleScope, movie)
+                        }
+                    })
+                } else {
+                    ShowOptionsMobileDialog(context, movie).show()
+                }
+                true
+            }
+        }
+
+        binding.ivFavPoster.loadMoviePoster(movie) {
+            centerCrop()
+            transition(DrawableTransitionOptions.withCrossFade())
+        }
+        binding.tvFavTitle.text = movie.title
+        val wh = movie.watchHistory
+        binding.pbFavProgress.apply {
+            if (wh != null && wh.durationMillis > 0) {
+                progress = (wh.lastPlaybackPositionMillis * 100 / wh.durationMillis.toDouble()).toInt()
+                visibility = View.VISIBLE
+            } else visibility = View.GONE
+        }
+        val parts = mutableListOf<String>()
+        parts += if (movie.isSeries) "Série" else "Film"
+        movie.released?.format("yyyy")?.let { parts += it }
+        if (wh != null && wh.durationMillis > 0 && !movie.isWatched) {
+            val reste = ((wh.durationMillis - wh.lastPlaybackPositionMillis) / 60000L).coerceAtLeast(1)
+            parts += "reste $reste min"
+        }
+        binding.tvFavSub.text = parts.joinToString(" · ")
+        binding.tvFavVu.visibility = if (movie.isWatched) View.VISIBLE else View.GONE
+        binding.tvFavVu.text = "✓ vu"
+        val src = movie.providerName ?: com.streamflixreborn.streamflix.utils.GlobalFavorites.originByItemId[movie.id]
+        binding.tvFavSource.text = src ?: ""
+        binding.tvFavSource.visibility = if (src.isNullOrBlank()) View.GONE else View.VISIBLE
+        binding.tvFavStar.text = if (movie.isFavorite) "★" else "☆"
+        binding.tvFavStar.setTextColor(android.graphics.Color.parseColor(if (movie.isFavorite) "#E2B33B" else "#565C66"))
+        binding.tvFavStar.setOnClickListener { binding.root.performLongClick() }
+    }
     private fun displayGridTvItem(binding: ItemMovieGridTvBinding) {
         binding.root.apply {
             isFocusable = true

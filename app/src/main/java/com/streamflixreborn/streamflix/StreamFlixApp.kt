@@ -206,7 +206,17 @@ class StreamFlixApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-
+        // 2026-09-27 : session mobile NetMirror préparée au démarrage (≈1 min en arrière-plan,
+        //   une fois toutes les ~11 h) → la 1re lecture NetMirror n'attend pas. 10 s de délai pour
+        //   laisser les préférences s'initialiser et ne pas concurrencer le démarrage.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            runCatching {
+                if (com.streamflixreborn.streamflix.utils.UserPreferences.isBackupSourceEnabled("NetMirror") ||
+                    com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name == "NetMirror") {
+                    com.streamflixreborn.streamflix.providers.NetMirrorProvider.prechaufferSessionMobile()
+                }
+            }
+        }, 10_000L)
         // 2026-08-27 (VPN global) : le ProxySelector doit être posé AVANT que
         //   le moindre OkHttpClient ne soit construit — OkHttp capture
         //   ProxySelector.getDefault() à la construction du client, pas à

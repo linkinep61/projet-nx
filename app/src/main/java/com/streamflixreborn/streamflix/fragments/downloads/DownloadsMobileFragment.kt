@@ -112,7 +112,7 @@ class DownloadsMobileFragment : Fragment() {
         if (!available) {
             Toast.makeText(requireContext(), "Fichier introuvable", Toast.LENGTH_SHORT).show()
             viewLifecycleOwner.lifecycleScope.launch {
-                DownloadManager.deleteCompleted(download.id)
+                DownloadManager.oublier(download.id)   // 2026-09-27 : la ligne seulement, jamais le fichier
             }
             return
         }

@@ -32,6 +32,8 @@ object OlaVod {
     private const val TAG = "OlaVod"
     private const val INDEX_URL = "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/olatv/ola-vod-fr.json"
     // Séries : fichier et script À PART (user : « indépendant, pour pas qu'il y ait de casse »).
+    /** 2026-09-27 : même index des films en format compact (~3x moins à lire) ; repli sur INDEX_URL. */
+    private const val COMPACT_URL = "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/olatv/ola-vod-fr-compact.json"
     private const val SERIES_URL = "https://raw.githubusercontent.com/rikital/onyxia-data/main/data/olatv/ola-series-fr.json"
     private const val TTL_MS = 6 * 60 * 60 * 1000L
     const val PREFIX_FILM = "livehub::olavod::film::"
@@ -83,8 +85,14 @@ object OlaVod {
             cache?.let { if (!forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withLock it }
             val h = System.currentTimeMillis() / 3_600_000L
             // Films et séries chargés séparément : l'un peut manquer sans bloquer l'autre.
-            val f = runCatching { telecharger("$INDEX_URL?h=$h") }
-                .getOrElse { Log.w(TAG, "index films illisible : ${it.message}"); null }
+            val t0 = System.currentTimeMillis()
+            val f = runCatching { telecharger("$COMPACT_URL?h=$h") }
+                .getOrElse { Log.w(TAG, "index compact illisible : ${it.message}"); null }
+                ?.takeIf { it.films.isNotEmpty() }
+                ?.also { Log.i(TAG, "index films COMPACT : ${it.films.size} films en ${System.currentTimeMillis() - t0} ms") }
+                ?: runCatching { telecharger("$INDEX_URL?h=$h") }
+                    .getOrElse { Log.w(TAG, "index films illisible : ${it.message}"); null }
+                    ?.also { Log.i(TAG, "index films (ancien format) : ${it.films.size} films en ${System.currentTimeMillis() - t0} ms") }
             val s = runCatching { telecharger("$SERIES_URL?h=$h") }
                 .getOrElse { Log.w(TAG, "index séries illisible : ${it.message}"); null }
             if (f == null && s == null) return@withLock cache
@@ -113,10 +121,12 @@ object OlaVod {
 
     private fun telecharger(url: String): Index? {
         val req = okhttp3.Request.Builder().url(url)
-            .header("Cache-Control", "no-cache").header("User-Agent", "Mozilla/5.0")
+            .header("User-Agent", "Mozilla/5.0")
             .header("Accept", "application/json").build()
         return NetworkClient.default.newCall(req).execute().use { r ->
             if (!r.isSuccessful) { Log.w(TAG, "http ${r.code} sur $url"); return@use null }
+            // 2026-09-27 : réseau=304 → fichier inchangé servi par le cache disque (0 octet transféré).
+            Log.d(TAG, "index ${url.substringAfterLast('/')} : réseau=${r.networkResponse?.code ?: "aucun"} cache=${r.cacheResponse != null}")
             val corps = r.body ?: return@use null
             // Index de ~9 Mo : lecture EN FLUX (cf. VegetaVod), jamais un JSONObject géant.
             android.util.JsonReader(java.io.BufferedReader(corps.charStream(), 64 * 1024)).use { analyser(it) }
@@ -125,13 +135,26 @@ object OlaVod {
 
     private class Brut(val g: Int, val cmd: String, val t: String, val y: Int, val tmdb: Int, val img: String, val c: String)
 
+    /** Commande Stalker standard d'un film, identique octet pour octet à celle du portail
+     *  (vérifié par compacter_ola_vod.py sur tout le catalogue avant publication). */
+    private fun cmdStandard(id: String, ext: String): String {
+        val json = "{\"type\":\"movie\",\"stream_id\":\"" + id + "\",\"stream_source\":null," +
+            "\"target_container\":\"[\\\"" + ext + "\\\"]\"}"
+        return android.util.Base64.encodeToString(json.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+    }
+
     private fun analyser(jr: android.util.JsonReader): Index {
+        val tDebut = System.currentTimeMillis()
         val groupes = HashMap<Int, List<Portail>>()
         val bruts = ArrayList<Brut>(32_000)
         val sbruts = ArrayList<Brut>(8_000)
+        var imgp = ""
+        val cats = ArrayList<String>()
         jr.beginObject()
         while (jr.hasNext()) {
             when (jr.nextName()) {
+                "imgp" -> imgp = jr.nextString()
+                "cats" -> { jr.beginArray(); while (jr.hasNext()) cats += jr.nextString(); jr.endArray() }
                 "groupes" -> {
                     jr.beginObject()
                     while (jr.hasNext()) {
@@ -155,6 +178,31 @@ object OlaVod {
                 "films" -> {
                     jr.beginArray()
                     while (jr.hasNext()) {
+                        // 2026-09-27 : format COMPACT (ola-vod-fr-compact.json) = tableau
+                        //   [g, cmd, t, y, tmdb, img, c] → reconstruit à l'identique (cf. cmdStandard).
+                        if (jr.peek() == android.util.JsonToken.BEGIN_ARRAY) {
+                            jr.beginArray()
+                            val g = jr.nextInt()
+                            val cc = jr.nextString()
+                            val t = jr.nextString()
+                            val y = runCatching { jr.nextInt() }.getOrElse { jr.skipValue(); 0 }
+                            val tmdb = runCatching { jr.nextInt() }.getOrElse { jr.skipValue(); 0 }
+                            val im = jr.nextString()
+                            val ci = jr.nextInt()
+                            while (jr.hasNext()) jr.skipValue()
+                            jr.endArray()
+                            val cmd = if (cc.startsWith("~")) {
+                                val p = cc.substring(1).split('~')
+                                cmdStandard(p[0], p.getOrElse(1) { "mkv" })
+                            } else cc
+                            val img = when {
+                                im.isEmpty() -> ""
+                                im.startsWith("!") -> im.substring(1)
+                                else -> imgp + im
+                            }
+                            if (g >= 0 && cmd.isNotBlank() && t.isNotBlank()) bruts += Brut(g, cmd, t, y, tmdb, img, cats.getOrElse(ci) { "" })
+                            continue
+                        }
                         var g = -1; var cmd = ""; var t = ""; var y = 0; var tmdb = 0; var img = ""; var c = ""
                         jr.beginObject()
                         while (jr.hasNext()) {
@@ -200,6 +248,7 @@ object OlaVod {
             }
         }
         jr.endObject()
+        val tLu = System.currentTimeMillis()
         val sParCle = LinkedHashMap<String, MutableList<Brut>>()
         for (b in sbruts) {
             if (b.g !in groupes) continue
@@ -231,6 +280,7 @@ object OlaVod {
                 sources = liste.map { it.g to it.cmd }.distinct(),
             )
         }
+        Log.d(TAG, "analyse : lecture ${tLu - tDebut} ms, regroupement ${System.currentTimeMillis() - tLu} ms (${bruts.size} lignes)")
         return Index(groupes, films, series)
     }
 
@@ -238,8 +288,15 @@ object OlaVod {
     private val RE_DECOR = Regex("[^\\p{L}\\p{N}&+'’ /.-]")
     private val RE_PREFIXE_FR = Regex("^(?i)(\\s*(FR|VF|VOD|FRANCE|FRENCH)\\s*[-:|]?\\s*)+")
 
+    /** 2026-09-27 : 75 catégories seulement, mais categorie() était appelée ~40 000 fois par
+     *  chargement (3 regex chacune, dont une recompilée à chaque appel) → la majeure partie des
+     *  13 s mesurées sur la TV. Résultat mémorisé par nom brut. */
+    private val categoriesCalculees = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     /** « FR - ACTION » → « Action », « FR ⭐ VISION 2022 » → « Vision 2022 ». */
-    fun categorie(brut: String): String {
+    fun categorie(brut: String): String = categoriesCalculees.getOrPut(brut) { calculerCategorie(brut) }
+
+    private fun calculerCategorie(brut: String): String {
         var s = RE_DECOR.replace(brut, " ").replace(Regex("\\s+"), " ").trim()
         s = RE_PREFIXE_FR.replace(s, "").trim(' ', '-', '|')
         if (s.isBlank()) return "Films"
@@ -434,18 +491,57 @@ object OlaVod {
         val ep = parts.getOrNull(2).orEmpty()   // vide pour un film
         val idx = cache ?: index()
         val portails = (if (ep.isNotEmpty()) idx?.sgroupes?.get(g) else idx?.groupes?.get(g)).orEmpty().shuffled()
+        var secours: String? = null
         for (p in portails) {
             val url = runCatching { lien(p, cmd, ep) }.getOrNull()
+            // 2026-09-26 (user : « je suis repassé sur le serveur 1, il n'a pas voulu se lire, je
+            //   suis retourné dessus, il s'est lu ») : le portail tiré au sort peut donner un lien
+            //   dont le COMPTE (MAC) est déjà occupé → le lecteur reçoit « 458 » et le relance 3
+            //   fois pour rien. On vérifie le lien (1 octet, via DoH) avant de le rendre ; occupé
+            //   ou en erreur → portail suivant. Si la vérification elle-même échoue (réseau), le
+            //   lien est gardé en secours plutôt que perdu.
+            if (url != null) {
+                when (val code = codeLecture(url)) {
+                    in 200..399 -> Unit
+                    null -> { if (secours == null) secours = url; continue }
+                    else -> {
+                        Log.i(TAG, "lien refusé (HTTP $code, ${p.base.substringAfter("//").substringBefore("/")}) → portail suivant")
+                        continue
+                    }
+                }
+            }
             if (url != null) {
                 Log.i(TAG, "lien obtenu (${p.base.substringAfter("//").substringBefore("/")})")
-                return@withContext Video(
-                    source = url,
-                    // Extension réelle lue dans le lien (« stream=1418154.mkv »), sinon celle du cmd.
-                    type = VegetaVod.mimeDe(Regex("stream=[^&.]+\\.([a-z0-9]{2,4})", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1) ?: extension(cmd)),
-                    headers = mapOf("User-Agent" to UA_LECTURE),
-                )
+                return@withContext videoDe(url, cmd)
             }
+        }
+        secours?.let {
+            Log.i(TAG, "lien de secours (non vérifié)")
+            return@withContext videoDe(it, cmd)
         }
         throw Exception("Aucun portail n'a fourni ce film")
     }
+
+    private fun videoDe(url: String, cmd: String) = Video(
+        source = url,
+        // Extension réelle lue dans le lien (« stream=1418154.mkv »), sinon celle du cmd.
+        type = VegetaVod.mimeDe(Regex("stream=[^&.]+\\.([a-z0-9]{2,4})", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1) ?: extension(cmd)),
+        headers = mapOf("User-Agent" to UA_LECTURE),
+    )
+
+    /** Code HTTP d'une lecture d'1 octet du lien (redirections suivies, DNS via DoH comme le
+     *  lecteur). null = pas de réponse (réseau/délai). 458 = compte déjà utilisé. */
+    private fun codeLecture(url: String): Int? = runCatching {
+        val client = NetworkClient.default.newBuilder()
+            .connectTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .dns(DnsResolver.doh)
+            .build()
+        val req = okhttp3.Request.Builder().url(url)
+            .header("User-Agent", UA_LECTURE)
+            .header("Range", "bytes=0-0")
+            .build()
+        client.newCall(req).execute().use { it.code }
+    }.getOrNull()
 }

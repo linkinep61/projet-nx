@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-09-27 : Cœur (favoris globaux) mobile, style panneau Radio :
+     en-tête + bascule de filtres + carte Reprendre + puces de tri + liste. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0B0C0F">
+
+    <LinearLayout
+        android:id="@+id/ll_fav_panel"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_margin="8dp"
+        android:background="@drawable/bg_fav_panel_mobile"
+        android:orientation="vertical"
+        android:paddingStart="14dp"
+        android:paddingTop="14dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="8dp">
+
+        <!-- En-tête -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="❤️"
+                android:textSize="20sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:text="Favoris"
+                android:textColor="#F5F6F8"
+                android:textSize="18sp" />
+
+            <TextView
+                android:id="@+id/tv_fav_count"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_fav_badge_mobile"
+                android:paddingStart="9dp"
+                android:paddingTop="2dp"
+                android:paddingEnd="9dp"
+                android:paddingBottom="2dp"
+                android:textColor="#DDE0E5"
+                android:textSize="12sp"
+                tools:text="47" />
+
+            <TextView
+                android:id="@+id/tv_fav_sources"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/bg_fav_badge_mobile"
+                android:paddingStart="9dp"
+                android:paddingTop="2dp"
+                android:paddingEnd="9dp"
+                android:paddingBottom="2dp"
+                android:textColor="#DDE0E5"
+                android:textSize="12sp"
+                tools:text="6 sources" />
+
+            <Space
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/tv_fav_clear"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="6dp"
+                android:text="🗑"
+                android:textColor="#9AA0AA"
+                android:textSize="18sp" />
+        </LinearLayout>
+
+        <!-- Bascule segmentée des filtres -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_fav_seg_mobile"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/ll_fav_filters"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:padding="4dp" />
+        </HorizontalScrollView>
+
+        <!-- Carte Reprendre (masquée si rien à reprendre) -->
+        <LinearLayout
+            android:id="@+id/ll_fav_resume"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_fav_card_mobile"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="10dp"
+            android:visibility="gone"
+            tools:visibility="visible">
+
+            <FrameLayout
+                android:layout_width="40dp"
+                android:layout_height="60dp">
+
+                <ImageView
+                    android:id="@+id/iv_resume_poster"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scaleType="centerCrop"
+                    android:importantForAccessibility="no" />
+            </FrameLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/tv_resume_title"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:textColor="#F5F6F8"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        tools:text="84 m²" />
+
+                    <TextView
+                        android:id="@+id/tv_resume_source"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_fav_badge_mobile"
+                        android:paddingStart="7dp"
+                        android:paddingTop="1dp"
+                        android:paddingEnd="7dp"
+                        android:paddingBottom="1dp"
+                        android:textColor="#DDE0E5"
+                        android:textSize="10sp"
+                        tools:text="Movix" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tv_resume_sub"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="#9AA0AA"
+                    android:textSize="12sp"
+                    tools:text="Reprendre · reste 55 min" />
+
+                <ProgressBar
+                    android:id="@+id/pb_resume"
+                    style="@android:style/Widget.ProgressBar.Horizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="4dp"
+                    android:layout_marginTop="6dp"
+                    android:backgroundTint="#2F343E"
+                    android:progressTint="#E23B3B"
+                    tools:progress="52" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/btn_resume_prev"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="6dp"
+                android:text="⏮"
+                android:textColor="#DDE0E5"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/btn_resume_play"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_fav_play_mobile"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp"
+                android:text="▶"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/btn_resume_next"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="6dp"
+                android:text="⏭"
+                android:textColor="#DDE0E5"
+                android:textSize="16sp" />
+        </LinearLayout>
+
+        <!-- Puces de tri -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/ll_fav_sorts"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:paddingEnd="8dp"
+                    android:text="Trier :"
+                    android:textColor="#9AA0AA"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- Liste -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rv_fav"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="6dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:paddingBottom="16dp" />
+
+        <TextView
+            android:id="@+id/tv_fav_empty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:padding="24dp"
+            android:text="Aucun favori ni reprise de lecture"
+            android:textColor="#9AA0AA"
+            android:textSize="14sp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <ProgressBar
+        android:id="@+id/pb_fav_loading"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_gravity="center"
+        android:indeterminateTint="#E23B3B" />
+</FrameLayout>

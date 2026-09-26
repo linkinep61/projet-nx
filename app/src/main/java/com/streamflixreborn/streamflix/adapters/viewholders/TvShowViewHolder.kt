@@ -104,6 +104,7 @@ class TvShowViewHolder(
             is ItemTvShowMobileBinding -> displayMobileItem(_binding)
             is ItemTvShowTvBinding -> displayTvItem(_binding)
             is ItemTvShowGridMobileBinding -> displayGridMobileItem(_binding)
+            is ItemFavRowMobileBinding -> displayFavRowMobile(_binding)
             is ItemTvShowGridBinding -> displayGridTvItem(_binding)
             is ItemCategorySwiperMobileBinding -> displaySwiperMobileItem(_binding)
 
@@ -1581,6 +1582,93 @@ class TvShowViewHolder(
         )
     }
 
+    /**
+     * 2026-09-27 : ligne du Cœur (favoris globaux) mobile, style panneau Radio.
+     * Mêmes comportements que la carte grille du cœur : favoris replay/saison/épisode
+     * (ids synthétiques), reprise série, replay film direct, fiche série sinon.
+     */
+    private fun displayFavRowMobile(binding: ItemFavRowMobileBinding) {
+        binding.root.setOnClickListener {
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX)) {
+                openReplayFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
+                openSeasonFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.EpisodeFavorites.SYNTHETIC_ID_PREFIX)) {
+                openEpisodeFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
+            if (tvShow.id.startsWith("resume_series_")) {
+                openResumeSeries(binding.root.findNavController()); return@setOnClickListener
+            }
+            if (routeReplayFavoriteIfMovie(binding.root.findNavController())) return@setOnClickListener
+            checkProviderAndRun {
+                com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
+                if (isIptvProvider()) {
+                    handleDirectPlay(binding.root.findNavController())
+                } else {
+                    binding.root.findNavController().navigate(R.id.tv_show, tvShowArgs())
+                }
+            }
+        }
+        binding.root.setOnLongClickListener {
+            val cf = context.toActivity()?.getCurrentFragment()
+            if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
+                showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
+                    com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
+                        tvShow.id, tvShow.title, tvShow.poster, tvShow.banner, tvShow.isMovie)
+                    android.widget.Toast.makeText(context, "Retiré des favoris", android.widget.Toast.LENGTH_SHORT).show()
+                }, onDownload = null)
+                return@setOnLongClickListener true
+            }
+            if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
+                    cf.removeFavorite(tvShow.id, false)
+                }, onDownload = null)
+            } else if (!handleIptvFavoriteLongPress()) {
+                ShowOptionsMobileDialog(context, tvShow).show()
+            }
+            true
+        }
+        setPoster(binding.ivFavPoster)
+        binding.tvFavTitle.text = tvShow.title
+        val wh = tvShow.episodeToWatch?.watchHistory
+        binding.pbFavProgress.apply {
+            if (wh != null && wh.durationMillis > 0) {
+                progress = (wh.lastPlaybackPositionMillis * 100 / wh.durationMillis.toDouble()).toInt()
+                visibility = View.VISIBLE
+            } else visibility = View.GONE
+        }
+        val parts = mutableListOf<String>()
+        val synthetic = tvShow.id.startsWith("resume_series_")
+            || tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX)
+            || tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)
+            || tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.EpisodeFavorites.SYNTHETIC_ID_PREFIX)
+        when {
+            tvShow.id.startsWith("resume_series_") -> parts += "Reprendre"
+            tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX) -> parts += "Replay"
+            tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX) -> parts += "Saison"
+            tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.EpisodeFavorites.SYNTHETIC_ID_PREFIX) -> parts += "Épisode"
+            else -> parts += if (tvShow.isMovie) "Film" else "Série"
+        }
+        if (!synthetic) tvShow.released?.format("yyyy")?.let { parts += it }
+        if (!synthetic) {
+            val eps = tvShow.seasons.flatMap { it.episodes }
+            val vus = eps.count { it.isWatched }
+            if (eps.isNotEmpty() && vus > 0) parts += "$vus/${eps.size} vus"
+        }
+        tvShow.overview?.takeIf { synthetic && it.isNotBlank() }?.let { parts += it }
+        binding.tvFavSub.text = parts.joinToString(" · ")
+        val termine = !synthetic && tvShow.seasons.flatMap { it.episodes }.let { it.isNotEmpty() && it.all { e -> e.isWatched } }
+        binding.tvFavVu.visibility = if (termine) View.VISIBLE else View.GONE
+        binding.tvFavVu.text = "✓ terminé"
+        val src = tvShow.providerName ?: com.streamflixreborn.streamflix.utils.GlobalFavorites.originByItemId[tvShow.id]
+        binding.tvFavSource.text = src ?: ""
+        binding.tvFavSource.visibility = if (src.isNullOrBlank()) View.GONE else View.VISIBLE
+        binding.tvFavStar.text = "★"
+        binding.tvFavStar.setTextColor(android.graphics.Color.parseColor("#E2B33B"))
+        binding.tvFavStar.setOnClickListener { binding.root.performLongClick() }
+    }
     private fun displayGridTvItem(binding: ItemTvShowGridBinding) {
         binding.root.apply {
             setOnClickListener {

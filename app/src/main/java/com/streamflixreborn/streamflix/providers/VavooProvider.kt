@@ -1159,7 +1159,57 @@ object VavooProvider : Provider, IptvProvider {
         providerName = VavooProvider.name,
     )
 
+    // ═══════════════════════════════════════════
+    //  Mon IPTV dans Vavoo (2026-09-27)
+    // ═══════════════════════════════════════════
+    //  (user : « le direct, je te propose de le mettre avec Vavoo — ça devait juste servir
+    //  de serveur supplémentaire à l'intérieur »). RIEN ne change à l'écran : quand on
+    //  ouvre une chaîne Vavoo (TF1…), les chaînes DIRECT des sources IPTV de l'utilisateur
+    //  qui portent le MÊME nom canonique (normalizeKey) s'ajoutent au sélecteur de
+    //  serveurs, après les variantes Vavoo, sous l'étiquette « Mon IPTV · <source> ».
+    //  Leur id est `myiptv-stream::…` : getVideo ci-dessous le délègue à MyIptvProvider
+    //  (en-têtes UA/Referer de la source, Stalker create_link, type MIME).
+    private const val PREFIXE_MON_IPTV = "myiptv-"
+    private val DECALE_1H = Regex("""\+\s?1\b""")
+    /** Préfixe pays en tête de nom : « |FR| », « ▎FR▎ », « [FR] », « (FR) », « FR - », « FRA : », « BE-FR| ». */
+    private val PREFIXE_PAYS = Regex("""^[\s|\[(\-•●▎▌▍▏▐█]*(BE-FR|FRA|FR|FRANCE)[\s|\])\-:•●▎▌▍▏▐█]+""", RegexOption.IGNORE_CASE)
+
+    /** Serveurs Mon IPTV pour la chaîne Vavoo [ch]. Plafond 3 s : le sélecteur ne doit
+     *  pas attendre une playlist qui se télécharge pour la première fois (elle sera en
+     *  cache au clic suivant). Sans source configurée : liste vide immédiate. */
+    private suspend fun serveursMonIptvPour(ch: VavooChannel): List<Video.Server> = try {
+        // Portée DÉTACHÉE : un téléchargement OkHttp bloquant n'obéit pas à l'annulation,
+        // et `withTimeoutOrNull` attendrait sinon sa fin. Ici on n'attend que le Deferred.
+        val chargement = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            .async { MyIptvProvider.chainesDirectes() }
+        // 3 s max : ne pas retarder le démarrage de la chaîne. Le catalogue Mon IPTV est
+        // pré-chauffé dès l'ouverture de l'accueil Vavoo (cf. getHome), donc en pratique
+        // il est déjà en mémoire ici.
+        val chaines = withTimeoutOrNull(3_000L) { chargement.await() }
+            ?: run { Log.w(TAG, "serveursMonIptvPour: délai dépassé (playlist en cours de chargement ?)"); emptyList() }
+        Log.d(TAG, "serveursMonIptvPour '${ch.name}' (clé ${ch.canonicalKey}) : ${chaines.size} chaînes Mon IPTV à comparer")
+        // normalizeKey efface le « +1 » (décalé d'une heure) : on l'écarte ici, TF1+1 n'est pas TF1.
+        // Les bouquets Stalker/Xtream préfixent souvent le pays entre barres ou crochets
+        // (« |FR| TF1 FHD », « ▎FR▎ TF1 », « [FR] TF1 ») : normalizeKey ne retire que « FR: » /
+        // « FR - », on enlève ce préfixe avant.
+        chaines.filter { !DECALE_1H.containsMatchIn(it.nom) && normalizeKey(PREFIXE_PAYS.replace(it.nom, "")) == ch.canonicalKey }
+            .distinctBy { it.url.ifBlank { it.serverId } }
+            .map { Video.Server(id = it.serverId, name = "Mon IPTV · ${it.source} — ${it.nom}", src = it.url) }
+            .also { if (it.isNotEmpty()) Log.d(TAG, "serveursMonIptvPour '${ch.name}' → ${it.size} serveur(s) Mon IPTV") }
+    } catch (e: Exception) {
+        Log.w(TAG, "serveursMonIptvPour: ${e.message}"); emptyList()
+    }
+
+    /** Pré-chauffe le catalogue Mon IPTV (mémoire) en arrière-plan, sans bloquer la home. */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    private fun prechaufferMonIptv() {
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            try { MyIptvProvider.chainesDirectes() } catch (_: Throwable) {}
+        }
+    }
+
     override suspend fun getHome(): List<Category> = try {
+        prechaufferMonIptv()
         ensureRegistry()
         val all = synchronized(registryLock) { channelRegistry.toList() }
 
@@ -1416,12 +1466,19 @@ object VavooProvider : Provider, IptvProvider {
     }
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = try {
+        serveursVavoo(id)
+    } catch (e: Exception) {
+        Log.e(TAG, "getServers failed for $id: ${e.message}")
+        emptyList()
+    }
+
+    private suspend fun serveursVavoo(id: String): List<Video.Server> {
         val vavooId = id.removePrefix("vavoo::")
         ensureRegistry()
         val all = synchronized(registryLock) { channelRegistry.toList() }
         val ch = all.find { it.id == vavooId }
 
-        if (ch != null) {
+        return if (ch != null) {
             // 2026-06-05 (user "Canal+ Sport 360 E parle russe, H bon contenu —
             //   il faut afficher tous les doublons sur tous les providers IPTV") :
             //   Le picker Serveurs liste maintenant TOUTES les variantes ayant le
@@ -1456,18 +1513,18 @@ object VavooProvider : Provider, IptvProvider {
                     "Vavoo ${variant.name.trim()}",
                 ))
             }
+            // 2026-09-27 : + la même chaîne chez l'utilisateur (Mon IPTV), en secours.
+            servers.addAll(serveursMonIptvPour(ch))
             servers
         } else {
             Log.w(TAG, "Channel not found: $vavooId")
             emptyList()
         }
-    } catch (e: Exception) {
-        Log.e(TAG, "getServers failed for $id: ${e.message}")
-        emptyList()
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
         val url = server.id
+        if (url.startsWith(PREFIXE_MON_IPTV)) return MyIptvProvider.getVideo(server)
         when {
             url.startsWith("m3u8::") -> {
                 val m3u8 = url.removePrefix("m3u8::")

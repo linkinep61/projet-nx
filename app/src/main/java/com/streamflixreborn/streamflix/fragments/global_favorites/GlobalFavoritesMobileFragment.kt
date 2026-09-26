@@ -1,61 +1,95 @@
 package com.streamflixreborn.streamflix.fragments.global_favorites
 
+import android.content.Context
+import android.graphics.Color
 import android.os.Bundle
 import android.util.Log
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.fragment.findNavController
 import androidx.recyclerview.widget.GridLayoutManager
-import androidx.recyclerview.widget.RecyclerView
+import com.bumptech.glide.Glide
+import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.adapters.AppAdapter
-import com.streamflixreborn.streamflix.databinding.FragmentTvShowsMobileBinding
-import com.streamflixreborn.streamflix.models.Category
+import com.streamflixreborn.streamflix.databinding.FragmentGlobalFavoritesMobileBinding
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
+import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.EpisodeFavorites
 import com.streamflixreborn.streamflix.utils.GlobalFavorites
+import com.streamflixreborn.streamflix.utils.ProfileManager
+import com.streamflixreborn.streamflix.utils.format
 import kotlinx.coroutines.launch
 
 /**
  * 2026-05-20 : "Cœur" favoris global — agrège les favoris (films + séries) de
  * TOUS les providers non-IPTV.
- * 2026-05-24 : refactoré en sections Category horizontales (comme le home) :
- *   Films, Séries, Saisons, Épisodes, Reprendre.
+ * 2026-09-27 : refait dans le style du panneau Radio : bascule de filtres
+ * (Tout / Films / Séries / Épisodes / Replays / Déjà vus), carte « Reprendre »
+ * (▶ direct, ⏮ ⏭ pour passer d'une reprise à l'autre), puces de tri, liste en lignes.
+ * Les données et les actions (retirer, vider une section) sont inchangées.
  */
 class GlobalFavoritesMobileFragment : Fragment() {
 
-    private var _binding: FragmentTvShowsMobileBinding? = null
+    private var _binding: FragmentGlobalFavoritesMobileBinding? = null
     private val binding get() = _binding!!
 
     private val appAdapter = AppAdapter()
+
+    private enum class Filtre(val label: String) {
+        TOUT("Tout"), FILMS("Films"), SERIES("Séries"), EPISODES("Épisodes"), REPLAYS("Replays"), VUS("Vus")
+    }
+
+    private enum class Tri(val label: String) {
+        RECENT("Ajout récent"), AZ("A → Z"), DERNIER_VU("Dernier vu"), ANNEE("Année"), SOURCE("Par source"), NON_VUS("Non vus")
+    }
+
+    private var filtre = Filtre.TOUT
+    private var tri = Tri.RECENT
+
+    // Données chargées (une fois par loadFavorites)
+    private var favFilms: List<Movie> = emptyList()
+    private var favSeries: List<TvShow> = emptyList()
+    private var favSaisons: List<TvShow> = emptyList()
+    private var favEpisodes: List<TvShow> = emptyList()
+    private var favReplays: List<TvShow> = emptyList()
+    private var favRutube: List<TvShow> = emptyList()
+    private var vusFilms: List<Movie> = emptyList()
+    private var vusSeries: List<TvShow> = emptyList()
+    private var reprises: List<Any> = emptyList()   // Movie ou GlobalFavorites.ContinueWatchingSeriesItem
+    private var repriseIndex = 0
+
+    private val chipsFiltre = mutableMapOf<Filtre, TextView>()
+    private val chipsTri = mutableMapOf<Tri, TextView>()
 
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        _binding = FragmentTvShowsMobileBinding.inflate(inflater, container, false)
+        _binding = FragmentGlobalFavoritesMobileBinding.inflate(inflater, container, false)
         return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        binding.tabLanguage.visibility = View.GONE
-
-        // 2026-05-24 : spanCount=1 pour afficher des Category (bandeaux horizontaux).
-        //   Chaque Category gère son propre RecyclerView horizontal interne.
-        binding.rvTvShows.apply {
-            setHasFixedSize(true)
-            adapter = appAdapter.apply {
-                stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
-            }
-            (layoutManager as? GridLayoutManager)?.spanCount = 1
-        }
-
+        lirePrefs()
+        binding.rvFav.layoutManager = GridLayoutManager(requireContext(), 3)
+        binding.rvFav.adapter = appAdapter
+        construireChips()
+        binding.tvFavClear.setOnClickListener { menuVider() }
+        binding.btnResumePrev.setOnClickListener { deplacerReprise(-1) }
+        binding.btnResumeNext.setOnClickListener { deplacerReprise(+1) }
+        binding.btnResumePlay.setOnClickListener { lireReprise() }
+        binding.llFavResume.setOnClickListener { lireReprise() }
         loadFavorites()
     }
 
@@ -66,13 +100,91 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        chipsFiltre.clear(); chipsTri.clear()
         _binding = null
     }
 
+    // ------------------------------------------------------------------ préférences
+
+    private fun prefs() = requireContext().getSharedPreferences("coeur_favoris", Context.MODE_PRIVATE)
+    private fun cle(s: String) = "${s}_${ProfileManager.currentProfileIdOrDefault()}"
+
+    private fun lirePrefs() {
+        val p = prefs()
+        filtre = runCatching { Filtre.valueOf(p.getString(cle("filtre"), Filtre.TOUT.name)!!) }.getOrDefault(Filtre.TOUT)
+        tri = runCatching { Tri.valueOf(p.getString(cle("tri"), Tri.RECENT.name)!!) }.getOrDefault(Tri.RECENT)
+    }
+
+    private fun ecrirePrefs() {
+        prefs().edit().putString(cle("filtre"), filtre.name).putString(cle("tri"), tri.name).apply()
+    }
+
+    // ------------------------------------------------------------------ chips
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun construireChips() {
+        binding.llFavFilters.removeAllViews()
+        chipsFiltre.clear()
+        for (f in Filtre.values()) {
+            val tv = TextView(requireContext()).apply {
+                text = f.label; textSize = 13f; gravity = Gravity.CENTER; isSingleLine = true
+                setTextColor(resources.getColorStateList(R.color.fav_chip_text_mobile, null))
+                setBackgroundResource(R.drawable.bg_fav_chip_mobile)
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                isSelected = f == filtre
+                setOnClickListener { filtre = f; ecrirePrefs(); rafraichirChips(); afficher() }
+            }
+            binding.llFavFilters.addView(tv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(2) })
+            chipsFiltre[f] = tv
+        }
+        // puces de tri (après le libellé « Trier : » déjà dans le layout)
+        while (binding.llFavSorts.childCount > 1) binding.llFavSorts.removeViewAt(1)
+        chipsTri.clear()
+        for (t in Tri.values()) {
+            val tv = TextView(requireContext()).apply {
+                text = t.label; textSize = 12f
+                setTextColor(resources.getColorStateList(R.color.fav_chip_text_mobile, null))
+                setBackgroundResource(R.drawable.bg_fav_pill_mobile)
+                setPadding(dp(12), dp(6), dp(12), dp(6))
+                isSelected = t == tri
+                setOnClickListener { tri = t; ecrirePrefs(); rafraichirChips(); afficher() }
+            }
+            binding.llFavSorts.addView(tv, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(6) })
+            chipsTri[t] = tv
+        }
+    }
+
+    private fun rafraichirChips() {
+        chipsFiltre.forEach { (f, tv) -> tv.isSelected = f == filtre }
+        chipsTri.forEach { (t, tv) -> tv.isSelected = t == tri }
+    }
+
+    private fun majComptes() {
+        val nb = mapOf(
+            Filtre.TOUT to (favFilms.size + favSeries.size + favSaisons.size + favEpisodes.size + favReplays.size + favRutube.size),
+            Filtre.FILMS to favFilms.size,
+            Filtre.SERIES to (favSeries.size + favSaisons.size),
+            Filtre.EPISODES to favEpisodes.size,
+            Filtre.REPLAYS to (favReplays.size + favRutube.size),
+            Filtre.VUS to (vusFilms.size + vusSeries.size),
+        )
+        chipsFiltre.forEach { (f, tv) ->
+            val n = nb[f] ?: 0
+            tv.text = if (n > 0 && f != Filtre.TOUT) "${f.label} $n" else f.label
+        }
+        binding.tvFavCount.text = (nb[Filtre.TOUT] ?: 0).toString()
+        val sources = (favFilms.map { it.providerName } + favSeries.map { it.providerName }).filterNotNull().distinct().size
+        binding.tvFavSources.text = if (sources > 0) "$sources source${if (sources > 1) "s" else ""}" else ""
+        binding.tvFavSources.visibility = if (sources > 0) View.VISIBLE else View.GONE
+    }
+
+    // ------------------------------------------------------------------ chargement
+
     private fun loadFavorites() {
-        binding.isLoading.root.visibility = View.VISIBLE
-        binding.isLoading.pbIsLoading.visibility = View.VISIBLE
-        binding.isLoading.gIsLoadingRetry.visibility = View.GONE
+        binding.pbFavLoading.visibility = View.VISIBLE
 
         viewLifecycleOwner.lifecycleScope.launch {
             val (movies, tvShows) = try {
@@ -82,28 +194,14 @@ class GlobalFavoritesMobileFragment : Fragment() {
                 emptyList<Movie>() to emptyList<TvShow>()
             }
             if (_binding == null) return@launch
-            binding.isLoading.root.visibility = View.GONE
 
-            // --- Préparer les items par catégorie ---
-            // 2026-05-24 : utiliser les types du HOME (MOBILE_ITEM), PAS les
-            //   GRID_MOBILE_ITEM qui sont faits pour une grille plate 3 colonnes.
-
-            // Films — injecter le providerName d'origine pour que le clic
-            // switch au bon provider (sinon la fiche s'ouvre sur le provider
-            // actif qui ne connaît pas forcément ce film → clic mort).
             movies.forEach {
-                it.itemType = AppAdapter.Type.MOVIE_MOBILE_ITEM
-                if (it.providerName.isNullOrBlank()) {
-                    it.providerName = GlobalFavorites.originByItemId[it.id]
-                }
+                it.itemType = AppAdapter.Type.MOVIE_GRID_MOBILE_ITEM
+                if (it.providerName.isNullOrBlank()) it.providerName = GlobalFavorites.originByItemId[it.id]
             }
-
-            // Séries
             tvShows.forEach {
-                it.itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM
-                if (it.providerName.isNullOrBlank()) {
-                    it.providerName = GlobalFavorites.originByItemId[it.id]
-                }
+                it.itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM
+                if (it.providerName.isNullOrBlank()) it.providerName = GlobalFavorites.originByItemId[it.id]
             }
 
             // Saisons favorites
@@ -113,7 +211,7 @@ class GlobalFavoritesMobileFragment : Fragment() {
                     title = "${e.showTitle} — Saison ${e.seasonNumber}",
                     poster = e.showPoster,
                     banner = e.showBanner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM }
             }
 
             // Épisodes favoris — poster SÉRIE + titre "Série — S1E3"
@@ -125,166 +223,230 @@ class GlobalFavoritesMobileFragment : Fragment() {
                     overview = e.episodeTitle,
                     poster = e.showPoster ?: e.episodePoster,
                     banner = e.showBanner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM }
             }
 
-            // 2026-08-13 (user : « ça me dérange pas qu'ils apparaissent dans le cœur favori,
-            //   celui du home, MAIS dans une nouvelle catégorie » — pour retrouver ses clips
-            //   sans passer par le TV Hub) : les ★ Rutube sortent de la section « Replays »
-            //   et forment leur PROPRE catégorie plus bas.
+            // ★ Rutube (clips) — catégorie dédiée, file de lecture publiée (2026-08-13/14)
             val rutubeFavs = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all()
                 .filter { com.streamflixreborn.streamflix.providers.RutubeFolder.estClipDossier(it.id) }
                 .map { e ->
-                    TvShow(
-                        id = e.syntheticId(),
-                        title = e.title,
-                        poster = e.poster,
-                        banner = e.banner,
-                    ).apply {
-                        itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM
-                        isMovie = true          // clip = lecture directe, pas de fiche saisons
+                    TvShow(id = e.syntheticId(), title = e.title, poster = e.poster, banner = e.banner).apply {
+                        itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM
+                        isMovie = true
+                        providerName = "TV Hub"
+                    }
+                }
+            if (rutubeFavs.isNotEmpty()) {
+                com.streamflixreborn.streamflix.providers.RutubeFolder.publierListeAffichee(rutubeFavs)
+            }
+
+            // Favoris replay (TV Hub)
+            val replayFavs = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all()
+                .filterNot { com.streamflixreborn.streamflix.providers.RutubeFolder.estClipDossier(it.id) }
+                .map { e ->
+                    TvShow(id = e.syntheticId(), title = e.title, poster = e.poster, banner = e.banner).apply {
+                        itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM
+                        isMovie = e.isMovie
                         providerName = "TV Hub"
                     }
                 }
 
-            // 2026-06-20 : favoris replay (séries/films du TV Hub replay)
-            val replayFavs = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all()
-                .filterNot { com.streamflixreborn.streamflix.providers.RutubeFolder.estClipDossier(it.id) }
-                .map { e ->
-                TvShow(
-                    id = e.syntheticId(),
-                    title = e.title,
-                    poster = e.poster,
-                    banner = e.banner,
-                ).apply {
-                    itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM
-                    isMovie = e.isMovie
-                    providerName = "TV Hub"
-                }
-            }
-
             // Reprises de lecture
-            val cwMovies = try {
-                GlobalFavorites.loadContinueWatchingMovies(requireContext(), 20)
-            } catch (_: Exception) { emptyList() }
-            cwMovies.forEach { it.itemType = AppAdapter.Type.MOVIE_CONTINUE_WATCHING_MOBILE_ITEM }
-            val cwSeries = try {
-                GlobalFavorites.loadContinueWatchingSeries(requireContext(), 20)
-            } catch (_: Exception) { emptyList() }
-            val cwSeriesCards = cwSeries.map { cw ->
-                val epLabel = if (cw.seasonNumber > 0) "S${cw.seasonNumber}E${cw.episodeNumber}" else "E${cw.episodeNumber}"
-                val title = "${cw.tvShow.title} — $epLabel"
-                TvShow(
-                    id = "resume_series_${cw.tvShow.id}",
-                    title = title,
-                    overview = cw.lastEpisode.title,
-                    poster = cw.tvShow.poster,
-                    banner = cw.tvShow.banner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
+            val cwMovies = try { GlobalFavorites.loadContinueWatchingMovies(requireContext(), 20) } catch (_: Exception) { emptyList() }
+            cwMovies.forEach {
+                it.itemType = AppAdapter.Type.MOVIE_FAV_RESUME_ROW_MOBILE_ITEM
+                if (it.providerName.isNullOrBlank()) it.providerName = GlobalFavorites.originByItemId["resume_movie_${it.id}"]
             }
+            val cwSeries = try { GlobalFavorites.loadContinueWatchingSeries(requireContext(), 20) } catch (_: Exception) { emptyList() }
 
-            // --- Construire les sections Category (comme le home) ---
-            val categories = mutableListOf<Category>()
-            if (movies.isNotEmpty()) {
-                categories += Category(name = "Films", list = movies).apply {
-                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
-                    onClearSection = { clearSection("Films") }
-                }
+            // Déjà vus
+            val (wMovies, wShows) = try { GlobalFavorites.loadWatched(requireContext()) } catch (e: Exception) {
+                Log.w(TAG, "loadWatched failed", e); emptyList<Movie>() to emptyList<TvShow>()
             }
-            if (tvShows.isNotEmpty()) {
-                categories += Category(name = "Séries", list = tvShows).apply {
-                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
-                    onClearSection = { clearSection("Séries") }
-                }
+            wMovies.forEach {
+                it.itemType = AppAdapter.Type.MOVIE_GRID_MOBILE_ITEM
+                if (it.providerName.isNullOrBlank()) it.providerName = GlobalFavorites.originByItemId[it.id]
             }
-            if (seasonFavs.isNotEmpty()) {
-                categories += Category(name = "Saisons", list = seasonFavs).apply {
-                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
-                    onClearSection = { clearSection("Saisons") }
-                }
-            }
-            if (episodeFavs.isNotEmpty()) {
-                categories += Category(name = "Épisodes", list = episodeFavs).apply {
-                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
-                    onClearSection = { clearSection("Épisodes") }
-                }
-            }
-            if (replayFavs.isNotEmpty()) {
-                categories += Category(name = "Replays", list = replayFavs).apply {
-                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
-                    onClearSection = { clearSection("Replays") }
-                }
-            }
-            // 2026-08-13 : catégorie DÉDIÉE aux ★ du dossier Rutube (demande user) → on retrouve
-            //   ses clips depuis le ❤ de l'accueil, sans passer par le TV Hub.
-            if (rutubeFavs.isNotEmpty()) {
-                // 2026-08-14 : lancer un clip DEPUIS le ❤ doit enchaîner sur les FAVORIS,
-                //   pas sur la dernière recherche du dossier. On publie donc cette liste
-                //   comme file de lecture courante.
-                com.streamflixreborn.streamflix.providers.RutubeFolder
-                    .publierListeAffichee(rutubeFavs.filterIsInstance<com.streamflixreborn.streamflix.models.TvShow>())
-                categories += Category(name = "Rutube", list = rutubeFavs).apply {
-                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
-                }
-            }
-            val resumeItems: List<AppAdapter.Item> = cwMovies + cwSeriesCards
-            if (resumeItems.isNotEmpty()) {
-                categories += Category(name = "Reprendre", list = resumeItems).apply {
-                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
-                    onClearSection = { clearSection("Reprendre") }
-                }
+            wShows.forEach {
+                it.itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM
+                if (it.providerName.isNullOrBlank()) it.providerName = GlobalFavorites.originByItemId[it.id]
             }
 
             if (_binding == null) return@launch
-            appAdapter.submitList(categories)
+            favFilms = movies; favSeries = tvShows; favSaisons = seasonFavs; favEpisodes = episodeFavs
+            favReplays = replayFavs; favRutube = rutubeFavs
+            vusFilms = wMovies; vusSeries = wShows
+            reprises = (cwMovies.map { it as Any } + cwSeries.map { it as Any })
+                .sortedByDescending { r ->
+                    when (r) {
+                        is Movie -> r.watchHistory?.lastEngagementTimeUtcMillis ?: 0L
+                        is GlobalFavorites.ContinueWatchingSeriesItem -> r.lastEpisode.watchHistory?.lastEngagementTimeUtcMillis ?: 0L
+                        else -> 0L
+                    }
+                }
+            repriseIndex = repriseIndex.coerceIn(0, (reprises.size - 1).coerceAtLeast(0))
 
-            if (categories.isEmpty()) {
-                Toast.makeText(
-                    requireContext(),
-                    "Aucun favori ni reprise de lecture",
-                    Toast.LENGTH_LONG
-                ).show()
+            binding.pbFavLoading.visibility = View.GONE
+            majComptes()
+            afficherReprise()
+            afficher()
+        }
+    }
+
+    // ------------------------------------------------------------------ affichage
+
+    private fun afficher() {
+        val b = _binding ?: return
+        val items: List<AppAdapter.Item> = when (filtre) {
+            Filtre.TOUT -> favFilms + favSeries + favSaisons + favEpisodes + favReplays + favRutube
+            Filtre.FILMS -> favFilms
+            Filtre.SERIES -> favSeries + favSaisons
+            Filtre.EPISODES -> favEpisodes
+            Filtre.REPLAYS -> favReplays + favRutube
+            Filtre.VUS -> {
+                val ids = mutableSetOf<String>()
+                (vusFilms + favFilms.filter { it.isWatched } + vusSeries).filter { ids.add(idDe(it)) }
+            }
+        }
+        val tries = trier(items)
+        appAdapter.submitList(tries)
+        b.tvFavEmpty.visibility = if (tries.isEmpty()) View.VISIBLE else View.GONE
+        b.tvFavEmpty.text = when (filtre) {
+            Filtre.VUS -> "Rien de vu pour l'instant"
+            Filtre.TOUT -> "Aucun favori"
+            else -> "Aucun favori dans « ${filtre.label} »"
+        }
+    }
+
+    private fun idDe(i: AppAdapter.Item) = when (i) { is Movie -> "m" + i.id; is TvShow -> "t" + i.id; else -> i.hashCode().toString() }
+    private fun titre(i: AppAdapter.Item) = when (i) { is Movie -> i.title; is TvShow -> i.title; else -> "" }
+    private fun ajout(i: AppAdapter.Item) = when (i) { is Movie -> i.favoritedAtMillis ?: 0L; is TvShow -> i.favoritedAtMillis ?: 0L; else -> 0L }
+    private fun annee(i: AppAdapter.Item) = when (i) { is Movie -> i.released?.get(java.util.Calendar.YEAR) ?: 0; is TvShow -> i.released?.get(java.util.Calendar.YEAR) ?: 0; else -> 0 }
+    private fun source(i: AppAdapter.Item) = when (i) { is Movie -> i.providerName; is TvShow -> i.providerName; else -> null } ?: ""
+    private fun dernierVu(i: AppAdapter.Item): Long = when (i) {
+        is Movie -> maxOf(i.watchedDate?.timeInMillis ?: 0L, i.watchHistory?.lastEngagementTimeUtcMillis ?: 0L)
+        is TvShow -> i.episodeToWatch?.watchHistory?.lastEngagementTimeUtcMillis ?: 0L
+        else -> 0L
+    }
+    private fun estVu(i: AppAdapter.Item) = when (i) {
+        is Movie -> i.isWatched
+        is TvShow -> i.seasons.flatMap { it.episodes }.let { it.isNotEmpty() && it.all { e -> e.isWatched } }
+        else -> false
+    }
+
+    private fun trier(items: List<AppAdapter.Item>): List<AppAdapter.Item> = when (tri) {
+        Tri.RECENT -> items.sortedByDescending { ajout(it) }
+        Tri.AZ -> items.sortedBy { titre(it).lowercase().removePrefix("le ").removePrefix("la ").removePrefix("les ").removePrefix("the ") }
+        Tri.DERNIER_VU -> items.sortedByDescending { dernierVu(it) }
+        Tri.ANNEE -> items.sortedByDescending { annee(it) }
+        Tri.SOURCE -> items.sortedWith(compareBy({ source(it).lowercase() }, { titre(it).lowercase() }))
+        Tri.NON_VUS -> items.sortedWith(compareBy<AppAdapter.Item> { estVu(it) }.thenByDescending { ajout(it) })
+    }
+
+    // ------------------------------------------------------------------ carte Reprendre
+
+    private fun afficherReprise() {
+        val b = _binding ?: return
+        if (reprises.isEmpty()) { b.llFavResume.visibility = View.GONE; return }
+        b.llFavResume.visibility = View.VISIBLE
+        val plusieurs = reprises.size > 1
+        b.btnResumePrev.visibility = if (plusieurs) View.VISIBLE else View.GONE
+        b.btnResumeNext.visibility = if (plusieurs) View.VISIBLE else View.GONE
+        when (val r = reprises[repriseIndex]) {
+            is Movie -> {
+                b.tvResumeTitle.text = r.title
+                b.tvResumeSource.text = r.providerName ?: ""
+                val wh = r.watchHistory
+                val reste = if (wh != null && wh.durationMillis > 0) ((wh.durationMillis - wh.lastPlaybackPositionMillis) / 60000L).coerceAtLeast(1) else 0L
+                b.tvResumeSub.text = if (reste > 0) "Film · reste $reste min" else "Film"
+                b.pbResume.progress = if (wh != null && wh.durationMillis > 0) (wh.lastPlaybackPositionMillis * 100 / wh.durationMillis.toDouble()).toInt() else 0
+                Glide.with(b.ivResumePoster).load(r.poster ?: r.banner).centerCrop().into(b.ivResumePoster)
+            }
+            is GlobalFavorites.ContinueWatchingSeriesItem -> {
+                b.tvResumeTitle.text = r.tvShow.title
+                b.tvResumeSource.text = r.providerName
+                val wh = r.lastEpisode.watchHistory
+                val ep = (if (r.seasonNumber > 0) "S${r.seasonNumber} " else "") + "E${r.episodeNumber}"
+                val reste = if (wh != null && wh.durationMillis > 0) ((wh.durationMillis - wh.lastPlaybackPositionMillis) / 60000L).coerceAtLeast(1) else 0L
+                b.tvResumeSub.text = if (reste > 0) "$ep · reste $reste min" else ep
+                b.pbResume.progress = if (wh != null && wh.durationMillis > 0) (wh.lastPlaybackPositionMillis * 100 / wh.durationMillis.toDouble()).toInt() else 0
+                Glide.with(b.ivResumePoster).load(r.tvShow.poster ?: r.lastEpisode.poster).centerCrop().into(b.ivResumePoster)
             }
         }
     }
 
-    /** Appui long sur un favori : le retirer + recharger la grille. */
+    private fun deplacerReprise(delta: Int) {
+        if (reprises.isEmpty()) return
+        repriseIndex = (repriseIndex + delta + reprises.size) % reprises.size
+        afficherReprise()
+    }
+
+    /** ▶ : ouvre directement le lecteur sur la reprise affichée (même chemin que la carte du cœur). */
+    private fun lireReprise() {
+        if (reprises.isEmpty()) return
+        when (val r = reprises[repriseIndex]) {
+            is Movie -> {
+                GlobalFavorites.switchToOrigin("resume_movie_${r.id}")
+                findNavController().navigate(R.id.action_global_player, Bundle().apply {
+                    putString("id", r.id)
+                    putString("title", r.title)
+                    putString("subtitle", r.released?.format("yyyy") ?: "")
+                    putSerializable("videoType", Video.Type.Movie(
+                        id = r.id, title = r.title,
+                        releaseDate = r.released?.format("yyyy-MM-dd") ?: "",
+                        poster = r.poster ?: r.banner ?: "", imdbId = r.imdbId,
+                    ))
+                })
+            }
+            is GlobalFavorites.ContinueWatchingSeriesItem -> {
+                GlobalFavorites.switchToOrigin("resume_series_${r.tvShow.id}")
+                val ep = r.lastEpisode
+                findNavController().navigate(R.id.action_global_player, Bundle().apply {
+                    putString("id", ep.id)
+                    putString("title", r.tvShow.title)
+                    putString("subtitle", "${if (r.seasonNumber > 0) "S${r.seasonNumber}" else ""}E${r.episodeNumber} — ${ep.title ?: ""}")
+                    putSerializable("videoType", Video.Type.Episode(
+                        id = ep.id, number = ep.number, title = ep.title, poster = ep.poster, overview = ep.overview,
+                        tvShow = Video.Type.Episode.TvShow(
+                            id = r.tvShow.id, title = r.tvShow.title, poster = r.tvShow.poster, banner = r.tvShow.banner,
+                            releaseDate = r.tvShow.released?.format("yyyy-MM-dd"), imdbId = r.tvShow.imdbId,
+                        ),
+                        season = Video.Type.Episode.Season(number = r.seasonNumber, title = ep.season?.title),
+                    ))
+                })
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ actions
+
+    /** Appui long sur un favori : le retirer + recharger. (inchangé) */
     fun removeFavorite(itemId: String, isMovie: Boolean) {
-        // 2026-06-20 : favori replay (id synthétique) → store dédié.
         if (itemId.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX)) {
             com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.removeBySyntheticId(itemId)
             Toast.makeText(requireContext(), "Replay retiré des favoris", Toast.LENGTH_SHORT).show()
-            loadFavorites()
-            return
+            loadFavorites(); return
         }
-        // 2026-05-21 : saison favorite (id synthétique) → store dédié.
         if (itemId.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
             com.streamflixreborn.streamflix.utils.SeasonFavorites.removeBySyntheticId(itemId)
             Toast.makeText(requireContext(), "Saison retirée des favoris", Toast.LENGTH_SHORT).show()
-            loadFavorites()
-            return
+            loadFavorites(); return
         }
-        // 2026-05-22 : épisode favori (id synthétique)
         if (itemId.startsWith(EpisodeFavorites.SYNTHETIC_ID_PREFIX)) {
             EpisodeFavorites.removeBySyntheticId(itemId)
             Toast.makeText(requireContext(), "Épisode retiré des favoris", Toast.LENGTH_SHORT).show()
-            loadFavorites()
-            return
+            loadFavorites(); return
         }
-        // 2026-05-22 : reprises de lecture → masquer du cœur
         if (itemId.startsWith("resume_")) {
             GlobalFavorites.dismissContinueWatching(itemId)
             Toast.makeText(requireContext(), "Reprise retirée", Toast.LENGTH_SHORT).show()
-            loadFavorites()
-            return
+            loadFavorites(); return
         }
-        // 2026-05-22 : reprises de lecture films (id original sans préfixe resume_)
-        // → vérifier si c'est un film en reprise via originByItemId
-        if (isMovie && GlobalFavorites.originByItemId.containsKey("resume_movie_$itemId")) {
+        if (isMovie && GlobalFavorites.originByItemId.containsKey("resume_movie_$itemId")
+            && favFilms.none { it.id == itemId } && vusFilms.none { it.id == itemId }) {
             GlobalFavorites.dismissContinueWatching("resume_movie_$itemId")
             Toast.makeText(requireContext(), "Reprise retirée", Toast.LENGTH_SHORT).show()
-            loadFavorites()
-            return
+            loadFavorites(); return
         }
         viewLifecycleOwner.lifecycleScope.launch {
             val ok = GlobalFavorites.removeFavorite(requireContext(), itemId, isMovie)
@@ -296,10 +458,22 @@ class GlobalFavoritesMobileFragment : Fragment() {
         }
     }
 
-    /**
-     * 2026-06-22 : vide toute une section du cœur. Chaque type de section
-     * a sa propre logique de suppression (Room DB, SharedPrefs, dismiss set).
-     */
+    /** 🗑 : vider une section entière (même logique qu'avant, via un menu). */
+    private fun menuVider() {
+        val sections = listOf("Films", "Séries", "Saisons", "Épisodes", "Replays", "Reprendre")
+        AlertDialog.Builder(requireContext())
+            .setTitle("Vider…")
+            .setItems(sections.toTypedArray()) { _, i ->
+                val s = sections[i]
+                AlertDialog.Builder(requireContext())
+                    .setMessage("Vider « $s » ?")
+                    .setPositiveButton("Vider") { _, _ -> clearSection(s) }
+                    .setNegativeButton("Annuler", null)
+                    .show()
+            }
+            .show()
+    }
+
     private fun clearSection(sectionName: String) {
         viewLifecycleOwner.lifecycleScope.launch {
             try {
@@ -315,7 +489,7 @@ class GlobalFavoritesMobileFragment : Fragment() {
                 Toast.makeText(requireContext(), "« $sectionName » vidé", Toast.LENGTH_SHORT).show()
                 loadFavorites()
             } catch (e: Exception) {
-                android.util.Log.e(TAG, "clearSection $sectionName failed", e)
+                Log.e(TAG, "clearSection $sectionName failed", e)
             }
         }
     }

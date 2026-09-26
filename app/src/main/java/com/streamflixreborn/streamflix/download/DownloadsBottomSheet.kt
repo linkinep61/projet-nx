@@ -116,11 +116,20 @@ class DownloadsBottomSheet : BottomSheetDialogFragment() {
     }
 
     private fun playDownload(download: DownloadEntity) {
-        val file = File(download.filePath)
-        if (!file.exists()) {
+        // 2026-09-27 : un téléchargement terminé est rangé dans MediaStore → filePath est une
+        //   adresse content://, pas un chemin. File(...).exists() était toujours faux → toast
+        //   « introuvable » ET suppression du film. Même vérification que DownloadsMobileFragment.
+        val available = if (download.filePath.startsWith("content://")) {
+            runCatching {
+                requireContext().contentResolver.openInputStream(android.net.Uri.parse(download.filePath))?.use { true } ?: false
+            }.getOrDefault(false)
+        } else {
+            File(download.filePath).exists()
+        }
+        if (!available) {
             Toast.makeText(requireContext(), "Fichier introuvable", Toast.LENGTH_SHORT).show()
             viewLifecycleOwner.lifecycleScope.launch {
-                DownloadManager.deleteCompleted(download.id)
+                DownloadManager.oublier(download.id)   // la ligne seulement, jamais le fichier
             }
             return
         }

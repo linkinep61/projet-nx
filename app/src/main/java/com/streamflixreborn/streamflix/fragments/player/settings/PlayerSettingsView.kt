@@ -438,6 +438,92 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
 
     interface Item
 
+    /**
+     * 2026-09-26 (user : « on met tous les serveurs Wiflix ensemble… ça évite de charger une
+     *   liste à rallonge », « aucun changement sur l'algorithme, sauf que c'est bien rangé ») :
+     *   ligne « source » du picker serveurs. Regroupe à l'AFFICHAGE les serveurs d'une même
+     *   source (préfixe avant « · » : « Wiflix · Uqload », « Wiflix · VOE » → Wiflix).
+     *   Purement visuel : Settings.Server.list, l'ordre de test et le passage d'un serveur à
+     *   l'autre ne sont pas touchés. Un appui lance le 1ᵉʳ serveur de la source (même chemin
+     *   qu'un appui sur ce serveur) ; la flèche / DROITE ouvre la 2ᵉ liste.
+     */
+    class SourceServeurs(
+        val nom: String,
+        val membres: List<Settings.Server>,
+    ) : Item {
+        companion object {
+            /** Nom de la source d'un serveur : partie avant « · », sinon le provider ouvert. */
+            fun sourceDe(nomServeur: String, providerCourant: String): String {
+                val i = nomServeur.indexOf(" · ")
+                return if (i > 0) nomServeur.substring(0, i).trim() else providerCourant
+            }
+
+            /** Libellé du serveur DANS sa source (partie après « · »). */
+            fun libelleDansSource(nomServeur: String): String {
+                val i = nomServeur.indexOf(" · ")
+                return if (i > 0) nomServeur.substring(i + 3).trim() else nomServeur
+            }
+
+            /** Résultat du rangement : lignes à afficher + ids des serveurs affichés dans la
+             *  source ouverte + nom de la source ouverte (null si elle n'existe plus). */
+            class Rangement(val lignes: List<Item>, val idsEnSousListe: Set<String>, val sourceOuverte: String?)
+
+            /**
+             * 2026-09-26 (user : « tu l'as mis que sur la version télé et pas mobile ») : même
+             *   rangement que le picker TV, partagé ici pour le mobile. Favoris ♥ en haut hors
+             *   source, puis une ligne par source (ordre actuel de la liste), serveurs d'une
+             *   source rangés du plus rapide au plus lent (latence déjà mesurée, aucun test en
+             *   plus), serveurs de la source ouverte juste sous sa ligne. Chaînes IPTV : liste
+             *   inchangée. Purement visuel — Settings.Server.list n'est pas modifiée.
+             */
+            fun ranger(serveurs: List<Settings.Server>, sourceOuverte: String?): Rangement {
+                val iptv = serveurs.any { it.isIptv || it.id.startsWith("livehub::") }
+                if (iptv || serveurs.size <= 1) return Rangement(serveurs, emptySet(), null)
+                val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
+                fun vs(s: Settings.Server) = com.streamflixreborn.streamflix.models.Video.Server(id = s.id, name = s.name, src = s.src)
+                fun estFavori(s: Settings.Server): Boolean = provider.isNotEmpty() && runCatching {
+                    com.streamflixreborn.streamflix.utils.ExtractorToggleStore.isFavorite(
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(vs(s)), provider,
+                    )
+                }.getOrDefault(false)
+                fun cleVitesse(s: Settings.Server): Pair<Int, Long> {
+                    val mort = runCatching {
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.statusOf(vs(s)) ==
+                            com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+                    }.getOrDefault(false)
+                    val ms = runCatching {
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.resolveExtractorName(vs(s))
+                            ?.let { com.streamflixreborn.streamflix.utils.ExtractorLatencyTracker.getAvgMs(it) }
+                    }.getOrNull() ?: 3_000L
+                    return Pair(if (mort) 1 else 0, ms)
+                }
+                val favoris = serveurs.filter { estFavori(it) }
+                val idsFavoris = favoris.map { it.id }.toHashSet()
+                val groupes = LinkedHashMap<String, MutableList<Settings.Server>>()
+                for (s in serveurs) {
+                    if (s.id in idsFavoris) continue
+                    groupes.getOrPut(sourceDe(s.name, provider.ifBlank { "Serveurs" })) { mutableListOf() }.add(s)
+                }
+                val lignes = mutableListOf<Item>()
+                lignes.addAll(favoris)
+                val enSousListe = HashSet<String>()
+                var ouverte: String? = null
+                for ((nom, membresBruts) in groupes) {
+                    if (membresBruts.size == 1) { lignes.add(membresBruts[0]); continue }
+                    val cles = membresBruts.associateWith { cleVitesse(it) }
+                    val membres = membresBruts.sortedWith(compareBy({ cles[it]?.first }, { cles[it]?.second }))
+                    lignes.add(SourceServeurs(nom, membres))
+                    if (nom == sourceOuverte) {
+                        ouverte = nom
+                        lignes.addAll(membres)
+                        membres.forEach { enSousListe.add(it.id) }
+                    }
+                }
+                return Rangement(lignes, enSousListe, ouverte)
+            }
+        }
+    }
+
     sealed class Settings : Item {
 
         companion object {

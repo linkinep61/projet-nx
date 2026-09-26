@@ -3499,6 +3499,12 @@ object MiniPlayerController {
                 java.net.URI(video.source).host.orEmpty().lowercase()
             }.getOrDefault("")
             val exigeOkHttp = HOTES_REFUSANT_PILE_ANDROID.any { hoteFlux.endsWith(it) }
+            // 2026-09-27 : films Cinélux / Ciné Films (portails Stalker, /play/movie.php). Plusieurs
+            //   de ces portails ne sont PAS résolus par le DNS de la box (ex. troublesupport.my.to,
+            //   esogalaxiusnext.tech : vides en DNS système, OK en DoH). Le grand lecteur passe déjà
+            //   par needsDoH() ; le mini-lecteur restait sur la pile Android → bloqué > 6 s, serveur
+            //   suivant (« 27 nuits ne part pas du premier coup »). Même client DoH qu'à l'extraction.
+                || video.source.contains("/play/movie.php", ignoreCase = true)
             val isIptvNonVavoo = isLiveChannel && !isVavoo && !exigeOkHttp
             val dsFactory: androidx.media3.datasource.DataSource.Factory? = if (isIptvNonVavoo) {
                 val ua = perVideoHeaders["User-Agent"]
@@ -4062,7 +4068,15 @@ object MiniPlayerController {
         cancelLazyBackupWatcher()
         backupJob?.cancel()
         transitioningToFullscreen = true
-        val p = player
+        // 2026-09-27 (user : « je clique sur le carré plein écran du mini-lecteur, ça crée
+        //   un double lecteur ») : le bouton plein écran de la Recherche et de l'onglet
+        //   Chaînes passe par releasePlayerKeepState() — le lecteur est DÉTACHÉ (il joue
+        //   encore) et `player` vaut déjà null. Le grand lecteur, ne voyant pas le drapeau
+        //   de transition, appelait stopAsync() : p == null → rien n'était arrêté, et
+        //   `detachedPlayer = p` ÉCRASAIT la référence du lecteur détaché, qui continuait à
+        //   jouer en arrière-plan sans plus personne pour le libérer (son doublé jusqu'à
+        //   la fermeture de l'app). On reprend donc le détaché quand `player` est vide.
+        val p = player ?: detachedPlayer
         player = null
         if (p != null) {
             try { p.removeListener(playerListener) } catch (_: Exception) {}

@@ -44,6 +44,7 @@ import com.streamflixreborn.streamflix.databinding.ItemEpisodeTvBinding
 import com.streamflixreborn.streamflix.databinding.ItemGenreGridMobileBinding
 import com.streamflixreborn.streamflix.databinding.ItemGenreGridTvBinding
 import com.streamflixreborn.streamflix.databinding.ItemLoadingBinding
+import com.streamflixreborn.streamflix.databinding.ItemFavRowMobileBinding
 import com.streamflixreborn.streamflix.databinding.ItemMovieGridMobileBinding
 import com.streamflixreborn.streamflix.databinding.ItemMovieGridTvBinding
 import com.streamflixreborn.streamflix.databinding.ItemMovieMobileBinding
@@ -117,6 +118,8 @@ class AppAdapter(
         MOVIE_CONTINUE_WATCHING_MOBILE_ITEM,
         MOVIE_CONTINUE_WATCHING_TV_ITEM,
         MOVIE_GRID_MOBILE_ITEM,
+        MOVIE_FAV_ROW_MOBILE_ITEM,
+        MOVIE_FAV_RESUME_ROW_MOBILE_ITEM,
         MOVIE_GRID_TV_ITEM,
         MOVIE_SWIPER_MOBILE_ITEM,
 
@@ -141,6 +144,7 @@ class AppAdapter(
         TV_SHOW_MOBILE_ITEM,
         TV_SHOW_TV_ITEM,
         TV_SHOW_GRID_MOBILE_ITEM,
+        TV_SHOW_FAV_ROW_MOBILE_ITEM,
         TV_SHOW_GRID_TV_ITEM,
         TV_SHOW_SWIPER_MOBILE_ITEM,
 
@@ -273,6 +277,13 @@ class AppAdapter(
             )
             Type.MOVIE_GRID_MOBILE_ITEM -> MovieViewHolder(
                 ItemMovieGridMobileBinding.inflate(
+                    LayoutInflater.from(parent.context),
+                    parent,
+                    false,
+                )
+            )
+            Type.MOVIE_FAV_ROW_MOBILE_ITEM, Type.MOVIE_FAV_RESUME_ROW_MOBILE_ITEM -> MovieViewHolder(
+                ItemFavRowMobileBinding.inflate(
                     LayoutInflater.from(parent.context),
                     parent,
                     false,
@@ -414,6 +425,13 @@ class AppAdapter(
                     LayoutInflater.from(parent.context),
                     parent,
                     false
+                )
+            )
+            Type.TV_SHOW_FAV_ROW_MOBILE_ITEM -> TvShowViewHolder(
+                ItemFavRowMobileBinding.inflate(
+                    LayoutInflater.from(parent.context),
+                    parent,
+                    false,
                 )
             )
             Type.TV_SHOW_GRID_TV_ITEM -> TvShowViewHolder(

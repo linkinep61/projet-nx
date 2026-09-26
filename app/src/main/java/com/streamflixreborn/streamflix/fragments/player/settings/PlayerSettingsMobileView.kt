@@ -47,7 +47,39 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
     private val gesturesAdapter = SettingsAdapter(this, Settings.Gestures.list)
     private val keepScreenOnAdapter = SettingsAdapter(this, Settings.KeepScreenOn.list)
     private val channelVariantAdapter = SettingsAdapter(this, Settings.ChannelVariant.list)
-    private val serversAdapter = SettingsAdapter(this, Settings.Server.list)
+    // 2026-09-26 : liste des serveurs RANGÉE par source (comme sur TV), reconstruite depuis
+    //   Settings.Server.list à chaque rafraîchissement (voir SourceServeurs.ranger).
+    private val affichageServeurs = mutableListOf<Item>()
+    private val serversAdapter = SettingsAdapter(this, affichageServeurs)
+    private var sourceOuverte: String? = null
+    private var idsEnSousListe: Set<String> = emptySet()
+
+    internal fun estEnSousListe(server: Settings.Server) = server.id in idsEnSousListe
+    internal fun estOuverte(source: SourceServeurs) = source.nom == sourceOuverte
+
+    private fun reconstruireAffichage() {
+        val serveurs = try { Settings.Server.list.toList() } catch (_: Exception) { emptyList() }
+        val r = SourceServeurs.ranger(serveurs, sourceOuverte)
+        affichageServeurs.clear()
+        affichageServeurs.addAll(r.lignes)
+        idsEnSousListe = r.idsEnSousListe
+        sourceOuverte = r.sourceOuverte
+    }
+
+    /** Flèche / appui long sur une source : ouvre ou referme la liste de ses serveurs. */
+    internal fun basculerSource(source: SourceServeurs) {
+        sourceOuverte = if (sourceOuverte == source.nom) null else source.nom
+        refreshServerList()
+    }
+
+    /** Appui sur une source : même chemin qu'un appui sur son 1ᵉʳ serveur. */
+    internal fun lancerSource(source: SourceServeurs) {
+        val premier = source.membres.firstOrNull() ?: return
+        Settings.Server.list.forEach { it.isSelected = false }
+        premier.isSelected = true
+        onServerSelected?.invoke(premier)
+        refreshServerList()
+    }
     private val marginAdapter = SettingsAdapter(this, Settings.Subtitle.Style.Margin.list)
 
     override var onSubtitlesClicked: (() -> Unit)? = null
@@ -68,6 +100,12 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
     }
 
     fun onBackPressed(): Boolean {
+        // 2026-09-26 : Retour referme d'abord la source ouverte.
+        if (currentSettings == Setting.SERVERS && sourceOuverte != null) {
+            sourceOuverte = null
+            refreshServerList()
+            return true
+        }
         when (currentSettings) {
             Setting.MAIN -> hide()
             Setting.QUALITY,
@@ -148,6 +186,11 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
 
         binding.btnSettingsBack.visibility = if (setting == Setting.MAIN) View.GONE else View.VISIBLE
 
+        if (setting == Setting.SERVERS) {
+            reconstruireAffichage()
+            serversAdapter.notifyDataSetChanged()
+        }
+
         binding.rvSettings.adapter = when (setting) {
             Setting.MAIN -> settingsAdapter
             Setting.QUALITY -> qualityAdapter
@@ -181,6 +224,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
     }
 
     fun refreshServerList() {
+        reconstruireAffichage()
         serversAdapter.notifyDataSetChanged()
         // Also refresh main list so server count updates
         settingsAdapter.notifyDataSetChanged()
@@ -249,10 +293,11 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
             )
 
         override fun onBindViewHolder(holder: SettingViewHolder, position: Int) {
-            holder.displaySettings(items[position])
+            val item = items.getOrNull(position) ?: return
+            holder.displaySettings(item)
         }
 
-        override fun getItemCount() = items.size
+        override fun getItemCount() = try { items.size } catch (_: Exception) { 0 }
     }
 
     private class SettingViewHolder(
@@ -260,7 +305,66 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
         private val binding: ItemSettingMobileBinding,
     ) : RecyclerView.ViewHolder(binding.root) {
 
+        /** 2026-09-26 : ligne « source » (Wiflix, Movix…). Appui = lance le 1ᵉʳ serveur de la
+         *  source (le plus rapide connu) ; flèche ou appui long = ouvre / referme la liste de
+         *  ses serveurs. Couleur = état des serveurs déjà testés. */
+        private fun afficherSource(source: SourceServeurs) {
+            val ctx = binding.root.context
+            binding.root.margin(bottom = 0, top = 0)
+            binding.ivSettingIcon.visibility = View.GONE
+            binding.vSettingColor.visibility = View.GONE
+            binding.ivSettingFavorite.visibility = View.GONE
+            binding.ivSettingBan.visibility = View.GONE
+            binding.ivSettingDownload.visibility = View.GONE
+
+            val ouverte = settingsView.estOuverte(source)
+            val enCours = source.membres.any { it.isLoading }
+            binding.tvSettingMainText.text = if (enCours) "${source.nom} ⟳" else source.nom
+            val etats = source.membres.map {
+                com.streamflixreborn.streamflix.utils.ExtractorRanker.statusOf(
+                    com.streamflixreborn.streamflix.models.Video.Server(id = it.id, name = it.name)
+                )
+            }
+            val verifie = com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.VERIFIED
+            val mort = com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+            val incertain = com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNSURE
+            when {
+                etats.any { it == verifie } -> binding.tvSettingMainText.setTextColor(0xFF4CAF50.toInt())
+                etats.isNotEmpty() && etats.all { it == mort } -> binding.tvSettingMainText.setTextColor(0xFFFF4444.toInt())
+                etats.any { it == incertain } -> binding.tvSettingMainText.setTextColor(0xFFFFA726.toInt())
+                else -> binding.tvSettingMainText.setTextColor(ContextCompat.getColorStateList(ctx, R.color.setting_text))
+            }
+            val langues = source.membres.mapNotNull { it.language }.distinct()
+            val meilleureQualite = source.membres.mapNotNull { it.quality }
+                .maxByOrNull { q -> Regex("(\\d{3,4})").find(q)?.value?.toIntOrNull() ?: if (q.contains("4K", true)) 2160 else 0 }
+            binding.tvSettingSubText.text = (listOf("${source.membres.size} serveurs") + langues + listOfNotNull(meilleureQualite))
+                .joinToString(" · ")
+            binding.tvSettingSubText.visibility = View.VISIBLE
+
+            binding.ivSettingIsSelected.visibility =
+                if (!ouverte && source.membres.any { it.isSelected }) View.VISIBLE else View.GONE
+            binding.ivSettingEnter.visibility = View.VISIBLE
+            binding.ivSettingEnter.rotation = if (ouverte) 90f else 0f
+            binding.ivSettingEnter.isClickable = true
+            binding.ivSettingEnter.setOnClickListener { settingsView.basculerSource(source) }
+
+            binding.root.setOnClickListener { settingsView.lancerSource(source) }
+            binding.root.setOnLongClickListener {
+                settingsView.basculerSource(source)
+                true
+            }
+        }
+
         fun displaySettings(item: Item) {
+            // 2026-09-26 : remise à zéro de ce qu'une ligne « source » a pu poser sur une vue recyclée.
+            binding.ivSettingEnter.rotation = 0f
+            binding.ivSettingEnter.setOnClickListener(null)
+            binding.ivSettingEnter.isClickable = false
+            binding.root.setOnLongClickListener(null)
+            if (item is SourceServeurs) {
+                afficherSource(item)
+                return
+            }
             binding.root.apply {
                 when (item) {
                     Settings.Subtitle.Style,
@@ -842,7 +946,11 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                     }
                     is Settings.Server -> {
                         // 2026-05-16 : suffixe ⟳ pendant le chargement
-                        if (item.isLoading) "${item.name} ⟳" else item.name
+                        // 2026-09-26 : dans une source ouverte, seulement le serveur (« ↳ VOE »).
+                        val nom = if (settingsView.estEnSousListe(item))
+                            "    ↳ " + SourceServeurs.libelleDansSource(item.name)
+                        else item.name
+                        if (item.isLoading) "$nom ⟳" else nom
                     }
                     else -> ""
                 }

@@ -954,6 +954,31 @@ class PlayerMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-09-27 — AUDIT DES TÉLÉCHARGEMENTS (debug uniquement) : depuis le PC,
+        //   adb shell am broadcast -a com.streamfr.AUDIT_DL
+        //   teste chaque serveur de la liste courante avec le code du téléchargement.
+        if (com.streamflixreborn.streamflix.BuildConfig.DEBUG) {
+            val recepteur = object : android.content.BroadcastReceiver() {
+                override fun onReceive(c: android.content.Context?, i: android.content.Intent?) {
+                    // --es filtre "Voe|Rpmvid" : ne tester que les serveurs dont le nom correspond
+                    val filtre = i?.getStringExtra("filtre")?.let { Regex(it, RegexOption.IGNORE_CASE) }
+                    val liste = servers.filter { filtre == null || filtre.containsMatchIn(it.name) }
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        com.streamflixreborn.streamflix.download.AuditTelechargement.lancer(liste)
+                    }
+                }
+            }
+            androidx.core.content.ContextCompat.registerReceiver(
+                requireContext(), recepteur,
+                android.content.IntentFilter(com.streamflixreborn.streamflix.download.AuditTelechargement.ACTION),
+                androidx.core.content.ContextCompat.RECEIVER_EXPORTED,
+            )
+            viewLifecycleOwner.lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+                override fun onDestroy(owner: androidx.lifecycle.LifecycleOwner) {
+                    runCatching { requireContext().unregisterReceiver(recepteur) }
+                }
+            })
+        }
         // 2026-07-12 (user, cf. PlayerTvFragment) : au play, on met en pause le chargement des
         //   jaquettes (niveau activité) → le CPU/réseau va à la recherche de serveurs. Repris en
         //   onDestroyView. La fiche synopsis a déjà chargé ses images avant le play.
@@ -4304,7 +4329,9 @@ class PlayerMobileFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val provider = UserPreferences.currentProvider ?: return@launch
-                val video = provider.getVideo(server)
+                // 2026-09-27 : même résolution que la lecture (serveurs de secours compris), partagée
+                //   TV / mobile / audit. Voir download/AuditTelechargement.kt.
+                val video = com.streamflixreborn.streamflix.download.ResolutionTelechargement.resoudre(server)
                 if (video.source.isEmpty()) throw Exception("No source found")
 
                 // ── Block WebView-only sources ──
@@ -7217,6 +7244,14 @@ class PlayerMobileFragment : Fragment() {
             // 2026-07-30 : CDN Vidmoly (cert rejeté par vieux CA store) → OkHttp trust-all.
             || url.contains("vmwesa", ignoreCase = true)
             || url.contains("acek-cdn", ignoreCase = true)
+            // 2026-09-26 (user : « des serveurs Cinélux sont longs à lancer et se font couper
+            //   avant de se lancer ») : liens VOD des portails OLA (`/play/movie.php?…`).
+            //   Plusieurs portails sont BLOQUÉS par le DNS du FAI (innovationtv.eu, 4y-ott.online
+            //   → « le nom DNS n'existe pas », alors que le DoH les résout). Le lien est obtenu
+            //   via DoH, mais la lecture partait sur le DNS système → CONNECTION_FAILED en 3 s,
+            //   3 relances identiques, puis abandon. Selon le portail tiré au sort, ça marchait
+            //   ou pas (d'où « j'ai relancé, ça lit »).
+            || url.contains("/play/movie.php", ignoreCase = true)
     }
 
     // 2026-05-20 (parité PlayerTvFragment) : détection émulateur (BlueStacks inclus)

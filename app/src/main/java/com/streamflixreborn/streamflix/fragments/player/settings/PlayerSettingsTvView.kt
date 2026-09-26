@@ -47,7 +47,117 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     private val extraBufferingAdapter = SettingsAdapter(this, Settings.ExtraBuffering.list)
     private val softwareDecoderAdapter = SettingsAdapter(this, Settings.SoftwareDecoder.list)
     private val channelVariantAdapter = SettingsAdapter(this, Settings.ChannelVariant.list)
-    private val serversAdapter = SettingsAdapter(this, Settings.Server.list)
+    // 2026-09-26 : le picker serveurs affiche une liste RANGÉE par source (voir
+    //   SourceServeurs), reconstruite depuis Settings.Server.list à chaque rafraîchissement.
+    //   Settings.Server.list elle-même n'est jamais modifiée ici.
+    private val affichageServeurs = mutableListOf<Item>()
+    private val serversAdapter = SettingsAdapter(this, affichageServeurs)
+    /** Source dont la 2ᵉ liste est ouverte (une seule à la fois), null = toutes fermées. */
+    private var sourceOuverte: String? = null
+    /** Ids des serveurs actuellement affichés DANS une source ouverte (libellé raccourci). */
+    private var idsEnSousListe: Set<String> = emptySet()
+
+    internal fun estEnSousListe(server: Settings.Server) = server.id in idsEnSousListe
+    internal fun estOuverte(source: SourceServeurs) = source.nom == sourceOuverte
+
+    /** Reconstruit la liste affichée : favoris ♥ en haut (hors source), puis une ligne par
+     *  source dans l'ordre actuel de la liste, les serveurs de la source ouverte juste dessous.
+     *  Une source d'un seul serveur reste une ligne simple. Chaînes IPTV : liste inchangée. */
+    private fun reconstruireAffichage() {
+        val serveurs = try { Settings.Server.list.toList() } catch (_: Exception) { emptyList() }
+        affichageServeurs.clear()
+        val iptv = serveurs.any { it.isIptv || it.id.startsWith("livehub::") }
+        if (iptv || serveurs.size <= 1) {
+            affichageServeurs.addAll(serveurs)
+            idsEnSousListe = emptySet()
+            return
+        }
+        val provider = UserPreferences.currentProvider?.name ?: ""
+        fun estFavori(s: Settings.Server): Boolean = provider.isNotEmpty() && runCatching {
+            com.streamflixreborn.streamflix.utils.ExtractorToggleStore.isFavorite(
+                com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(
+                    com.streamflixreborn.streamflix.models.Video.Server(id = s.id, name = s.name, src = s.src)
+                ),
+                provider,
+            )
+        }.getOrDefault(false)
+
+        val favoris = serveurs.filter { estFavori(it) }
+        val idsFavoris = favoris.map { it.id }.toHashSet()
+        val groupes = LinkedHashMap<String, MutableList<Settings.Server>>()
+        for (s in serveurs) {
+            if (s.id in idsFavoris) continue
+            val nom = SourceServeurs.sourceDe(s.name, provider.ifBlank { "Serveurs" })
+            groupes.getOrPut(nom) { mutableListOf() }.add(s)
+        }
+        affichageServeurs.addAll(favoris)
+        val enSousListe = HashSet<String>()
+        var ouverteExiste = false
+        // 2026-09-26 (user : « pour les serveurs Movix, que ce soit les plus rapides qui
+        //   répondent en premier, comme Vidara… faut pas qu'on attende une heure ») :
+        //   DANS une source, les serveurs sont rangés du plus rapide au plus lent d'après la
+        //   latence d'extraction DÉJÀ mesurée par l'appli (ExtractorLatencyTracker) — aucun
+        //   test en plus, donc aucune attente. Ceux qui ont échoué sur ce titre passent à la
+        //   fin, les inconnus au milieu. Tri stable : à égalité, l'ordre actuel est gardé.
+        //   Le 1ᵉʳ de la source est donc le plus rapide connu (c'est lui que lance l'appui).
+        fun cleVitesse(s: Settings.Server): Pair<Int, Long> {
+            val vs = com.streamflixreborn.streamflix.models.Video.Server(id = s.id, name = s.name, src = s.src)
+            val mort = runCatching {
+                com.streamflixreborn.streamflix.utils.ExtractorRanker.statusOf(vs) ==
+                    com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+            }.getOrDefault(false)
+            val ms = runCatching {
+                com.streamflixreborn.streamflix.utils.ExtractorRanker.resolveExtractorName(vs)
+                    ?.let { com.streamflixreborn.streamflix.utils.ExtractorLatencyTracker.getAvgMs(it) }
+            }.getOrNull() ?: 3_000L
+            return Pair(if (mort) 1 else 0, ms)
+        }
+        for (entree in groupes.entries) {
+            if (entree.value.size < 2) continue
+            val cles = entree.value.associateWith { cleVitesse(it) }
+            entree.setValue(entree.value.sortedWith(compareBy({ cles[it]?.first }, { cles[it]?.second })).toMutableList())
+        }
+        for ((nom, membres) in groupes) {
+            if (membres.size == 1) {
+                affichageServeurs.add(membres[0])
+                continue
+            }
+            affichageServeurs.add(SourceServeurs(nom, membres))
+            if (nom == sourceOuverte) {
+                ouverteExiste = true
+                affichageServeurs.addAll(membres)
+                membres.forEach { enSousListe.add(it.id) }
+            }
+        }
+        if (!ouverteExiste) sourceOuverte = null
+        idsEnSousListe = enSousListe
+    }
+
+    /** Ouvre (ou referme) la 2ᵉ liste d'une source, le focus reste sur sa ligne. */
+    internal fun basculerSource(source: SourceServeurs) {
+        sourceOuverte = if (sourceOuverte == source.nom) null else source.nom
+        focusedServerId = cleAffichage(source)
+        reconstruireAffichage()
+        lastServerListCount = affichageServeurs.size
+        try { serversAdapter.notifyDataSetChanged() } catch (_: Exception) {}
+        val idx = affichageServeurs.indexOfFirst { cleAffichage(it) == cleAffichage(source) }
+        if (idx >= 0) restoreServerFocus(idx, affichageServeurs.size)
+    }
+
+    /** Appui sur une source : même chemin qu'un appui sur son 1ᵉʳ serveur (ordre actuel). */
+    internal fun lancerSource(source: SourceServeurs) {
+        val premier = source.membres.firstOrNull() ?: return
+        Settings.Server.list.forEach { it.isSelected = false }
+        premier.isSelected = true
+        onServerSelected?.invoke(premier)
+        refreshServerList()
+    }
+
+    private fun cleAffichage(item: Item): String? = when (item) {
+        is Settings.Server -> item.id
+        is SourceServeurs -> "source::${item.nom}"
+        else -> null
+    }
     private val marginAdapter = SettingsAdapter(this, Settings.Subtitle.Style.Margin.list)
 
     override var onSubtitlesClicked: (() -> Unit)? = null
@@ -91,6 +201,15 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     }
 
     fun onBackPressed(): Boolean {
+        // 2026-09-26 : RETOUR referme d'abord la source ouverte (focus remis sur sa ligne).
+        if (currentSettings == Setting.SERVERS) {
+            val ouverte = sourceOuverte
+            val source = affichageServeurs.firstOrNull { it is SourceServeurs && it.nom == ouverte } as? SourceServeurs
+            if (source != null) {
+                basculerSource(source)
+                return true
+            }
+        }
         when (currentSettings) {
             Setting.MAIN -> hide()
             Setting.QUALITY,
@@ -213,6 +332,11 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             }
         }
 
+        if (setting == Setting.SERVERS) {
+            reconstruireAffichage()
+            lastServerListCount = affichageServeurs.size
+            try { serversAdapter.notifyDataSetChanged() } catch (_: Exception) {}
+        }
         binding.rvSettings.adapter = when (setting) {
             Setting.MAIN -> settingsAdapter
             Setting.QUALITY -> qualityAdapter
@@ -271,7 +395,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             val focused = binding.rvSettings.findFocus()
             if (focused != null && focused !== binding.rvSettings) return
         }
-        restoreServerFocus(previousIndex = 0, count = Settings.Server.list.size)
+        restoreServerFocus(previousIndex = 0, count = affichageServeurs.size)
     }
 
     /** 2026-08-01 : id du serveur RÉELLEMENT sous le focus, lu depuis le ViewHolder de la
@@ -280,8 +404,8 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         val focused = binding.rvSettings.findFocus() ?: return null
         if (focused === binding.rvSettings) return null
         val vh = runCatching { binding.rvSettings.findContainingViewHolder(focused) }.getOrNull()
-        val item = (vh as? SettingViewHolder)?.elementAffiche
-        return (item as? Settings.Server)?.id
+        val item = (vh as? SettingViewHolder)?.elementAffiche ?: return null
+        return cleAffichage(item)
     }
 
     /** 2026-06-29 v2 : renvoie l'index de l'item Serveur qui a actuellement
@@ -340,14 +464,16 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     private var focusedServerId: String? = null
 
     fun refreshServerList() {
-        val count = Settings.Server.list.size
-        val previousCount = lastServerListCount
-
         // Sauver l'ID du serveur actuellement focusé AVANT la notification.
         // 2026-08-01 : lu depuis la VUE focusée (et non via un index dans la liste) —
         //   la liste est reconstruite/re-triée en arrière-plan, donc un index capturé ici
         //   pouvait désigner un autre serveur que celui réellement sous le focus.
         idServeurFocuse()?.let { focusedServerId = it }
+
+        // 2026-09-26 : liste affichée = liste rangée par source.
+        reconstruireAffichage()
+        val count = affichageServeurs.size
+        val previousCount = lastServerListCount
 
         try {
             when {
@@ -381,7 +507,11 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     binding.rvSettings.findFocus() !== binding.rvSettings
                 if (!focusTenuParUtilisateur) {
                     // L'user avait un serveur focusé → on le retrouve par son ID.
-                    val newIdx = Settings.Server.list.indexOfFirst { it.id == savedId }
+                    var newIdx = affichageServeurs.indexOfFirst { cleAffichage(it) == savedId }
+                    // Serveur rangé dans une source fermée → focus sur la ligne de sa source.
+                    if (newIdx < 0) newIdx = affichageServeurs.indexOfFirst { src ->
+                        src is SourceServeurs && src.membres.any { it.id == savedId }
+                    }
                     if (newIdx >= 0) {
                         restoreServerFocus(newIdx, count)
                     }
@@ -390,7 +520,10 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             } else if (!hasPlayerStartedPlayback()) {
                 // Pas encore de focus user + pas encore d'auto-play :
                 //   focus sur le serveur sélectionné (auto-play) ou le 1er.
-                val selectedIdx = Settings.Server.list.indexOfFirst { it.isSelected }
+                val selectedIdx = affichageServeurs.indexOfFirst { item ->
+                    (item is Settings.Server && item.isSelected) ||
+                        (item is SourceServeurs && item.membres.any { it.isSelected })
+                }
                 restoreServerFocus(if (selectedIdx >= 0) selectedIdx else 0, count)
             }
             // Après auto-play, si l'user n'a encore jamais focusé un serveur ET le player
@@ -457,6 +590,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             // Identité MÉTIER (l'id du serveur), stable à travers les re-tris VF/qualité.
             val cle = when (item) {
                 is Settings.Server -> "srv:${item.id}"
+                is SourceServeurs -> "source:${item.nom}"
                 is Settings.ChannelVariant -> "chan:${item.id}"
                 else -> "pos:$position:${item.javaClass.simpleName}"
             }
@@ -495,8 +629,81 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         var elementAffiche: Item? = null
             private set
 
+        /** 2026-09-26 : ligne « source » (Wiflix, French Stream…). OK = lance le 1ᵉʳ serveur
+         *  de la source, comme un appui sur ce serveur ; DROITE (ou appui long) = ouvre /
+         *  referme la liste de ses serveurs. Couleur = état des serveurs déjà testés. */
+        private fun afficherSource(source: SourceServeurs) {
+            val ctx = binding.root.context
+            binding.root.margin(bottom = 0, top = 0)
+            binding.ivSettingIcon.visibility = View.GONE
+            binding.vSettingColor.visibility = View.GONE
+            binding.ivSettingFavorite.visibility = View.GONE
+            binding.ivSettingBan.visibility = View.GONE
+            binding.ivSettingDownload.visibility = View.GONE
+            binding.root.nextFocusRightId = View.NO_ID
+
+            val ouverte = settingsView.estOuverte(source)
+            val enCours = source.membres.any { it.isLoading }
+            binding.tvSettingMainText.text = if (enCours) "${source.nom} ⟳" else source.nom
+
+            val etats = source.membres.map {
+                com.streamflixreborn.streamflix.utils.ExtractorRanker.statusOf(
+                    com.streamflixreborn.streamflix.models.Video.Server(id = it.id, name = it.name)
+                )
+            }
+            val verifie = com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.VERIFIED
+            val mort = com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+            val incertain = com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNSURE
+            when {
+                etats.any { it == verifie } -> binding.tvSettingMainText.setTextColor(0xFF4CAF50.toInt())
+                etats.isNotEmpty() && etats.all { it == mort } -> binding.tvSettingMainText.setTextColor(0xFFFF4444.toInt())
+                etats.any { it == incertain } -> binding.tvSettingMainText.setTextColor(0xFFFFA726.toInt())
+                else -> binding.tvSettingMainText.setTextColor(ContextCompat.getColorStateList(ctx, R.color.setting_text))
+            }
+
+            val langues = source.membres.mapNotNull { it.language }.distinct()
+            val meilleureQualite = source.membres.mapNotNull { it.quality }
+                .maxByOrNull { q -> Regex("(\\d{3,4})").find(q)?.value?.toIntOrNull() ?: if (q.contains("4K", true)) 2160 else 0 }
+            val nb = source.membres.size
+            binding.tvSettingSubText.text = (listOf("$nb serveurs") + langues + listOfNotNull(meilleureQualite))
+                .joinToString(" · ")
+            binding.tvSettingSubText.visibility = View.VISIBLE
+
+            binding.ivSettingIsSelected.visibility =
+                if (!ouverte && source.membres.any { it.isSelected }) View.VISIBLE else View.GONE
+            binding.ivSettingEnter.visibility = View.VISIBLE
+            binding.ivSettingEnter.rotation = if (ouverte) 90f else 0f
+
+            binding.root.setOnClickListener { settingsView.lancerSource(source) }
+            binding.root.isLongClickable = true
+            binding.root.setOnLongClickListener {
+                settingsView.basculerSource(source)
+                true
+            }
+            binding.root.setOnKeyListener { _, keyCode, event ->
+                if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    settingsView.basculerSource(source)
+                    true
+                } else if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT && ouverte) {
+                    settingsView.basculerSource(source)
+                    true
+                } else false
+            }
+        }
+
         fun displaySettings(item: Item) {
             elementAffiche = item
+            // 2026-09-26 : remise à zéro de ce qu'une ligne « source » a pu poser sur une
+            //   vue recyclée (flèche tournée, touche DROITE, retrait).
+            binding.ivSettingEnter.rotation = 0f
+            binding.root.setOnKeyListener(null)
+            binding.root.alpha = 1.0f
+            if (item is SourceServeurs) {
+                afficherSource(item)
+                return
+            }
             binding.root.apply {
                 when (item) {
                     Settings.Subtitle.Style,
@@ -928,7 +1135,12 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         prefix + item.name
                     }
                     is Settings.Server -> {
-                        if (item.isLoading) "${item.name} ⟳" else item.name
+                        // 2026-09-26 : dans la liste d'une source ouverte, on n'affiche que le
+                        //   serveur (« ↳ VOE ») — la source est déjà écrite sur la ligne du dessus.
+                        val nom = if (settingsView.estEnSousListe(item))
+                            "      ↳ " + SourceServeurs.libelleDansSource(item.name)
+                        else item.name
+                        if (item.isLoading) "$nom ⟳" else nom
                     }
 
                     else -> ""

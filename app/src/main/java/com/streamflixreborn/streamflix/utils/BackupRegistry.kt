@@ -95,6 +95,8 @@ object BackupRegistry {
         // 2026-09-19 : films VF du catalogue OTF TV (fichiers .mkv directs, aucune requête
         //   supplémentaire — le catalogue arrive avec les chaînes OTF du TV Hub).
         "OTF TV" to "OTF TV (films VF)",
+        // 2026-09-27 : les films/séries des sources IPTV de l'utilisateur (Mon IPTV).
+        "Mon IPTV" to "Mon IPTV (films/séries de mes sources IPTV)",
         "Webflix" to "Webflix",
         "Yablom" to "Yablom (films FR)",
         "Vostfree" to "Vostfree (animes VF/VOSTFR)",
@@ -1668,6 +1670,18 @@ object BackupRegistry {
                 }
             }
 
+            // ── Mon IPTV (par titre EXACT) — films/séries des sources IPTV de l'utilisateur ──
+            // 2026-09-27 (user : « quand on ajoute une source, qu'elle soit utilisée en tant que
+            //   serveur ») : ses playlists sont déjà en cache disque/mémoire → coût réseau nul
+            //   dans le cas normal ; aucune source configurée → liste vide immédiate.
+            //   Séries : vraie grille Xtream/Stalker quand le panel la donne, sinon SxxEyy du nom.
+            launch {
+                emit("Mon IPTV") {
+                    com.streamflixreborn.streamflix.providers.MyIptvProvider
+                        .serveursDeSecours(knownTitles.toList(), key.isMovie, key.year, key.season, key.episode)
+                }
+            }
+
             // ── OK.RU (par titre) — vieilles séries et films FR introuvables ailleurs ──
             // 2026-08-08 (user : « je viens de trouver un site qu'il faudrait absolument
             //   ajouter, avec une recherche stricte car il y a pas mal de mauvaises choses ») :
@@ -2514,6 +2528,10 @@ object BackupRegistry {
             // 2026-09-19 : OTF TV — `src` EST le fichier .mkv (stable, pas de signature), on
             //   pose juste l'en-tête attendu par le serveur.
             "OTF TV" -> com.streamflixreborn.streamflix.providers.OtfFilmsBackup.video(orig)
+            // 2026-09-27 : Mon IPTV — l'id d'origine est un id de lecture natif du provider
+            //   (`myiptv-stream::…` / `myiptv-xtstream::…`), son getVideo fait tout (Stalker
+            //   create_link, en-têtes UA/Referer de la source, type MIME).
+            "Mon IPTV" -> com.streamflixreborn.streamflix.providers.MyIptvProvider.getVideo(orig)
             "Papadustream V2" -> PapadustreamV2Provider.getVideo(orig)
             // 2026-08-08 : ok.ru — flux résolu À LA LECTURE (URLs liées à l'IP + `expires`).
             "ok.ru" -> com.streamflixreborn.streamflix.providers.OkRuProvider.getVideo(server)
