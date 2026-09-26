@@ -68,7 +68,38 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
         val quality: String?=null,
         @com.google.gson.annotations.SerializedName("qualityVostfr") val qualityVostfr: String?=null,
         @com.google.gson.annotations.SerializedName("qualityVo") val qualityVo: String?=null,
+        // 2026-09-26 (user : « pourquoi le serveur Frembed n'est pas apparu ? », The Runner) :
+        //   NOUVEAU FORMAT de l'API. Sur les films récents, link1…link7 sont VIDES et les
+        //   serveurs sont dans un tableau `links` : [{label:"Voe", lang:"vf", url:"/api/…",
+        //   position, host:{…}, quality:{…}}]. L'url est une adresse interne Frembed qui
+        //   REDIRIGE vers le vrai lecteur (Voe/Dood/Uqload) — même mécanisme que les anciens
+        //   liens relatifs, déjà suivi par la résolution des redirections plus bas.
+        //   Lu en JsonElement (et non en liste typée) : si Frembed change encore la forme,
+        //   le parsing de TOUTE la réponse ne doit pas casser — on ignore juste ce champ.
+        //   Les séries renvoient les deux formats en même temps → dédoublonnage après
+        //   résolution (même lien final = un seul serveur).
+        val links: com.google.gson.JsonElement?=null,
     )
+
+    /** Serveurs du tableau `links` (nouveau format), dans l'ordre `position`. */
+    private fun listLinks.nouveauxLiens(): List<Pair<String, String>> = try {
+        val tableau = links?.takeIf { it.isJsonArray }?.asJsonArray ?: return emptyList()
+        tableau.mapNotNull { el ->
+            val o = el.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+            fun champ(n: String) = o.get(n)?.takeIf { it.isJsonPrimitive }?.asString
+            val url = champ("url")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val langue = when (champ("lang")?.lowercase()) {
+                "vostfr" -> "VOSTFR"
+                "vo" -> "VO"
+                else -> "French"
+            }
+            val position = o.get("position")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0
+            Triple(position, url, langue)
+        }.sortedBy { it.first }.map { it.second to it.third }
+    } catch (e: Exception) {
+        Log.w("FrembedExtractor", "tableau links illisible (${e.message}) → ignoré")
+        emptyList()
+    }
 
     // 2026-06-29 (REPAIR — restauré depuis la version riche) : sources VIP natives
     //   (Premium sans pub + Free VF) servies par api/streaming/player → m3u8 directs
@@ -112,6 +143,14 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                                   else -> "VO" }
                 (if (data.startsWith("/")) mainUrl.removeSuffix("/") + data else data).let {
                     Video.Server(id = "link$index", name = "${if (isFrembedNative(it)) "★ " else ""}${getExtractorName(it)} ($lang)", src = it)
+                }
+            } + nouveauxLiens().mapIndexed { i, (data, lang) ->
+                // 2026-09-26 : nouveau format `links` (voir listLinks.links). Id distinct des
+                //   anciens (« links$i ») pour ne jamais entrer en collision avec « link$index ».
+                (if (data.startsWith("/")) mainUrl.removeSuffix("/") + data else data).let {
+                    // Pas de ★ : ce ne sont pas des sources natives, juste des adresses de
+                    //   redirection vers un hébergeur (le nom est corrigé après résolution).
+                    Video.Server(id = "links$i", name = "${getExtractorName(it)} ($lang)", src = it)
                 }
             }
     }
@@ -381,6 +420,12 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
             val playableHosters = resolvedServers.filter {
                 !(isFrembedNative(it.src) && it.src.contains("api/stream"))
             }
+                // 2026-09-26 : nouveau format `links` non résolu (toujours une adresse /api/
+                //   de Frembed) = injouable → retiré, comme les anciens liens non résolus.
+                .filter { !(it.id.startsWith("links") && isFrembedNative(it.src)) }
+                // 2026-09-26 : les séries renvoient l'ancien ET le nouveau format → même
+                //   lien final deux fois. On garde le premier.
+                .distinctBy { it.src }
             // Compound sort: language priority (French > VOSTFR > VO), then reliability
             (vipServers + playableHosters).sortedWith(compareBy<Video.Server> { server ->
                 val name = server.name.uppercase()

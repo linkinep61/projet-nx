@@ -8581,6 +8581,14 @@ class PlayerTvFragment : Fragment() {
                 // 2026-07-30 : CDN Vidmoly (cert rejeté par vieux CA store) → OkHttp trust-all.
                 || url.contains("vmwesa", ignoreCase = true)
                 || url.contains("acek-cdn", ignoreCase = true)
+                // 2026-09-26 (user : « des serveurs Cinélux sont longs à lancer et se font couper
+                //   avant de se lancer ») : liens VOD des portails OLA (`/play/movie.php?…`).
+                //   Plusieurs de ces portails sont BLOQUÉS par le DNS du FAI (innovationtv.eu,
+                //   4y-ott.online → « le nom DNS n'existe pas », alors que le DoH les résout).
+                //   Le lien est obtenu via DoH, mais la lecture partait sur le DNS système →
+                //   CONNECTION_FAILED en 3 s, 3 relances « sticky » identiques, puis abandon.
+                //   Selon le portail tiré au sort, ça marchait ou pas (d'où « relancé, ça lit »).
+                || url.contains("/play/movie.php", ignoreCase = true)
                 // 2026-08-02 : upbolt → lecture via OKHTTP, comme l'extraction.
                 //   Constat décisif : le jeton obtenu par l'application est refusé (403) MÊME
                 //   rejoué dans un vrai navigateur, alors qu'un jeton obtenu par ce même navigateur

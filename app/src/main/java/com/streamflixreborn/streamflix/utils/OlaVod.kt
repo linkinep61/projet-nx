@@ -434,18 +434,57 @@ object OlaVod {
         val ep = parts.getOrNull(2).orEmpty()   // vide pour un film
         val idx = cache ?: index()
         val portails = (if (ep.isNotEmpty()) idx?.sgroupes?.get(g) else idx?.groupes?.get(g)).orEmpty().shuffled()
+        var secours: String? = null
         for (p in portails) {
             val url = runCatching { lien(p, cmd, ep) }.getOrNull()
+            // 2026-09-26 (user : « je suis repassé sur le serveur 1, il n'a pas voulu se lire, je
+            //   suis retourné dessus, il s'est lu ») : le portail tiré au sort peut donner un lien
+            //   dont le COMPTE (MAC) est déjà occupé → le lecteur reçoit « 458 » et le relance 3
+            //   fois pour rien. On vérifie le lien (1 octet, via DoH) avant de le rendre ; occupé
+            //   ou en erreur → portail suivant. Si la vérification elle-même échoue (réseau), le
+            //   lien est gardé en secours plutôt que perdu.
+            if (url != null) {
+                when (val code = codeLecture(url)) {
+                    in 200..399 -> Unit
+                    null -> { if (secours == null) secours = url; continue }
+                    else -> {
+                        Log.i(TAG, "lien refusé (HTTP $code, ${p.base.substringAfter("//").substringBefore("/")}) → portail suivant")
+                        continue
+                    }
+                }
+            }
             if (url != null) {
                 Log.i(TAG, "lien obtenu (${p.base.substringAfter("//").substringBefore("/")})")
-                return@withContext Video(
-                    source = url,
-                    // Extension réelle lue dans le lien (« stream=1418154.mkv »), sinon celle du cmd.
-                    type = VegetaVod.mimeDe(Regex("stream=[^&.]+\\.([a-z0-9]{2,4})", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1) ?: extension(cmd)),
-                    headers = mapOf("User-Agent" to UA_LECTURE),
-                )
+                return@withContext videoDe(url, cmd)
             }
+        }
+        secours?.let {
+            Log.i(TAG, "lien de secours (non vérifié)")
+            return@withContext videoDe(it, cmd)
         }
         throw Exception("Aucun portail n'a fourni ce film")
     }
+
+    private fun videoDe(url: String, cmd: String) = Video(
+        source = url,
+        // Extension réelle lue dans le lien (« stream=1418154.mkv »), sinon celle du cmd.
+        type = VegetaVod.mimeDe(Regex("stream=[^&.]+\\.([a-z0-9]{2,4})", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1) ?: extension(cmd)),
+        headers = mapOf("User-Agent" to UA_LECTURE),
+    )
+
+    /** Code HTTP d'une lecture d'1 octet du lien (redirections suivies, DNS via DoH comme le
+     *  lecteur). null = pas de réponse (réseau/délai). 458 = compte déjà utilisé. */
+    private fun codeLecture(url: String): Int? = runCatching {
+        val client = NetworkClient.default.newBuilder()
+            .connectTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .dns(DnsResolver.doh)
+            .build()
+        val req = okhttp3.Request.Builder().url(url)
+            .header("User-Agent", UA_LECTURE)
+            .header("Range", "bytes=0-0")
+            .build()
+        client.newCall(req).execute().use { it.code }
+    }.getOrNull()
 }
