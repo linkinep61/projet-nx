@@ -225,8 +225,8 @@ object OlaTvProvider : Provider, IptvProvider {
     //   pré-validée live-cids → moins de sondage à l'aveugle. 60→30 candidats + 8→4 en parallèle
     //   = 2× moins de charge d'un coup sur Ola ET moins de concurrence réseau/CPU avec la lecture
     //   sur la TV (appareil faible). Filet : 2ᵉ vague de 30 si la 1ʳᵉ ne ramène rien (cf. scan).
-    private const val PHASE3_MAX_CANDIDATES = 30  // 1ʳᵉ vague (2ᵉ vague déclenchée si vide)
-    private const val PHASE3_MAX_FR_CIDS = 15     // collect up to N healthy FR cids for stream diversity
+    private const val PHASE3_MAX_CANDIDATES = 45  // 1ʳᵉ vague (2ᵉ vague déclenchée si vide). 2026-10-02 : 30→45 (sonder plus loin, moins de rouge)
+    private const val PHASE3_MAX_FR_CIDS = 20     // collect up to N healthy FR cids for stream diversity. 2026-10-02 : 15→20 (plus de sources par chaîne)
     private const val PHASE3_PARALLELISM = 4      // plus doux : 2× moins de requêtes simultanées vers Ola
 
     // Cap of progressive variants emitted per channel for the initial batch.
@@ -270,7 +270,7 @@ object OlaTvProvider : Provider, IptvProvider {
     //   Nouveau fichier : l'ancien (celui qui bloquait les appareils) est supprimé au 1er lancement.
     private const val OLA_BANNED_CIDS_FILE = "olatv_banned_cids_v2.json"
     private const val OLA_BANNED_CIDS_ANCIEN = "olatv_banned_cids.json"
-    private const val OLA_BANNED_CIDS_TTL_MS = 24L * 60L * 60L * 1000L // 24 h, PAR cid
+    private const val OLA_BANNED_CIDS_TTL_MS = 6L * 60L * 60L * 1000L // 2026-10-02 : 24 h→6 h, PAR cid (re-test plus rapide des rouges)
     private const val OLA_MIN_ELIGIBLES = 15   // en dessous → on oublie les bans et on re-teste tout
     private val olaBannedCids = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val olaBannedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -288,7 +288,7 @@ object OlaTvProvider : Provider, IptvProvider {
     // Cap on search results — TV RecyclerView ANRs if a generic query ("tf",
     // "canal") returns 80+ items all loading logos at the same time.
     private const val SEARCH_RESULT_LIMIT = 30
-    private const val FR_CIDS_CACHE_TTL_MS = 24L * 60 * 60 * 1000L
+    private const val FR_CIDS_CACHE_TTL_MS = 6L * 60 * 60 * 1000L // 2026-10-02 : 24 h→6 h
 
     // Disk cache for the full channel registry — boot fast on subsequent launches
     // (skip Phase 1 server-list parse + Phase 2 primary-cid ingestion ~30s).
@@ -296,7 +296,7 @@ object OlaTvProvider : Provider, IptvProvider {
     // upstream don't go stale. Phase 3 still refreshes opportunistically in background.
     // v2 — busts the previous disk cache after norm() now keeps "+" → "plus".
     private const val REGISTRY_CACHE_FILE = "olatv_registry_v2.json"
-    private const val REGISTRY_CACHE_TTL_MS = 6L * 60 * 60 * 1000L
+    private const val REGISTRY_CACHE_TTL_MS = 2L * 60 * 60 * 1000L // 2026-10-02 : 6 h→2 h (pool plus frais, recalé sur le refresh Git)
 
     // ───────── Normalization & TNT order ─────────
 

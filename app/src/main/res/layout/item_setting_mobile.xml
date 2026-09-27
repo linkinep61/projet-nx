@@ -133,11 +133,15 @@
         tools:ignore="ContentDescription"
         tools:visibility="visible" />
 
+    <!-- 2026-10-01 : zone tactile 48 dp (icône 18 dp inchangée, centrée par le padding) —
+         à 18 dp on tapait à côté et ça lançait la ligne. -->
     <ImageView
         android:id="@+id/iv_setting_enter"
-        android:layout_width="18dp"
-        android:layout_height="18dp"
-        android:layout_marginEnd="10dp"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginEnd="0dp"
+        android:padding="15dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
         android:duplicateParentState="true"
         android:src="@drawable/ic_player_setting_arrow_right"
         android:tint="#808080"

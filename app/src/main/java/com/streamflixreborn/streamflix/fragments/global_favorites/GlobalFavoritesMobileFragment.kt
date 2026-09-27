@@ -66,6 +66,11 @@ class GlobalFavoritesMobileFragment : Fragment() {
     private var vusSeries: List<TvShow> = emptyList()
     private var reprises: List<Any> = emptyList()   // Movie ou GlobalFavorites.ContinueWatchingSeriesItem
     private var repriseIndex = 0
+    // 2026-09-27 (user : « les films et séries à reprendre, il faut qu'ils soient aussi affichés
+    //   dans Films et Séries, sinon on n'a pas une vue globale de ce qu'on a vu ou à voir ») :
+    //   les reprises, en plus de la carte Reprendre, rejoignent Films / Séries / Tout.
+    private var repFilms: List<Movie> = emptyList()
+    private var repSeries: List<TvShow> = emptyList()
 
     private val chipsFiltre = mutableMapOf<Filtre, TextView>()
     private val chipsTri = mutableMapOf<Tri, TextView>()
@@ -164,9 +169,9 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
     private fun majComptes() {
         val nb = mapOf(
-            Filtre.TOUT to (favFilms.size + favSeries.size + favSaisons.size + favEpisodes.size + favReplays.size + favRutube.size),
-            Filtre.FILMS to favFilms.size,
-            Filtre.SERIES to (favSeries.size + favSaisons.size),
+            Filtre.TOUT to (favFilms.size + repFilms.size + favSeries.size + repSeries.size + favSaisons.size + favEpisodes.size + favReplays.size + favRutube.size),
+            Filtre.FILMS to (favFilms.size + repFilms.size),
+            Filtre.SERIES to (favSeries.size + repSeries.size + favSaisons.size),
             Filtre.EPISODES to favEpisodes.size,
             Filtre.REPLAYS to (favReplays.size + favRutube.size),
             Filtre.VUS to (vusFilms.size + vusSeries.size),
@@ -254,10 +259,31 @@ class GlobalFavoritesMobileFragment : Fragment() {
             // Reprises de lecture
             val cwMovies = try { GlobalFavorites.loadContinueWatchingMovies(requireContext(), 20) } catch (_: Exception) { emptyList() }
             cwMovies.forEach {
-                it.itemType = AppAdapter.Type.MOVIE_FAV_RESUME_ROW_MOBILE_ITEM
+                it.itemType = AppAdapter.Type.MOVIE_GRID_MOBILE_ITEM
                 if (it.providerName.isNullOrBlank()) it.providerName = GlobalFavorites.originByItemId["resume_movie_${it.id}"]
             }
             val cwSeries = try { GlobalFavorites.loadContinueWatchingSeries(requireContext(), 20) } catch (_: Exception) { emptyList() }
+            // Reprises dans les listes Films / Séries (une œuvre déjà en favori n'est pas doublée).
+            //   Films : la carte grille ouvre la fiche dans la source d'origine via originByItemId.
+            //   Séries : id « resume_series_… », que la carte grille route déjà vers le lecteur.
+            val idsFavFilms = movies.map { it.id }.toSet()
+            val reprisesFilms = cwMovies.filter { it.id !in idsFavFilms }.onEach { m ->
+                GlobalFavorites.originByItemId["resume_movie_${m.id}"]?.let { o -> GlobalFavorites.originByItemId.putIfAbsent(m.id, o) }
+            }
+            val idsFavSeries = tvShows.map { it.id }.toSet()
+            val reprisesSeries = cwSeries.filter { it.tvShow.id !in idsFavSeries }.map { r ->
+                TvShow(
+                    id = "resume_series_${r.tvShow.id}",
+                    title = r.tvShow.title,
+                    overview = r.tvShow.overview,
+                    released = r.tvShow.released?.format("yyyy-MM-dd"),
+                    poster = r.tvShow.poster ?: r.lastEpisode.poster,
+                    banner = r.tvShow.banner,
+                ).apply {
+                    itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM
+                    providerName = r.providerName
+                }
+            }
 
             // Déjà vus
             val (wMovies, wShows) = try { GlobalFavorites.loadWatched(requireContext()) } catch (e: Exception) {
@@ -276,6 +302,7 @@ class GlobalFavoritesMobileFragment : Fragment() {
             favFilms = movies; favSeries = tvShows; favSaisons = seasonFavs; favEpisodes = episodeFavs
             favReplays = replayFavs; favRutube = rutubeFavs
             vusFilms = wMovies; vusSeries = wShows
+            repFilms = reprisesFilms; repSeries = reprisesSeries
             reprises = (cwMovies.map { it as Any } + cwSeries.map { it as Any })
                 .sortedByDescending { r ->
                     when (r) {
@@ -298,9 +325,9 @@ class GlobalFavoritesMobileFragment : Fragment() {
     private fun afficher() {
         val b = _binding ?: return
         val items: List<AppAdapter.Item> = when (filtre) {
-            Filtre.TOUT -> favFilms + favSeries + favSaisons + favEpisodes + favReplays + favRutube
-            Filtre.FILMS -> favFilms
-            Filtre.SERIES -> favSeries + favSaisons
+            Filtre.TOUT -> favFilms + repFilms + favSeries + repSeries + favSaisons + favEpisodes + favReplays + favRutube
+            Filtre.FILMS -> favFilms + repFilms
+            Filtre.SERIES -> favSeries + repSeries + favSaisons
             Filtre.EPISODES -> favEpisodes
             Filtre.REPLAYS -> favReplays + favRutube
             Filtre.VUS -> {
@@ -320,12 +347,14 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
     private fun idDe(i: AppAdapter.Item) = when (i) { is Movie -> "m" + i.id; is TvShow -> "t" + i.id; else -> i.hashCode().toString() }
     private fun titre(i: AppAdapter.Item) = when (i) { is Movie -> i.title; is TvShow -> i.title; else -> "" }
-    private fun ajout(i: AppAdapter.Item) = when (i) { is Movie -> i.favoritedAtMillis ?: 0L; is TvShow -> i.favoritedAtMillis ?: 0L; else -> 0L }
+    private fun ajout(i: AppAdapter.Item) = when (i) { is Movie -> i.favoritedAtMillis ?: i.watchHistory?.lastEngagementTimeUtcMillis ?: 0L; is TvShow -> i.favoritedAtMillis ?: repriseSerieTs(i); else -> 0L }
+    /** Dernière lecture d'une reprise série (id « resume_series_… »), 0 sinon. */
+    private fun repriseSerieTs(t: TvShow): Long = GlobalFavorites.resumeSeriesData[t.id]?.lastEpisode?.watchHistory?.lastEngagementTimeUtcMillis ?: 0L
     private fun annee(i: AppAdapter.Item) = when (i) { is Movie -> i.released?.get(java.util.Calendar.YEAR) ?: 0; is TvShow -> i.released?.get(java.util.Calendar.YEAR) ?: 0; else -> 0 }
     private fun source(i: AppAdapter.Item) = when (i) { is Movie -> i.providerName; is TvShow -> i.providerName; else -> null } ?: ""
     private fun dernierVu(i: AppAdapter.Item): Long = when (i) {
         is Movie -> maxOf(i.watchedDate?.timeInMillis ?: 0L, i.watchHistory?.lastEngagementTimeUtcMillis ?: 0L)
-        is TvShow -> i.episodeToWatch?.watchHistory?.lastEngagementTimeUtcMillis ?: 0L
+        is TvShow -> maxOf(i.episodeToWatch?.watchHistory?.lastEngagementTimeUtcMillis ?: 0L, repriseSerieTs(i))
         else -> 0L
     }
     private fun estVu(i: AppAdapter.Item) = when (i) {
@@ -442,6 +471,19 @@ class GlobalFavoritesMobileFragment : Fragment() {
             Toast.makeText(requireContext(), "Reprise retirée", Toast.LENGTH_SHORT).show()
             loadFavorites(); return
         }
+        // 2026-10-01 (remonté par un utilisateur : « la catégorie Vus ne peut pas être effacée ») :
+        //   dans le filtre « Vus », l'appui long retire le drapeau « vu » (pas le favori).
+        if (filtre == Filtre.VUS) {
+            viewLifecycleOwner.lifecycleScope.launch {
+                val ok = GlobalFavorites.unmarkWatched(requireContext(), itemId, isMovie)
+                if (_binding == null) return@launch
+                if (ok) {
+                    Toast.makeText(requireContext(), "Retiré des vus", Toast.LENGTH_SHORT).show()
+                    loadFavorites()
+                }
+            }
+            return
+        }
         if (isMovie && GlobalFavorites.originByItemId.containsKey("resume_movie_$itemId")
             && favFilms.none { it.id == itemId } && vusFilms.none { it.id == itemId }) {
             GlobalFavorites.dismissContinueWatching("resume_movie_$itemId")
@@ -460,7 +502,7 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
     /** 🗑 : vider une section entière (même logique qu'avant, via un menu). */
     private fun menuVider() {
-        val sections = listOf("Films", "Séries", "Saisons", "Épisodes", "Replays", "Reprendre")
+        val sections = listOf("Films", "Séries", "Saisons", "Épisodes", "Replays", "Reprendre", "Vus")
         AlertDialog.Builder(requireContext())
             .setTitle("Vider…")
             .setItems(sections.toTypedArray()) { _, i ->
@@ -484,6 +526,7 @@ class GlobalFavoritesMobileFragment : Fragment() {
                     "Épisodes" -> EpisodeFavorites.clearAll()
                     "Replays" -> com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.clearAll()
                     "Reprendre" -> GlobalFavorites.dismissAllContinueWatching()
+                    "Vus" -> GlobalFavorites.clearAllWatched(requireContext())
                 }
                 if (_binding == null) return@launch
                 Toast.makeText(requireContext(), "« $sectionName » vidé", Toast.LENGTH_SHORT).show()

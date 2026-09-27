@@ -1246,12 +1246,31 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         return ""
     }
 
+    // 2026-10-02 (user : « les étoiles sont les mêmes sur toutes les jaquettes ») :
+    //   Anime-Sama a mis sa barre de navigation (<nav>, <div>…) DANS le <head>, AVANT le
+    //   <title>. Jsoup referme alors le <head> au premier <nav> et le <title> se retrouve
+    //   dans le <body> : document.title() (qui ne cherche que dans <head>) renvoyait "".
+    //   Conséquences : aucun titre sur la fiche, et la clé de note communautaire
+    //   hash(titre|année) valait hash("|") pour TOUS les animes — une seule note partagée.
+    //   On cherche donc le <title> où qu'il soit, puis og:title, puis le slug.
+    private fun titreCatalogue(document: Document, slug: String): String {
+        val brut = document.title().ifBlank {
+            document.selectFirst("title")?.text().orEmpty()
+        }.ifBlank {
+            document.selectFirst("meta[property=og:title]")?.attr("content").orEmpty()
+        }
+        val titre = brut.substringBefore(" |").substringBefore("| Anime-Sama").trim()
+        if (titre.isNotBlank()) return titre
+        return slug.split('-').filter { it.isNotBlank() }
+            .joinToString(" ") { m -> m.replaceFirstChar { it.uppercaseChar() } }
+    }
+
     override suspend fun getMovie(id: String): Movie {
         val slug = id.substringBefore("@")
         val document = fetchDocument("${baseUrl}catalogue/$slug/")
         val html = document.html()
 
-        val title = document.title().substringBefore(" |").trim()
+        val title = titreCatalogue(document, slug)
         val synopsisMatch = Regex("SYNOPSIS[\\s\\S]*?<p[^>]*>([\\s\\S]*?)</p>", RegexOption.IGNORE_CASE).find(html)
         val synopsisRaw = synopsisMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
         val synopsis = sanitizeAnimeSamaField(synopsisRaw, extractAfterSynopsis = true)
@@ -1346,7 +1365,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val document = fetchDocument("${baseUrl}catalogue/$slug/")
         val html = document.html()
 
-        val title = document.title().substringBefore(" |").trim()
+        val title = titreCatalogue(document, slug)
         val synopsisMatch = Regex("SYNOPSIS[\\s\\S]*?<p[^>]*>([\\s\\S]*?)</p>", RegexOption.IGNORE_CASE).find(html)
         val synopsisRaw = synopsisMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
         val synopsis = sanitizeAnimeSamaField(synopsisRaw, extractAfterSynopsis = true)

@@ -55,7 +55,40 @@ object LiveHubFolderDialog {
         } catch (_: Throwable) {}
     }
 
-    private fun normSearch(s: String): String =
+    // 2026-09-28 (user : « la recherche mot par mot dans le TV Hub est trop lourde sur certains
+//   appareils … vaut mieux écrire le mot complet puis rechercher, au lieu de lettre par lettre ») :
+//   chaque lettre refiltrait des milliers d'entrées sur le thread principal (7 champs ici).
+//   TV : le filtre ne part qu'à la VALIDATION (OK du clavier / Entrée) ; vider le champ remet
+//   la liste complète tout de suite. Mobile : filtre différé 350 ms après la dernière lettre
+//   (une passe par mot, pas une par lettre). `champAvecHistorique` pose son propre
+//   OnEditorActionListener après coup : il relance le filtre via VALIDER_FILTRE.
+private val VALIDER_FILTRE = java.util.WeakHashMap<android.widget.EditText, () -> Unit>()
+private const val DELAI_FILTRE_MS = 350L
+private fun android.widget.EditText.filtreDiffere(action: (String) -> Unit) {
+    val tv = (context.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+        android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    val h = android.os.Handler(android.os.Looper.getMainLooper())
+    var enAttente: Runnable? = null
+    val lancer: () -> Unit = {
+        enAttente?.let { h.removeCallbacks(it) }; enAttente = null
+        action(text?.toString()?.trim().orEmpty())
+    }
+    VALIDER_FILTRE[this] = lancer
+    setOnEditorActionListener { _, _, _ -> lancer(); true }
+    addTextChangedListener(object : android.text.TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        override fun afterTextChanged(e: android.text.Editable?) {
+            val q = e?.toString()?.trim().orEmpty()
+            enAttente?.let { h.removeCallbacks(it) }; enAttente = null
+            if (q.isEmpty()) { action(""); return }
+            if (tv) return
+            enAttente = Runnable { enAttente = null; action(q) }.also { h.postDelayed(it, DELAI_FILTRE_MS) }
+        }
+    })
+}
+
+private fun normSearch(s: String): String =
         java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
             .replace(Regex("\\p{Mn}+"), "")
             .lowercase()
@@ -1131,17 +1164,13 @@ object LiveHubFolderDialog {
             }
             inputType = android.text.InputType.TYPE_CLASS_TEXT
             isSingleLine = true
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun afterTextChanged(e: android.text.Editable?) {
-                    val q = normSearch((e?.toString() ?: "").trim())
+            filtreDiffere { e ->
+                    val q = normSearch(e)
                     filteredOtf.clear()
                     if (q.isEmpty()) filteredOtf.addAll(channels)
                     else filteredOtf.addAll(channels.filter { normSearch(it.title).contains(q) })
                     otfAdapter.clear(); otfAdapter.addAll(filteredOtf.map { it.title }); otfAdapter.notifyDataSetChanged()
                 }
-            })
         }
         val otfContent = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -1458,11 +1487,8 @@ object LiveHubFolderDialog {
             }
             inputType = android.text.InputType.TYPE_CLASS_TEXT
             isSingleLine = true
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
-                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
-                override fun afterTextChanged(e: android.text.Editable?) {
-                    val rawQ = (e?.toString() ?: "").trim()
+            filtreDiffere { e ->
+                    val rawQ = e
                     val q = normSearch(rawQ)
                     val newCats: List<Category> = if (q.isEmpty()) {
                         categories.toList()
@@ -1486,7 +1512,6 @@ object LiveHubFolderDialog {
                     })
                     adapter.notifyDataSetChanged()
                 }
-            })
         }
         // Titre dans le flux + champ recherche + liste + RETOUR en ligne après la liste
         val contentCol = android.widget.LinearLayout(ctx).apply {
@@ -1747,11 +1772,8 @@ object LiveHubFolderDialog {
                 setColor(android.graphics.Color.argb(0xCC, 0x20, 0x20, 0x20))
                 cornerRadius = 6 * dp
             }
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun afterTextChanged(s: android.text.Editable?) {
-                    val q = normSearch(s?.toString()?.trim().orEmpty())
+            filtreDiffere { s ->
+                    val q = normSearch(s)
                     if (q.isEmpty()) {
                         folderList.visibility = android.view.View.VISIBLE
                         resultsList.visibility = android.view.View.GONE
@@ -1764,7 +1786,6 @@ object LiveHubFolderDialog {
                         resultsList.visibility = android.view.View.VISIBLE
                     }
                 }
-            })
         }
         val titleLabel = android.widget.TextView(ctx).apply {
             text = "📁 $folderName"
@@ -2031,11 +2052,8 @@ object LiveHubFolderDialog {
             }
             inputType = android.text.InputType.TYPE_CLASS_TEXT
             isSingleLine = true
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun afterTextChanged(e: android.text.Editable?) {
-                    val q = normSearch((e?.toString() ?: "").trim())
+            filtreDiffere { e ->
+                    val q = normSearch(e)
                     if (q.isEmpty()) {
                         simpleSearchMode = false; simpleResults = emptyList()
                         adapter.clear(); adapter.addAll(folderLabels); adapter.notifyDataSetChanged()
@@ -2045,7 +2063,6 @@ object LiveHubFolderDialog {
                         adapter.clear(); adapter.addAll(simpleResults.map { it.title }); adapter.notifyDataSetChanged()
                     }
                 }
-            })
         } else null
         val contentCol = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -2417,11 +2434,8 @@ object LiveHubFolderDialog {
             }
             inputType = android.text.InputType.TYPE_CLASS_TEXT
             isSingleLine = true
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
-                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
-                override fun afterTextChanged(e: android.text.Editable?) {
-                    val q = normSearch((e?.toString() ?: "").trim())
+            filtreDiffere { e ->
+                    val q = normSearch(e)
                     if (q.isEmpty()) {
                         aggSearchMode = false
                         aggResults = emptyList()
@@ -2434,7 +2448,6 @@ object LiveHubFolderDialog {
                         aggAdapter.notifyDataSetChanged()
                     }
                 }
-            })
         }
         // Titre dans le flux + recherche + liste + RETOUR en ligne après la liste
         val contentColAgg = android.widget.LinearLayout(ctx).apply {
@@ -2795,6 +2808,8 @@ object LiveHubFolderDialog {
             if (q.isNotEmpty()) {
                 com.streamflixreborn.streamflix.utils.SearchHistory.add(ctx, q, seau)
             }
+            // 2026-09-28 : ce listener remplace celui de filtreDiffere → on relance le filtre ici.
+            VALIDER_FILTRE[champ]?.invoke()
             false   // on ne consomme pas : le comportement d'origine du champ est préservé
         }
 
@@ -3462,12 +3477,9 @@ object LiveHubFolderDialog {
             })
         }
         // ── TextWatcher : filtre en temps réel ──
-        searchInput.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) {
-                if (networkSearch != null) return  // Rutube : recherche RÉSEAU sur validation
-                val query = s?.toString()?.trim() ?: ""
+        searchInput.filtreDiffere { s ->
+                if (networkSearch != null) return@filtreDiffere  // Rutube : recherche RÉSEAU sur validation
+                val query = s
                 filteredChannels.clear()
                 if (query.isEmpty()) {
                     filteredChannels.addAll(channels)
@@ -3481,7 +3493,6 @@ object LiveHubFolderDialog {
                 }
                 gridAdapter.notifyDataSetChanged()
             }
-        })
         // 2026-08-13 : DOSSIER RUTUBE — la barre interroge Rutube (réseau) sur validation
         //   (Entrée/OK) et repeuple la grille, au lieu du filtre local sur une liste vide.
         if (networkSearch != null) {
@@ -3668,11 +3679,8 @@ object LiveHubFolderDialog {
             .create()
 
         // ── TextWatcher : filtre en temps réel ──
-        searchInput?.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) {
-                val query = s?.toString()?.trim() ?: ""
+        searchInput?.filtreDiffere { s ->
+                val query = s
                 filteredChannels.clear()
                 if (query.isEmpty()) {
                     filteredChannels.addAll(channels)
@@ -3686,7 +3694,6 @@ object LiveHubFolderDialog {
                 }
                 itemsAdapter.notifyDataSetChanged()
             }
-        })
         retourBtn.setOnClickListener { dlg.dismiss() }
 
         listView.setOnItemClickListener { _, _, idx, _ ->

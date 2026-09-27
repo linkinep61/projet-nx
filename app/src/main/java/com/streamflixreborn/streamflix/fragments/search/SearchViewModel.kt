@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withPermit
 
 // DEFINICIONES DE ESTADO Y RESULTADOS (Fuera de la clase para mejor acceso)
 sealed class State {
@@ -106,19 +107,45 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
     var query = ""
     private var page = 1
 
+    // ⚠ 2026-09-28 (user : « la recherche globale de base de l'application s'est aussi crashée
+    //   sur certains appareils ») : `search` et `searchGlobal` lançaient chaque fois une nouvelle
+    //   coroutine SANS annuler la précédente — deux validations rapprochées faisaient tourner
+    //   deux recherches globales complètes (2 × 20-30 providers) en même temps. Et searchGlobal
+    //   interrogeait tous les providers d'un coup. Désormais : une seule recherche en vol
+    //   (l'ancienne est annulée), au plus PARALLELE providers à la fois (2 sur appareil à faible
+    //   mémoire, 3 sur TV, 4 sinon), et un délai maximum par provider. Elle cherche toujours
+    //   partout : mêmes résultats, mais le processeur et la mémoire sont sollicités 5 à 10 fois moins.
+    private var enVol: kotlinx.coroutines.Job? = null
+    private fun parallele(): Int {
+        val app = runCatching { com.streamflixreborn.streamflix.StreamFlixApp.instance }.getOrNull() ?: return 2
+        val am = app.getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val tv = (app.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+            android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        val faible = am?.isLowRamDevice == true || (am?.memoryClass ?: 256) <= 128
+        return if (faible) 2 else if (tv) 3 else 4
+    }
+    private companion object { const val DELAI_PROVIDER_MS = 25_000L }
+
     init {
         search(query)
     }
 
-    fun search(query: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun search(query: String) {
+        enVol?.cancel()
+        enVol = viewModelScope.launch(Dispatchers.IO) { rechercher(query) }
+    }
+
+    private suspend fun rechercher(query: String) {
         _state.emit(State.Searching)
 
         try {
-            val provider = UserPreferences.currentProvider ?: return@launch
+            val provider = UserPreferences.currentProvider ?: return
             val results = ParentalControlUtils.filterItems(provider.search(query))
             this@SearchViewModel.query = query
             page = 1
             _state.emit(State.SuccessSearching(results, results.isNotEmpty()))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e   // recherche remplacée par une plus récente : on ne signale pas d'erreur
         } catch (e: Exception) {
             Log.e("SearchViewModel", "search: ", e)
             _state.emit(State.FailedSearching(e))
@@ -191,7 +218,13 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
         return items
     }
 
-    fun searchGlobal(query: String, currentLanguage: String, group: Provider.Companion.ProviderGroup? = null) = viewModelScope.launch(Dispatchers.IO) {
+    fun searchGlobal(query: String, currentLanguage: String, group: Provider.Companion.ProviderGroup? = null) {
+        enVol?.cancel()
+        enVol = viewModelScope.launch(Dispatchers.IO) { rechercherGlobal(query, currentLanguage, group) }
+    }
+
+    private suspend fun rechercherGlobal(query: String, currentLanguage: String, group: Provider.Companion.ProviderGroup?) = kotlinx.coroutines.coroutineScope {
+        val permis = kotlinx.coroutines.sync.Semaphore(parallele())
         _state.emit(State.GlobalSearching)
 
         val isIptvScope = group == Provider.Companion.ProviderGroup.IPTV
@@ -206,7 +239,7 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
 
         if (targetProviders.isEmpty()) {
             _state.emit(State.SuccessGlobalSearching(emptyList()))
-            return@launch
+            return@coroutineScope
         }
 
         val initialResults = targetProviders.map { provider ->
@@ -224,10 +257,20 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
             }
         }
 
-        targetProviders.forEachIndexed { index, provider ->
-            launch {
+        // 2026-09-28 : les sources lourdes (mesuré sur TV : TV Hub 34 s, OLA TV 40 s) passent en
+        //   dernier pour ne pas retenir les places pendant que les rapides attendent.
+        val lourds = setOf("TV Hub", "OLA TV", "Vegeta TV", "Vavoo")
+        val ordre = targetProviders.indices.sortedBy { if (targetProviders[it].name in lourds) 1 else 0 }
+        ordre.forEach { index ->
+            val provider = targetProviders[index]
+            launch { permis.withPermit {
+                val t0 = System.currentTimeMillis()
                 try {
-                    val rawResults = ParentalControlUtils.filterItems(provider.search(query).onEach { item ->
+                    // Délai maximum par provider : au-delà, il est marqué en erreur (délai dépassé)
+                    //   et libère sa place pour le suivant, au lieu de retenir un permis indéfiniment.
+                    val bruts = kotlinx.coroutines.withTimeoutOrNull(DELAI_PROVIDER_MS) { provider.search(query) }
+                        ?: throw java.util.concurrent.TimeoutException("délai dépassé (${DELAI_PROVIDER_MS / 1000} s)")
+                    val rawResults = ParentalControlUtils.filterItems(bruts.onEach { item ->
                         // ========= ¡AQUÍ ESTÁ LA MAGIA! =========
                         // Le ponemos el sello a cada resultado
                         when (item) {
@@ -241,14 +284,17 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
                     //   COMMENCENT par la requête (sinon ceux qui la contiennent). Élimine
                     //   les faux positifs (Spider-Man Far From Home… pour "from").
                     val results = strictNameFilter(rawResults, query)
+                    Log.i("SearchViewModel", "globale « $query » ${provider.name} : ${results.size} en ${System.currentTimeMillis() - t0} ms")
                     mutableResults[index] = ProviderResult(provider, ProviderResult.State.Success(results))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e("SearchViewModel", "searchGlobal for ${provider.name}: ", e)
                     mutableResults[index] = ProviderResult(provider, ProviderResult.State.Error(e))
                 }
 
-                _state.emit(State.SuccessGlobalSearching(mutableResults.sortedWith(stateComparator)))
-            }
+                _state.emit(State.SuccessGlobalSearching(synchronized(mutableResults) { mutableResults.sortedWith(stateComparator) }))
+            } }
         }
     }
 }

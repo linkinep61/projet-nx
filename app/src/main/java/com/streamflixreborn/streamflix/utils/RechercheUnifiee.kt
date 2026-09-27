@@ -34,6 +34,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -87,7 +89,23 @@ object RechercheUnifiee {
      *   recherche à part et on n'attend que son RÉSULTAT, avec le délai : passé ce délai, on
      *   continue sans elle (elle finit en fond, sans bloquer l'écran).
      */
-    private val horsEcran = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+    // ⚠ 2026-09-28 (user : « certains appareils crashent sous le poids de l'appel des sources ») :
+    //   ce scope n'était JAMAIS annulé — relancer une recherche ou fermer le dialog laissait
+    //   les 20-30 recherches précédentes tourner en fond et s'empiler avec les nouvelles.
+    //   Désormais : un scope PAR recherche (l'ancien est annulé à chaque `lancer` et à la
+    //   fermeture), et au plus PARALLELE providers interrogés en même temps (sémaphore) —
+    //   2 sur appareil à faible mémoire, 3 sur TV, 4 sinon. Les résultats arrivent toujours au fil
+    //   de l'eau, juste plus étalés ; le pic mémoire/CPU est divisé d'autant.
+    private var horsEcran = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+    private fun nouveauScope(): kotlinx.coroutines.CoroutineScope {
+        runCatching { horsEcran.cancel() }
+        return kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO).also { horsEcran = it }
+    }
+    private fun parallele(ctx: Context): Int {
+        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val faible = am?.isLowRamDevice == true || (am?.memoryClass ?: 256) <= 128
+        return if (faible) 2 else if (estTv(ctx)) 3 else 4
+    }
     private suspend fun <T> auPlus(ms: Long, bloc: suspend () -> T): T? {
         val d = horsEcran.async { runCatching { bloc() }.getOrNull() }
         return withTimeoutOrNull(ms) { d.await() }
@@ -290,6 +308,24 @@ object RechercheUnifiee {
         ligne.addView(histo, LinearLayout.LayoutParams(dp(48), dp(46)).apply { leftMargin = dp(8) })
         ligne.addView(go, LinearLayout.LayoutParams(dp(48), dp(46)).apply { leftMargin = dp(8) })
         racine.addView(ligne, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        // 2026-09-28 (remonté par un utilisateur : « sur l'onglet Séries, quand on veut redescendre
+        //   dans la recherche, ça passe par l'historique pour retourner dans la recherche ») : sans
+        //   cible explicite, Android choisit « le plus proche » et depuis Séries/Live tombe sur 🕘.
+        //   Bas depuis n'importe quel onglet → le champ ; haut depuis le champ / 🕘 / 🔍 → l'onglet
+        //   actif ; gauche/droite chaînés champ ↔ 🕘 ↔ 🔍.
+        if (tv) {
+            listOf(saisie, histo, go).forEach { if (it.id == View.NO_ID) it.id = View.generateViewId() }
+            boutonsMode.forEach { if (it.id == View.NO_ID) it.id = View.generateViewId(); it.nextFocusDownId = saisie.id }
+            saisie.nextFocusRightId = histo.id
+            histo.nextFocusLeftId = saisie.id; histo.nextFocusRightId = go.id
+            go.nextFocusLeftId = histo.id
+        }
+        fun cablerHautVersOnglet() {
+            if (!tv) return
+            val actif = boutonsMode[Mode.values().indexOf(mode)]
+            listOf(saisie, histo, go).forEach { it.nextFocusUpId = actif.id }
+        }
+        cablerHautVersOnglet()
 
         // ── Mini-lecteur (mode Live) ─────────────────────────────────────────────
         // 2026-09-26 (user : « quand on est sur Live, j'aimerais que le mini-lecteur apparaisse…
@@ -584,6 +620,8 @@ object RechercheUnifiee {
                     .hideSoftInputFromWindow(saisie.windowToken, 0)
             }
             job?.cancel()
+            nouveauScope()
+            val permis = kotlinx.coroutines.sync.Semaphore(parallele(ctx))
             val m = mode
             val provs = sources(m)
             val sections = ArrayList<Section>()
@@ -598,7 +636,25 @@ object RechercheUnifiee {
             job = fragment.viewLifecycleOwner.lifecycleScope.launch {
                 chargerPerso(ctx.applicationContext)
                 val hubIdx = sections.indices.filter { sections[it].dossier != null }
-                val hubJob = if (hubIdx.isEmpty()) null else async(Dispatchers.IO) {
+                // 2026-09-28 (mesuré sur la TV avec « tf1 » : TV Hub 34 s et OLA TV 40 s ont pris
+                //   les 2 places → Mon IPTV (2 s) et World Live (2,5 s) ont attendu 40 s derrière) :
+                //   les sources RAPIDES démarrent d'abord, les lourdes (TV Hub, OLA, Vegeta, Vavoo,
+                //   Ciné Films) prennent les places en dernier. Le sémaphore sert les demandes dans
+                //   l'ordre de lancement, donc l'ordre de lancement = l'ordre de passage.
+                val lourds = setOf("TV Hub", "OLA TV", "Vegeta TV", "Vavoo", "Ciné Films")
+                val legers = sections.mapIndexedNotNull { i, s -> if (s.dossier != null) null else i to s }
+                    .sortedBy { (_, s) -> if (s.titre in lourds) 1 else 0 }
+                    .map { (i, s) ->
+                        async(Dispatchers.IO) { permis.withPermit {
+                            val res = runCatching {
+                                if (s.provider == null) chercherCineFilms(m, q) else chercherDans(s.provider, m, q)
+                            }.onFailure { Log.w(TAG, "${s.titre} : ${it.message}") }.getOrDefault(emptyList())
+                            withContext(Dispatchers.Main) {
+                                if (memo === sections) { s.items = res; remplir(i) }
+                            }
+                        } }
+                    }
+                val hubJob = if (hubIdx.isEmpty()) null else async(Dispatchers.IO) { permis.withPermit {
                     val t0 = System.currentTimeMillis()
                     val groupes = (auPlus(DELAI_MS) { hub.rechercheParDossier(q) }
                         .also { Log.i(TAG, "TV Hub « $q » : ${it?.size} dossiers en ${System.currentTimeMillis() - t0} ms") })
@@ -614,17 +670,8 @@ object RechercheUnifiee {
                             if (memo === sections) { s.groupes = groupes; s.items = groupes.flatMap { it.second }; remplir(i) }
                         }
                     }
-                }
-                (sections.mapIndexedNotNull { i, s -> if (s.dossier != null) null else i to s }).map { (i, s) ->
-                    async(Dispatchers.IO) {
-                        val res = runCatching {
-                            if (s.provider == null) chercherCineFilms(m, q) else chercherDans(s.provider, m, q)
-                        }.onFailure { Log.w(TAG, "${s.titre} : ${it.message}") }.getOrDefault(emptyList())
-                        withContext(Dispatchers.Main) {
-                            if (memo === sections) { s.items = res; remplir(i) }
-                        }
-                    }
-                }.awaitAll()
+                } }
+                legers.awaitAll()
                 hubJob?.await()
             }
         }
@@ -674,7 +721,7 @@ object RechercheUnifiee {
         boutonsMode.forEachIndexed { i, b ->
             b.setOnClickListener {
                 if (mode == Mode.values()[i]) return@setOnClickListener
-                mode = Mode.values()[i]; peindreModes()
+                mode = Mode.values()[i]; peindreModes(); cablerHautVersOnglet()
                 if (mode != Mode.LIVE && panneau.visibility == View.VISIBLE) { MPC.stop(); panneau.visibility = View.GONE }
                 if (saisie.text.toString().trim().length >= 2) lancer()
             }
@@ -727,6 +774,7 @@ object RechercheUnifiee {
         }
         dialog.setOnDismissListener {
             job?.cancel(); suivi.cancel()
+            runCatching { horsEcran.cancel() }   // 2026-09-28 : plus rien ne tourne en fond après fermeture
             runCatching { vue.player = null }
             // Fermé sans passer en plein écran : l'aperçu s'arrête (sauf une radio en fond).
             if (!versPleinEcran && panneau.visibility == View.VISIBLE &&

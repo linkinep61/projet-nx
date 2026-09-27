@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * LiveTV Hub — provider META qui agrège les chaînes TV mainstream (TF1, France
@@ -1511,6 +1512,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *   que la nouvelle recherche (RechercheUnifiee) affiche une rangée par dossier. [search]
      *   aplatit simplement ces groupes. Un même id n'apparaît que dans le premier groupe.
      */
+    /** Appareil à faible mémoire (isLowRamDevice ou classe mémoire ≤ 128 Mo) — chargements lourds 1 par 1. */
+    private fun appareilFaible(): Boolean = runCatching {
+        val am = com.streamflixreborn.streamflix.StreamFlixApp.instance
+            .getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        am?.isLowRamDevice == true || (am?.memoryClass ?: 256) <= 128
+    }.getOrDefault(false)
+
     suspend fun rechercheParDossier(query: String): List<Pair<String, List<TvShow>>> {
         val q = query.trim().lowercase()
         val all = allHomeChannels()
@@ -1543,19 +1551,28 @@ object LiveTvHubProvider : Provider, IptvProvider {
             Log.w(TAG, "search: $nom KO: ${e.message}"); emptyList()
         }
         val nomsLazy = mapOf("otf" to "OTF TV", "autres_replay" to "Autres Replays", "musique" to "Musique")
+        //  · 2026-09-28 (user : « sur certains appareils c'est un calvaire, le pire c'est le TV
+        //    Hub ») — mesuré sur la TV : une recherche à cache froid téléchargeait ET parsait EN
+        //    MÊME TEMPS le Replay (4,7 Mo, 12 500 programmes), Mix FR (2 844 chaînes), WorldWide,
+        //    FAST, IPTV du web, OTF… 34 s sur la TV, et un pic mémoire fatal sur les appareils
+        //    faibles. Les sources déjà en mémoire (chaînes, dossiers, bibliothèque, Stream4Free,
+        //    Reneveo) répondent tout de suite ; les chargements LOURDS passent 2 par 2 (1 par 1
+        //    sur appareil à faible mémoire), chacun avec son délai d'origine.
+        val lourds = kotlinx.coroutines.sync.Semaphore(if (appareilFaible()) 1 else 2)
+        suspend fun <T> lourd(bloc: suspend () -> T): T = lourds.withPermit { bloc() }
         return coroutineScope {
             val io = kotlinx.coroutines.Dispatchers.IO
-            val replay = async(io) { chainesDe("Replays", 10_000, 150) { fetchReplayCategories() } }
-            val mix = async(io) { chainesDe("Mix FR") { fetchMixFrCategoriesPublic() } }
-            val fast = async(io) { chainesDe("FAST") { fetchFastCategoriesPublic() } }
-            val ww = async(io) { chainesDe("WorldWide") { fetchWorldwideCategoriesPublic() } }
+            val replay = async(io) { lourd { chainesDe("Replays", 10_000, 150) { fetchReplayCategories() } } }
+            val mix = async(io) { lourd { chainesDe("Mix FR") { fetchMixFrCategoriesPublic() } } }
+            val fast = async(io) { lourd { chainesDe("FAST") { fetchFastCategoriesPublic() } } }
+            val ww = async(io) { lourd { chainesDe("WorldWide") { fetchWorldwideCategoriesPublic() } } }
             val iptvWeb = async(io) {
-                chainesDe("IPTV du web", max = 100) {
+                lourd { chainesDe("IPTV du web", max = 100) {
                     com.streamflixreborn.streamflix.providers.WorldLiveTvProvider.categoriesIptvDuWebFr()
-                }
+                } }
             }
             val otf = async(io) {
-                chainesDe("OTF TV") {
+                lourd { chainesDe("OTF TV") {
                     val svc = com.streamflixreborn.streamflix.utils.OtfTvService
                     val groupe = svc.selectedGroup.ifBlank { "France" }
                     val chaines = svc.sortChannelsFrenchTntOrder(
@@ -1565,7 +1582,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                             providerName = "TV Hub"; poster = ch.logo; banner = ch.logo
                         }
                     }))
-                }
+                } }
             }
             // Stream4Free : cache ou liste locale UNIQUEMENT. Passer par fetchStream4CfCategoriesLive()
             //   lançait en fond le chauffage Cloudflare (WebView) + la pré-résolution de 53 chaînes :

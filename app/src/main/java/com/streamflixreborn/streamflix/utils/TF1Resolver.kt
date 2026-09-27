@@ -121,6 +121,15 @@ object TF1Resolver {
      *  le consulte pour configurer DrmSessionManager. */
     private val widevineLicenseCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     fun getWidevineLicenseUrl(streamUrl: String): String? = widevineLicenseCache[streamUrl]
+    // ⚠ 2026-09-28 (user : « TF1 diffuse bizarrement… si ça marche sur le site, ça doit marcher
+    //   chez nous ») : TF1 a changé de serveur de licence — avant `drm-wide.tf1.fr` (jeton dans
+    //   l'URL, aucun en-tête), maintenant Irdeto (`tf1.live.ott.irdeto.com`) qui EXIGE l'en-tête
+    //   `Authorization: Bearer <jeton delivery>` donné par mediainfo dans `drms[].h`
+    //   (valable ~5 min). On l'ignorait → licence demandée nue → HTTP 403 → « Source error ».
+    //   Même mécanique que M6 (x-dt-auth-token) et BFM (customdata) : en-têtes mémorisés par
+    //   URL de flux, relus par le lecteur au moment de configurer le DRM.
+    private val widevineHeadersCache = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
+    fun getWidevineHeaders(streamUrl: String): Map<String, String>? = widevineHeadersCache[streamUrl]?.takeIf { it.isNotEmpty() }
 
     /** Mapping slug user-friendly → channel ID TF1 pour le live.
      *  Les chaînes FAST n'ont pas besoin d'entrée ici : leur URL M3U utilise
@@ -296,12 +305,18 @@ object TF1Resolver {
         //   Maintenant : on extract la widevine license URL et on la passe
         //   au player qui configure DrmSessionManager.
         val drmsArr = delivery.optJSONArray("drms")
-        val widevineLicenseUrl = drmsArr?.let {
+        val widevineObj = drmsArr?.let {
             (0 until it.length()).asSequence()
                 .mapNotNull { i -> it.optJSONObject(i) }
                 .firstOrNull { obj -> obj.optString("name").equals("widevine", ignoreCase = true) }
-                ?.optString("url")?.takeIf { url -> url.isNotBlank() }
         }
+        val widevineLicenseUrl = widevineObj?.optString("url")?.takeIf { url -> url.isNotBlank() }
+        // 2026-09-28 : en-têtes exigés par le serveur de licence (Irdeto) — `h: [{k, v}]`.
+        val widevineHeaders = widevineObj?.optJSONArray("h")?.let { h ->
+            (0 until h.length()).mapNotNull { i -> h.optJSONObject(i) }
+                .mapNotNull { o -> val k = o.optString("k"); val v = o.optString("v"); if (k.isNotBlank() && v.isNotBlank()) k to v else null }
+                .toMap()
+        }.orEmpty()
         val format = delivery.optString("format", "").lowercase()
         val streamUrl = delivery.optString("url", "")
         if (streamUrl.isBlank()) {
@@ -313,9 +328,10 @@ object TF1Resolver {
             format == "dash" || streamUrl.contains(".mpd", ignoreCase = true) -> "application/dash+xml"
             else -> "video/*"
         }
-        Log.d(TAG, "Resolved $siId ($format, drm=${widevineLicenseUrl != null}) → ${streamUrl.take(80)}...")
+        Log.d(TAG, "Resolved $siId ($format, drm=${widevineLicenseUrl != null}, en-têtes licence=${widevineHeaders.keys}) → ${streamUrl.take(80)}...")
         if (widevineLicenseUrl != null) {
             widevineLicenseCache[streamUrl] = widevineLicenseUrl
+            widevineHeadersCache[streamUrl] = widevineHeaders
         }
         return Resolved(streamUrl, mime, widevineLicenseUrl)
     }

@@ -3659,8 +3659,11 @@ object MiniPlayerController {
                     ?: com.streamflixreborn.streamflix.utils.BrightcoveResolver
                         .getWidevineLicenseUrl(video.source))
                 // Pluto = HttpMediaDrmCallback standard (jwt dans l'URL) → drmHeaders null.
+                // 2026-09-28 : TF1 d'abord — Irdeto exige l'en-tête Authorization donné par mediainfo (drms[].h).
                 val drmHeaders = if (isPlutoDash) null else
-                    (com.streamflixreborn.streamflix.utils.M6Resolver
+                    (com.streamflixreborn.streamflix.utils.TF1Resolver
+                    .getWidevineHeaders(video.source)
+                    ?: com.streamflixreborn.streamflix.utils.M6Resolver
                     .getWidevineHeaders(video.source)
                     ?: com.streamflixreborn.streamflix.utils.BfmResolver
                         .getWidevineHeaders(video.source))

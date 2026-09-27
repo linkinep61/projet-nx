@@ -281,6 +281,58 @@ object GlobalFavorites {
             }
         }
 
+    // ── 2026-10-01 (remonté par un utilisateur : « la catégorie Vus dans Favoris ne peut pas
+    //   être effacée ») : le filtre « Vus » n'avait ni retrait à l'appui long (il retirait le
+    //   drapeau FAVORI, invisible ici) ni entrée dans le menu Vider. On ne touche qu'au
+    //   drapeau « vu » (isWatched + watchedDate) : la progression de lecture (watchHistory)
+    //   et les favoris restent intacts.
+    /** Retire le drapeau « vu » d'un film, ou de tous les épisodes d'une série, dans sa source d'origine. */
+    suspend fun unmarkWatched(context: Context, itemId: String, isMovie: Boolean): Boolean =
+        withContext(Dispatchers.IO) {
+            val origin = originByItemId[itemId] ?: return@withContext false
+            try {
+                val db = AppDatabase.getInstanceForProvider(origin, context)
+                try {
+                    if (isMovie) {
+                        val m = db.movieDao().getById(itemId) ?: return@withContext false
+                        m.isWatched = false; m.watchedDate = null
+                        db.movieDao().update(m)
+                    } else {
+                        db.episodeDao().getAllForBackup()
+                            .filter { it.tvShow?.id == itemId && it.isWatched }
+                            .forEach { ep -> ep.isWatched = false; ep.watchedDate = null; db.episodeDao().update(ep) }
+                    }
+                    Log.d(TAG, "unmarkWatched $itemId in $origin (movie=$isMovie)")
+                    true
+                } finally {
+                    try { db.close() } catch (_: Exception) {}
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "unmarkWatched $origin/$itemId: ${e.message}")
+                false
+            }
+        }
+
+    /** Retire le drapeau « vu » de TOUS les films et épisodes, cross-provider. */
+    suspend fun clearAllWatched(context: Context) = withContext(Dispatchers.IO) {
+        val providers = Provider.providers.keys.filter { it !is IptvProvider }
+        for (p in providers) {
+            if (!AppDatabase.providerDbExists(p.name, context)) continue
+            try {
+                val db = AppDatabase.getInstanceForProvider(p.name, context)
+                try {
+                    db.movieDao().getAll().filter { it.isWatched }
+                        .forEach { m -> m.isWatched = false; m.watchedDate = null; db.movieDao().update(m) }
+                    db.episodeDao().getAllForBackup().filter { it.isWatched }
+                        .forEach { ep -> ep.isWatched = false; ep.watchedDate = null; db.episodeDao().update(ep) }
+                } finally {
+                    try { db.close() } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }
+        Log.d(TAG, "clearAllWatched done")
+    }
+
     // ══════════════════════════════════════════════════════════════════
     //  Suppression en masse (poubelle par section, 2026-06-22)
     // ══════════════════════════════════════════════════════════════════

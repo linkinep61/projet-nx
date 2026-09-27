@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 2026-09-27 : Cœur (favoris globaux) TV, style panneau Radio :
      en-tête + bascule de filtres + carte Reprendre + puces de tri + grille de jaquettes. -->
+<!-- 2026-09-27 (user : « pourquoi un carré noir derrière le cœur alors que la Radio laisse voir le fond d'écran ») :
+         fond opaque remplacé par un voile assombri — le wallpaper posé par AppearanceManager sur la racine
+         de l'activité reste visible sur les côtés et dans les coins arrondis, comme derrière le dialog Radio. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#0B0C0F"
+    android:background="#99000000"
     tools:deviceIds="tv">
 
     <LinearLayout

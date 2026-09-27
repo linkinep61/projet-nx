@@ -348,9 +348,14 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
             binding.ivSettingEnter.isClickable = true
             binding.ivSettingEnter.setOnClickListener { settingsView.basculerSource(source) }
 
-            binding.root.setOnClickListener { settingsView.lancerSource(source) }
+            // 2026-10-01 (user : « sur téléphone, cliquer sur la petite flèche pour changer de
+            //   serveur est super difficile, souvent on active le serveur à la place ») : la
+            //   flèche faisait 18 dp sans marge cliquable, et tout le reste de la ligne LANÇAIT
+            //   la source. Logique inversée : un appui sur la ligne DÉPLIE/REPLIE la liste des
+            //   serveurs (on choisit ensuite), l'appui long lance directement le meilleur serveur.
+            binding.root.setOnClickListener { settingsView.basculerSource(source) }
             binding.root.setOnLongClickListener {
-                settingsView.basculerSource(source)
+                settingsView.lancerSource(source)
                 true
             }
         }
