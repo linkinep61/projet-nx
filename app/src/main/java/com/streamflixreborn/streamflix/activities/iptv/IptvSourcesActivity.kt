@@ -268,9 +268,7 @@ class IptvSourcesActivity : FragmentActivity() {
         val source = IptvSourceStore.getById(lastSourceId) ?: return
         com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider =
             com.streamflixreborn.streamflix.providers.MyIptvProvider
-        val isTv = com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT == "tv" ||
-            (com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT != "mobile" &&
-                packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK))
+        val isTv = com.streamflixreborn.streamflix.utils.DetectionTv.interfaceTv(this)
         val mainClass = if (isTv) {
             com.streamflixreborn.streamflix.activities.main.MainTvActivity::class.java
         } else {
@@ -411,9 +409,7 @@ class IptvSourcesActivity : FragmentActivity() {
             getSharedPreferences("iptv_last_source", MODE_PRIVATE)
                 .edit().putString("last_id", source.id).apply()
 
-            val isTv = com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT == "tv" ||
-                (com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT != "mobile" &&
-                    packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK))
+            val isTv = com.streamflixreborn.streamflix.utils.DetectionTv.interfaceTv(this@IptvSourcesActivity)
             val mainClass = if (isTv) {
                 com.streamflixreborn.streamflix.activities.main.MainTvActivity::class.java
             } else {

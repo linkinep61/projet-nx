@@ -78,6 +78,8 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
     private var homeJob: kotlinx.coroutines.Job? = null
 
     companion object {
+        /** Délai max d'un appel d'enrichissement de « Continuer à regarder ». */
+        private const val DELAI_ENRICHISSEMENT_MS = 5_000L
         // 2026-07-04 (user "comment ça se fait que le home continue à charger alors qu'on est
         //   déjà dans une vidéo ? à partir du moment où on est dans une vidéo il n'y a plus lieu
         //   de charger un home") : ref GLOBALE du job d'enrichissement home en cours. L'enrichis-
@@ -417,8 +419,11 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         episodes.map { episode ->
             async {
                 val tvShowId = episode.tvShow?.id ?: return@async episode
+                // 2026-10-04 : chaque appel est plafonné (cf. DELAI_ENRICHISSEMENT_MS). Sans plafond,
+                //   l'accueil attendait la série la plus lente avant de s'afficher. Au-delà du délai,
+                //   on garde les données déjà enregistrées, comme en cas d'échec.
                 val resolvedTvShow = continueWatchingTvShowCache[tvShowId] ?: runCatching {
-                    provider.getTvShow(tvShowId)
+                    kotlinx.coroutines.withTimeoutOrNull(DELAI_ENRICHISSEMENT_MS) { provider.getTvShow(tvShowId) }
                 }.getOrNull()?.also { fetchedTvShow ->
                     continueWatchingTvShowCache[tvShowId] = fetchedTvShow
                 }
@@ -439,7 +444,8 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                         ?: episode.season?.id
                     seasonId?.let { key ->
                         continueWatchingSeasonEpisodesCache[key] ?: runCatching {
-                            provider.getEpisodesBySeason(key)
+                            kotlinx.coroutines.withTimeoutOrNull(DELAI_ENRICHISSEMENT_MS) { provider.getEpisodesBySeason(key) }
+                                ?: emptyList()
                         }.getOrDefault(emptyList()).also { fetchedEpisodes ->
                             if (fetchedEpisodes.isNotEmpty()) {
                                 continueWatchingSeasonEpisodesCache[key] = fetchedEpisodes

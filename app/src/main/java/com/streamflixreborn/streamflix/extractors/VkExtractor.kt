@@ -42,6 +42,14 @@ class VkExtractor : Extractor() {
         val target = link
             .replace("m.vk.com", "vk.com")
             .replace("m.vk.ru", "vk.ru")
+        // 2026-10-04 (VIVA TV KO sur TV : « Too many follow-up requests: 21 ») : sans cookies,
+        //   la page d'intégration boucle vers login.vk.ru (autologin) puis revient sur elle-même.
+        //   On fait comme le lecteur web de VK : jeton ANONYME (aucun compte) puis API video.get,
+        //   qui rend les flux du direct (hls_live…). L'ancien chemin reste en secours.
+        runCatching { viaApiAnonyme(target) }
+            .onFailure { Log.w(TAG, "API anonyme KO : ${it.message}") }
+            .getOrNull()?.let { return videoDirect(it) }
+
         val service = Extractor.createJsoupService<Service>(mainUrl, mainUrl)
         val document = service.get(
             url = target,
@@ -134,6 +142,68 @@ class VkExtractor : Extractor() {
         ),
     )
 
+    @Volatile private var jetonAnonyme: String? = null
+    @Volatile private var jetonExpireMs: Long = 0L
+
+    /** Jeton anonyme de l'appli web VK Vidéo (même requête que le lecteur du site, sans compte). */
+    private fun jetonAnonyme(): String? {
+        jetonAnonyme?.let { if (System.currentTimeMillis() < jetonExpireMs) return it }
+        val corps = FormBody.Builder()
+            .add("client_secret", "o557NLIkAErNhakXrQ7A")
+            .add("client_id", "52461373")
+            .add("scopes", "audio_anonymous,video_anonymous,photos_anonymous,profile_anonymous")
+            .add("isApiOauthAnonymEnabled", "false")
+            .add("version", "1")
+            .add("app_id", "6287487")
+            .build()
+        val requete = Request.Builder()
+            .url("https://login.vk.ru/?act=get_anonym_token")
+            .post(corps)
+            .header("Origin", "https://vkvideo.ru")
+            .header("Referer", "https://vkvideo.ru/")
+            .header("User-Agent", ANDROID_CHROME_UA)
+            .build()
+        val texte = Extractor.sharedClient.newCall(requete).execute().use { it.body?.string() } ?: return null
+        val data = org.json.JSONObject(texte).optJSONObject("data") ?: return null
+        val jeton = data.optString("access_token").takeIf { it.isNotBlank() } ?: return null
+        val expireS = data.optLong("expired_at", 0L)
+        jetonAnonyme = jeton
+        // Expiration donnée par VK si présente, sinon 30 min ; marge de 5 min.
+        jetonExpireMs = if (expireS > 0) expireS * 1000L - 5 * 60_000L else System.currentTimeMillis() + 30 * 60_000L
+        return jeton
+    }
+
+    /** API video.get avec le jeton anonyme → premier flux HLS du direct (ou de la vidéo). */
+    private suspend fun viaApiAnonyme(link: String): String? = withContext(Dispatchers.IO) {
+        val oid = Regex("""[?&]oid=(-?\d+)""").find(link)?.groupValues?.get(1)
+        val id = Regex("""[?&]id=(\d+)""").find(link)?.groupValues?.get(1)
+        val cle = if (oid != null && id != null) "${oid}_$id"
+            else Regex("""video(-?\d+_\d+)""").find(link)?.groupValues?.get(1)
+            ?: return@withContext null
+        val jeton = jetonAnonyme() ?: return@withContext null
+        val corps = FormBody.Builder().add("videos", cle).add("access_token", jeton).build()
+        val requete = Request.Builder()
+            .url("https://api.vkvideo.ru/method/video.get?v=5.289&client_id=52461373")
+            .post(corps)
+            .header("Origin", "https://vkvideo.ru")
+            .header("Referer", "https://vkvideo.ru/")
+            .header("User-Agent", ANDROID_CHROME_UA)
+            .build()
+        val texte = Extractor.sharedClient.newCall(requete).execute().use { it.body?.string() }
+            ?: return@withContext null
+        val racine = org.json.JSONObject(texte)
+        racine.optJSONObject("error")?.let {
+            if (it.optInt("error_code") == 5) jetonAnonyme = null   // jeton refusé → nouveau la prochaine fois
+            Log.w(TAG, "video.get erreur ${it.optInt("error_code")} : ${it.optString("error_msg")}")
+            return@withContext null
+        }
+        val fichiers = racine.optJSONObject("response")?.optJSONArray("items")
+            ?.optJSONObject(0)?.optJSONObject("files") ?: return@withContext null
+        val lien = listOf("hls_live", "hls_live_ondemand", "hls")
+            .firstNotNullOfOrNull { k -> fichiers.optString(k).takeIf { it.startsWith("https://") } }
+        Log.d(TAG, "API anonyme $cle → ${if (lien != null) "flux trouvé" else "aucun flux"}")
+        lien
+    }
     private suspend fun viaAlVideo(link: String): String? = withContext(Dispatchers.IO) {
         val oid = Regex("""[?&]oid=(-?\d+)""").find(link)?.groupValues?.get(1)
         val id = Regex("""[?&]id=(\d+)""").find(link)?.groupValues?.get(1)

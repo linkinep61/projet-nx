@@ -6,6 +6,7 @@ import okhttp3.FormBody
 import okhttp3.Request
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.sync.withLock
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -260,6 +261,9 @@ object OtfTvService {
     //   navigation home.
     @Volatile private var lastFailureTimestamp = 0L
     private const val FAILURE_COOLDOWN_MS = 60 * 1000L
+    // 2026-10-04 : un seul appel à l'API OTF à la fois — un 2e appel simultané attend et
+    //   réutilise le résultat (ou le cooldown d'échec) du 1er au lieu de tout retélécharger.
+    private val fetchMutex = kotlinx.coroutines.sync.Mutex()
 
     /**
      * Récupère toutes les chaînes OTF TV avec leurs URLs m3u8.
@@ -277,7 +281,16 @@ object OtfTvService {
             return cached ?: emptyList()
         }
 
-        return try {
+        return fetchMutex.withLock {
+        // 2026-10-04 : re-vérification sous verrou (un appel concurrent a pu remplir le cache
+        //   ou échouer pendant qu'on attendait).
+        cachedChannels?.let { c ->
+            if (System.currentTimeMillis() - cacheTimestamp < CACHE_TTL) return@withLock c
+        }
+        if (System.currentTimeMillis() - lastFailureTimestamp < FAILURE_COOLDOWN_MS) {
+            return@withLock cachedChannels ?: emptyList()
+        }
+        try {
             val channels = fetchFromApi()
             cachedChannels = channels
             cacheTimestamp = System.currentTimeMillis()
@@ -291,6 +304,7 @@ object OtfTvService {
             Log.e(TAG, "Failed to fetch OTF channels: ${t.javaClass.simpleName}: ${t.message}")
             lastFailureTimestamp = System.currentTimeMillis()
             cached ?: emptyList()
+        }
         }
     }
     /** Marque le service comme échoué (= bloque les retry pendant 60s).
@@ -369,7 +383,8 @@ object OtfTvService {
         }
         val result = injecterIdsVerifies(merged.values.toList())
         Log.d(TAG, "OTF TV: ${result.size} chaînes après fusion V3+V4")
-        try {
+        // Statistiques d'hôtes CDN : versions de test seulement (une URL analysée par chaîne).
+        if (com.streamflixreborn.streamflix.BuildConfig.DEBUG) try {
             val hosts = result.flatMap { it.urls }.mapNotNull {
                 try { java.net.URL(it).host } catch (_: Exception) { null }
             }.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }
@@ -548,7 +563,8 @@ object OtfTvService {
 
         Log.d(TAG, "OTF TV: parsed ${result.size} channels with URLs")
         // DIAG 2026-07-20 : répartition des hôtes CDN dans la réponse (pour repérer les CDN morts).
-        try {
+        //   Versions de test seulement.
+        if (com.streamflixreborn.streamflix.BuildConfig.DEBUG) try {
             val hosts = result.flatMap { it.urls }.mapNotNull {
                 try { java.net.URL(it).host } catch (_: Exception) { null }
             }.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }

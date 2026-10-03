@@ -141,6 +141,10 @@ class TvShowsMobileFragment : Fragment() {
         super.onDestroyView()
         // Don't clear onIptvChannelClick — race condition with new fragment's onViewCreated
         arreterEpg()
+        // Débranche la liste : sinon l'adaptateur (gardé par le fragment) retient l'ancienne vue à chaque aller-retour.
+        // swapAdapter(null, false) et PAS adapter = null : ce dernier recycle les cartes visibles, ce qui
+        // annule leurs jaquettes (cartes noires au retour sur l'accueil).
+        binding.rvTvShows.swapAdapter(null, false)
         _binding = null
     }
 

@@ -434,7 +434,7 @@ class MainTvActivity : FragmentActivity() {
 
         adjustLayoutDelta(null, null)
 
-        if (BuildConfig.APP_LAYOUT == "mobile" || (BuildConfig.APP_LAYOUT != "tv" && !packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK))) {
+        if (!com.streamflixreborn.streamflix.utils.DetectionTv.interfaceTv(this)) {
             finish()
             startActivity(Intent(this, MainMobileActivity::class.java))
             return
@@ -852,6 +852,9 @@ class MainTvActivity : FragmentActivity() {
             }
             com.streamflixreborn.streamflix.utils.MiniPlayerController.isProviderSwitching = false
         }
+        // Le réservoir de cartes est statique : sans ce vidage, il gardait des cartes créées
+        //   avec cette Activity (donc l'Activity entière) après un changement de source.
+        runCatching { com.streamflixreborn.streamflix.adapters.viewholders.CategoryViewHolder.sharedPool.clear() }
         super.onDestroy()
     }
 

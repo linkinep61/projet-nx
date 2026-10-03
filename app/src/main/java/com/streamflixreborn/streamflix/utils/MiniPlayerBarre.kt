@@ -160,5 +160,18 @@ object MiniPlayerBarre {
             }
         }
         main.post(tic)
+
+        // 2026-10-04 FUITE MÉMOIRE : la minuterie tournait à vie et chaque écran recréé
+        //   (accueil, recherche, favoris IPTV, séries) en ajoutait une, qui gardait l'ancien
+        //   écran en mémoire. On l'arrête à la destruction de la vue, comme la version TV.
+        //   On retire aussi l'entrée de `dejaCable` : sa valeur référence la barre, donc la
+        //   WeakHashMap ne pouvait jamais la libérer d'elle-même.
+        proprietaire.lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+            override fun onDestroy(owner: androidx.lifecycle.LifecycleOwner) {
+                main.removeCallbacks(tic)
+                main.removeCallbacks(masquer)
+                dejaCable.remove(barre)
+            }
+        })
     }
 }

@@ -194,6 +194,7 @@ class NuuploadExtractor : Extractor() {
         }
 
         val client = OkHttpClient.Builder()
+            .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
             .dns(DnsResolver.doh)
             .followRedirects(true)
             .followSslRedirects(true)
@@ -303,6 +304,7 @@ class NuuploadExtractor : Extractor() {
 
     private fun fetchPage(url: String): FetchedPage {
         val client = OkHttpClient.Builder()
+            .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
             .dns(DnsResolver.doh)
             .followRedirects(true)
             .followSslRedirects(true)

@@ -214,6 +214,8 @@ open class FilemoonExtractor : Extractor() {
     override val name = "Filemoon"
     override val mainUrl = "https://filemoon.org"
     // 2026-06-01 : nettoyé bf0skv.org + filemoon.site (NXDOMAIN)
+    // Filemoon gère ses propres domaines de secours (budget inclus) dans extract().
+    override val miroirsInterchangeables = false
     override val aliasUrls = listOf("https://bysejikuar.com","https://moflix-stream.link","https://bysezoxexe.com","https://bysebuho.com","https://filemoon.sx","https://bysekoze.com","https://bysesayeveum.com","https://lukefirst.lol","https://weneverbeenfree.com","https://gn1r5n.org")
 
     /**

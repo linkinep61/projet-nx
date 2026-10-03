@@ -117,6 +117,7 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
     //   partout : mêmes résultats, mais le processeur et la mémoire sont sollicités 5 à 10 fois moins.
     private var enVol: kotlinx.coroutines.Job? = null
     private fun parallele(): Int {
+        if (UserPreferences.modeLeger) return 2
         val app = runCatching { com.streamflixreborn.streamflix.StreamFlixApp.instance }.getOrNull() ?: return 2
         val am = app.getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
         val tv = (app.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
@@ -140,7 +141,10 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
 
         try {
             val provider = UserPreferences.currentProvider ?: return
-            val results = ParentalControlUtils.filterItems(provider.search(query))
+            val results = ParentalControlUtils.filterItems(
+                if (provider.name == "TV Hub") provider.search(query)   // mesuré source par source dans le TV Hub
+                else com.streamflixreborn.streamflix.utils.MemDiag.mesurer("recherche-provider:${provider.name} «$query»") { provider.search(query) }
+            )
             this@SearchViewModel.query = query
             page = 1
             _state.emit(State.SuccessSearching(results, results.isNotEmpty()))
@@ -228,8 +232,12 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
         _state.emit(State.GlobalSearching)
 
         val isIptvScope = group == Provider.Companion.ProviderGroup.IPTV
+        // 2026-10-03 — mode léger : on saute les providers les plus lourds à interroger
+        //   (mesuré : OLA TV +262 Mo, World Live +188 Mo, Vegeta TV +163 Mo par recherche).
+        val sautesModeLeger = if (UserPreferences.modeLeger) setOf("OLA TV", "World Live", "Vegeta TV") else emptySet()
         val targetProviders = Provider.providers.keys
             .filter { it.language == currentLanguage }
+            .filter { it.name !in sautesModeLeger }
             .filter { p ->
                 val pIsIptv = Provider.getGroup(p) == Provider.Companion.ProviderGroup.IPTV
                 if (isIptvScope) pIsIptv else !pIsIptv
@@ -268,7 +276,9 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
                 try {
                     // Délai maximum par provider : au-delà, il est marqué en erreur (délai dépassé)
                     //   et libère sa place pour le suivant, au lieu de retenir un permis indéfiniment.
-                    val bruts = kotlinx.coroutines.withTimeoutOrNull(DELAI_PROVIDER_MS) { provider.search(query) }
+                    val bruts = com.streamflixreborn.streamflix.utils.MemDiag.mesurer("recherche:${provider.name}") {
+                        kotlinx.coroutines.withTimeoutOrNull(DELAI_PROVIDER_MS) { provider.search(query) }
+                    }
                         ?: throw java.util.concurrent.TimeoutException("délai dépassé (${DELAI_PROVIDER_MS / 1000} s)")
                     val rawResults = ParentalControlUtils.filterItems(bruts.onEach { item ->
                         // ========= ¡AQUÍ ESTÁ LA MAGIA! =========

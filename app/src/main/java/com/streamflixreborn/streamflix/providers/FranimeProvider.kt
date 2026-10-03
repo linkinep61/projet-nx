@@ -102,16 +102,50 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
     //   est de purger le fichier ponctuellement (`files/franime_catalogue.json`), pas de le
     //   retélécharger en boucle.
     private val CATALOGUE_TTL_MS = 24L * 60L * 60L * 1000L
-    @Volatile private var catalogue: List<JSONObject>? = null
-    // 2026-05-16 v8 : Long au lieu de Int. Certains IDs FRAnime dépassent
-    // Int.MAX_VALUE (ex: 2,864,154,715) → overflow donnait des anime_id négatifs
-    // dans l'URL (anime_id=-1430812581) → 404 garanti.
-    @Volatile private var catalogueIndex: Map<Long, JSONObject>? = null  // id → anime
-    // 2026-05-18 : mutex pour SÉRIALISER les calls à loadCatalogue.
-    //   Sans ça, 3-4 threads parallèles (preExtract, getHome, search…) parsaient
-    //   chacun ~6MB de JSON → OOM sur Chromecast (heap 384MB).
-    //   Maintenant : un seul parse, les autres attendent + récupèrent le cache.
+
+    /**
+     * 2026-10-03 — MÉMOIRE (mesuré sur l'Oppo avec l'outil MemDiag) : le catalogue complet était
+     *   gardé en `List<JSONObject>` avec TOUTES les saisons, tous les épisodes et tous les lecteurs
+     *   des 2 370 animes → ~103 Mo de mémoire Java retenus à vie, +127 Mo de pic à CHAQUE recherche
+     *   globale (la loupe interroge FRAnime). Sur une box au tas Java de 128-192 Mo = plantage.
+     *   Désormais :
+     *   - le JSON est téléchargé DIRECTEMENT dans le fichier cache (plus de String de plusieurs Mo) ;
+     *   - il est lu EN FLUX (JsonReader) en une fiche compacte par anime, SANS les saisons ;
+     *   - les saisons/épisodes/lecteurs d'UN anime sont relus à la demande dans le fichier
+     *     (position mémorisée), avec un petit cache des 6 derniers animes ouverts.
+     *   Comportement inchangé : mêmes listes, mêmes fiches, mêmes serveurs.
+     */
+    private class Anime(
+        // 2026-05-16 v8 : Long (certains ids dépassent Int.MAX_VALUE → anime_id négatif → 404).
+        val id: Long,
+        /** Position de l'anime dans le tableau JSON du fichier cache (relecture à la demande). */
+        val pos: Int,
+        val titre: String,
+        /** Tous les titres connus (titre, titre original, variantes), en minuscules. */
+        val titresRecherche: String,
+        val affiche: String?,
+        val afficheSmall: String?,
+        val banner: String?,
+        val annee: String?,
+        val description: String?,
+        val film: Boolean,
+        val status: String,
+        val note: Double,
+        val updated: String,
+        val themes: List<String>,
+        val genres: List<String>,
+    )
+
+    @Volatile private var catalogue: List<Anime>? = null
+    @Volatile private var catalogueIndex: Map<Long, Anime>? = null  // id → anime
+    // 2026-05-18 : mutex pour SÉRIALISER les calls à loadCatalogue (un seul parse à la fois).
     private val loadCatalogueMutex = kotlinx.coroutines.sync.Mutex()
+    /** Fiches complètes (saisons comprises) des derniers animes ouverts. */
+    private val detailCache = object : LinkedHashMap<Long, JSONObject>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, JSONObject>?): Boolean = size > 6
+    }
+    private val cacheFile: java.io.File
+        get() = java.io.File(StreamFlixApp.instance.applicationContext.cacheDir, "franime_catalogue.json")
 
     fun init(context: Context) {
         // 2026-05-16 v9 : pre-warm DÉSACTIVÉ — le catalogue 3MB causait OOM
@@ -126,128 +160,230 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
         } catch (_: Exception) {}
     }
 
-    private suspend fun loadCatalogue(): List<JSONObject> {
+    private suspend fun loadCatalogue(): List<Anime> {
         // Fast-path : si déjà en mémoire, retourner immédiatement (no mutex).
         catalogue?.let { return it }
         // Sinon, serialize : un seul thread à la fois lit/parse le catalogue.
-        //   Les autres attendent et récupèrent le résultat depuis le memory cache.
         return loadCatalogueMutex.withLock {
-            // Re-check après acquisition du lock (autre thread a peut-être chargé).
             catalogue?.let { return@withLock it }
             doLoadCatalogue()
         }
     }
 
-    private suspend fun doLoadCatalogue(): List<JSONObject> {
-        // 1) Disk cache via fichier (PAS SharedPreferences — 3MB en prefs
-        //    garde la string en mémoire pour tout le cycle de vie de l'app).
-        val now = System.currentTimeMillis()
-        val cacheFile = java.io.File(
-            StreamFlixApp.instance.applicationContext.cacheDir,
-            "franime_catalogue.json"
-        )
-        val cachedAt = prefs.getLong("catalogue_at", 0L)
-        if (cacheFile.exists() && now - cachedAt < CATALOGUE_TTL_MS) {
-            try {
-                val cachedJson = cacheFile.readText()
-                val parsed = parseCatalogue(cachedJson)
-                Log.d(TAG, "loadCatalogue from disk file (${parsed.size} animes, age=${(now-cachedAt)/1000}s)")
-                catalogue = parsed
-                catalogueIndex = parsed.associateBy { it.optLong("id") }
-                return parsed
-            } catch (e: OutOfMemoryError) {
-                Log.e(TAG, "loadCatalogue OOM reading cache, deleting file")
-                cacheFile.delete()
-                System.gc()
-                return emptyList()
-            } catch (e: Exception) {
-                Log.w(TAG, "loadCatalogue disk parse failed: ${e.message}")
-            }
-        }
-        // 2) Network fetch
-        // 2026-05-22 (user "FrAnime galère à charger le home") : l'API api.franime.fr
-        //   timeoutait à 45s → getHome bloquait jusqu'à ~60s puis renvoyait 0 catégorie.
-        //   On baisse le timeout à 20s (une réponse OK fait ~4s) pour échouer vite.
-        Log.d(TAG, "loadCatalogue fetching from network")
-        val body = try {
-            fetchText("${API_BASE}api/animes", timeoutMs = 20_000L)
-        } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "loadCatalogue OOM fetching network")
-            System.gc()
-            return loadStaleCatalogue(cacheFile)
-        }
-        if (body.isBlank() || body.length < 100) {
-            Log.w(TAG, "loadCatalogue empty response")
-            // 2026-05-22 : repli sur le cache disque MÊME PÉRIMÉ quand le réseau échoue/
-            //   timeout. Mieux vaut un home un peu vieux qu'un home vide après l'attente.
-            return loadStaleCatalogue(cacheFile)
-        }
-        val parsed = try {
-            parseCatalogue(body)
-        } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "loadCatalogue OOM parsing, giving up")
-            System.gc()
-            return emptyList()
-        } catch (e: Exception) {
-            Log.w(TAG, "loadCatalogue parse failed: ${e.message}")
-            return emptyList()
-        }
-        catalogue = parsed
-        catalogueIndex = parsed.associateBy { it.optLong("id") }
-        // Write to file (not prefs) to avoid keeping 3MB in memory forever
-        try {
-            cacheFile.writeText(body)
-            prefs.edit().putLong("catalogue_at", now).apply()
-        } catch (_: Exception) {}
-        Log.d(TAG, "loadCatalogue fetched + cached (${parsed.size} animes)")
-        return parsed
-    }
-
-    /**
-     * 2026-05-22 : repli quand le réseau échoue — relit le cache disque SANS contrôle
-     *   de TTL. Mieux vaut un catalogue un peu vieux qu'un home vide.
-     */
-    private fun loadStaleCatalogue(cacheFile: java.io.File): List<JSONObject> {
-        if (!cacheFile.exists()) return emptyList()
-        return try {
-            val parsed = parseCatalogue(cacheFile.readText())
-            if (parsed.isNotEmpty()) {
-                Log.d(TAG, "loadCatalogue STALE fallback (${parsed.size} animes)")
-                catalogue = parsed
-                catalogueIndex = parsed.associateBy { it.optLong("id") }
-            }
-            parsed
-        } catch (_: Throwable) { emptyList() }
-    }
-
-    private fun parseCatalogue(json: String): List<JSONObject> {
-        val arr = JSONArray(json)
-        val list = ArrayList<JSONObject>(arr.length())
-        for (i in 0 until arr.length()) list.add(arr.getJSONObject(i))
+    private fun publier(list: List<Anime>): List<Anime> {
+        catalogue = list
+        catalogueIndex = list.associateBy { it.id }
         return list
     }
 
-    // ── HTTP helpers ────────────────────────────────────────────────────
-    private suspend fun fetchText(url: String, timeoutMs: Long = 20_000L): String =
+    private suspend fun doLoadCatalogue(): List<Anime> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val file = cacheFile
+        // 1) Cache disque encore frais.
+        val cachedAt = prefs.getLong("catalogue_at", 0L)
+        if (file.exists() && now - cachedAt < CATALOGUE_TTL_MS) {
+            val parsed = lireCatalogue(file)
+            if (!parsed.isNullOrEmpty()) {
+                Log.d(TAG, "loadCatalogue from disk file (${parsed.size} animes, age=${(now - cachedAt) / 1000}s)")
+                return@withContext publier(parsed)
+            }
+        }
+        // 2) Réseau. Téléchargé dans un fichier temporaire, validé, PUIS substitué au cache :
+        //   une réponse tronquée n'écrase jamais un bon catalogue.
+        // 2026-05-22 : délai 20 s (une réponse OK fait ~4 s) pour échouer vite.
+        Log.d(TAG, "loadCatalogue fetching from network")
+        val tmp = java.io.File(file.parentFile, "franime_catalogue.tmp")
+        if (telechargerCatalogue(tmp, timeoutMs = 20_000L)) {
+            val parsed = lireCatalogue(tmp)
+            if (!parsed.isNullOrEmpty()) {
+                synchronized(detailCache) { detailCache.clear() }
+                file.delete()
+                if (tmp.renameTo(file)) {
+                    prefs.edit().putLong("catalogue_at", now).apply()
+                    Log.d(TAG, "loadCatalogue fetched + cached (${parsed.size} animes)")
+                    return@withContext publier(parsed)
+                }
+            }
+        }
+        tmp.delete()
+        // 3) 2026-05-22 : repli sur le cache disque MÊME PÉRIMÉ quand le réseau échoue.
+        if (file.exists()) {
+            val parsed = lireCatalogue(file)
+            if (!parsed.isNullOrEmpty()) {
+                Log.d(TAG, "loadCatalogue STALE fallback (${parsed.size} animes)")
+                return@withContext publier(parsed)
+            }
+        }
+        Log.w(TAG, "loadCatalogue : aucun catalogue disponible")
+        emptyList()
+    }
+
+    /** Télécharge le catalogue directement dans [dest] (aucune String en mémoire). */
+    private suspend fun telechargerCatalogue(dest: java.io.File, timeoutMs: Long): Boolean =
         withContext(Dispatchers.IO) {
             try {
                 val req = Request.Builder()
-                    .url(url)
+                    .url("${API_BASE}api/animes")
                     .header("User-Agent", USER_AGENT)
                     .header("Referer", baseUrl)
                     .header("Accept", "application/json,text/plain,*/*")
                     .build()
                 withTimeoutOrNull(timeoutMs) {
                     client.newCall(req).execute().use { resp ->
-                        if (!resp.isSuccessful) ""
-                        else resp.body?.string() ?: ""
+                        if (!resp.isSuccessful) return@use false
+                        dest.outputStream().use { out -> resp.body.byteStream().copyTo(out) }
+                        dest.length() > 100
                     }
-                } ?: ""
+                } ?: false
             } catch (e: Exception) {
-                Log.w(TAG, "fetchText($url) failed: ${e.message}")
-                ""
+                Log.w(TAG, "telechargerCatalogue failed: ${e.message}")
+                false
             }
         }
+
+    private fun lecteurJson(file: java.io.File) = android.util.JsonReader(
+        java.io.InputStreamReader(java.io.BufferedInputStream(file.inputStream(), 64 * 1024), Charsets.UTF_8)
+    )
+
+    /** Lecture EN FLUX du catalogue : une fiche compacte par anime, saisons ignorées. */
+    private fun lireCatalogue(file: java.io.File): List<Anime>? = try {
+        lecteurJson(file).use { r ->
+            val out = ArrayList<Anime>(2600)
+            val pool = HashMap<String, String>()   // thèmes/genres partagés entre animes
+            r.beginArray()
+            var pos = 0
+            while (r.hasNext()) {
+                lireAnime(r, pos, pool)?.let { out.add(it) }
+                pos++
+            }
+            r.endArray()
+            out
+        }
+    } catch (e: OutOfMemoryError) {
+        Log.e(TAG, "lireCatalogue OOM")
+        System.gc()
+        null
+    } catch (e: Exception) {
+        Log.w(TAG, "lireCatalogue failed: ${e.message}")
+        null
+    }
+
+    private fun lireTexte(r: android.util.JsonReader): String = when (r.peek()) {
+        android.util.JsonToken.STRING, android.util.JsonToken.NUMBER -> r.nextString()
+        android.util.JsonToken.BOOLEAN -> r.nextBoolean().toString()
+        android.util.JsonToken.NULL -> { r.nextNull(); "" }
+        else -> { r.skipValue(); "" }
+    }
+
+    private fun lireListe(r: android.util.JsonReader, pool: HashMap<String, String>): List<String> {
+        if (r.peek() != android.util.JsonToken.BEGIN_ARRAY) { r.skipValue(); return emptyList() }
+        val l = ArrayList<String>(4)
+        r.beginArray()
+        while (r.hasNext()) {
+            val t = lireTexte(r)
+            if (t.isNotBlank()) l.add(pool.getOrPut(t) { t })
+        }
+        r.endArray()
+        return l
+    }
+
+    private fun lireAnime(r: android.util.JsonReader, pos: Int, pool: HashMap<String, String>): Anime? {
+        if (r.peek() != android.util.JsonToken.BEGIN_OBJECT) { r.skipValue(); return null }
+        var id = 0L
+        var title = ""; var titleO = ""; var affiche = ""; var afficheSmall = ""; var banner = ""
+        var startDate = ""; var description = ""; var format = ""; var status = ""; var updated = ""
+        var note = 0.0
+        var titles: Map<String, String> = emptyMap()
+        var themes: List<String> = emptyList()
+        var genres: List<String> = emptyList()
+        r.beginObject()
+        while (r.hasNext()) {
+            when (r.nextName()) {
+                "id" -> id = lireTexte(r).let { it.toLongOrNull() ?: it.toDoubleOrNull()?.toLong() ?: 0L }
+                "title" -> title = lireTexte(r)
+                "titleO" -> titleO = lireTexte(r)
+                "titles" -> titles = if (r.peek() == android.util.JsonToken.BEGIN_OBJECT) {
+                    val m = HashMap<String, String>()
+                    r.beginObject()
+                    while (r.hasNext()) { val k = r.nextName(); m[k] = lireTexte(r) }
+                    r.endObject()
+                    m
+                } else { r.skipValue(); emptyMap() }
+                "affiche" -> affiche = lireTexte(r)
+                "affiche_small" -> afficheSmall = lireTexte(r)
+                "banner" -> banner = lireTexte(r)
+                "startDate" -> startDate = lireTexte(r)
+                "description" -> description = lireTexte(r)
+                "format" -> format = lireTexte(r)
+                "status" -> status = lireTexte(r).let { s -> pool.getOrPut(s) { s } }
+                "note" -> note = lireTexte(r).toDoubleOrNull() ?: 0.0
+                "updatedDate" -> updated = lireTexte(r)
+                "themes" -> themes = lireListe(r, pool)
+                "genres" -> genres = lireListe(r, pool)
+                else -> r.skipValue()   // saisons, épisodes, lecteurs… relus à la demande
+            }
+        }
+        r.endObject()
+        val titre = titleO.ifBlank {
+            title.ifBlank {
+                titles["en_jp"].orEmpty().ifBlank { titles["en_us"].orEmpty().ifBlank { titles["ja_jp"].orEmpty() } }
+            }
+        }.ifBlank { "Anime #$id" }
+        val f = format.lowercase().trim()
+        return Anime(
+            id = id,
+            pos = pos,
+            titre = titre,
+            titresRecherche = (listOf(titre, titleO) + titles.values).joinToString("\n").lowercase(),
+            affiche = affiche.takeIf { it.startsWith("http") },
+            afficheSmall = afficheSmall.takeIf { it.startsWith("http") },
+            banner = banner.takeIf { it.startsWith("http") },
+            annee = startDate.takeIf { it.isNotBlank() }?.let { Regex("""(\d{4})""").find(it)?.groupValues?.get(1) },
+            description = description.takeIf { it.isNotBlank() },
+            film = f == "film" || f == "movie",
+            status = status,
+            note = note,
+            updated = updated,
+            themes = themes,
+            genres = genres,
+        )
+    }
+
+    /** Relit la fiche COMPLÈTE (saisons comprises) de l'anime en position [pos] du fichier. */
+    private fun lireDetail(file: java.io.File, pos: Int, id: Long): JSONObject? = try {
+        if (!file.exists()) null else lecteurJson(file).use { r ->
+            r.beginArray()
+            var i = 0
+            while (i < pos && r.hasNext()) { r.skipValue(); i++ }
+            if (!r.hasNext()) null
+            else (lireValeur(r) as? JSONObject)?.takeIf { it.optLong("id") == id }
+        }
+    } catch (e: Throwable) {
+        Log.w(TAG, "lireDetail($id) failed: ${e.message}")
+        null
+    }
+
+    private fun lireValeur(r: android.util.JsonReader): Any = when (r.peek()) {
+        android.util.JsonToken.BEGIN_OBJECT -> {
+            val o = JSONObject()
+            r.beginObject()
+            while (r.hasNext()) { val k = r.nextName(); o.put(k, lireValeur(r)) }
+            r.endObject()
+            o
+        }
+        android.util.JsonToken.BEGIN_ARRAY -> {
+            val a = JSONArray()
+            r.beginArray()
+            while (r.hasNext()) a.put(lireValeur(r))
+            r.endArray()
+            a
+        }
+        android.util.JsonToken.STRING -> r.nextString()
+        android.util.JsonToken.NUMBER -> r.nextString().let { s -> s.toLongOrNull() ?: s.toDoubleOrNull()?.takeIf { !it.isNaN() } ?: s }
+        android.util.JsonToken.BOOLEAN -> r.nextBoolean()
+        android.util.JsonToken.NULL -> { r.nextNull(); JSONObject.NULL }
+        else -> { r.skipValue(); JSONObject.NULL }
+    }
 
     // ── Helpers conversion JSONObject → models ──────────────────────────
     private fun JSONObject.bestTitle(): String =
@@ -256,16 +392,6 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
                 optJSONObject("titles")?.let { it.optString("en_jp").ifBlank { it.optString("en_us").ifBlank { it.optString("ja_jp") } } } ?: ""
             }
         }.ifBlank { "Anime #${optLong("id")}" }
-
-    /** 2026-06-23 (user "FRAnime, jaquettes longues à charger") : la grille
-     *  utilise `affiche_small` (~50 KB JPG) au lieu de `affiche` original
-     *  (1-2 MB PNG/JPG HD) → 20-40× moins de bandwidth → chargement quasi
-     *  instantané. Pour la fiche détail (= getMovie/getTvShow), on a un
-     *  `bestPosterFull()` séparé qui privilégie la HD. */
-    private fun JSONObject.bestPoster(): String? {
-        return optString("affiche_small").takeIf { it.startsWith("http") }
-            ?: optString("affiche").takeIf { it.startsWith("http") }
-    }
 
     /** Version HD pour la fiche détail uniquement (= image grande, mieux rendue). */
     private fun JSONObject.bestPosterFull(): String? {
@@ -283,38 +409,33 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
     private fun JSONObject.bestOverview(): String? =
         optString("description").takeIf { it.isNotBlank() }
 
-    private fun JSONObject.toTvShow(): TvShow = TvShow(
-        id = optLong("id").toString(),
-        title = bestTitle(),
-        poster = bestPoster(),
-        banner = bestBanner() ?: bestPoster(),
-        released = bestYear(),
-        overview = bestOverview(),
+    /** 2026-06-23 (user "FRAnime, jaquettes longues à charger") : la grille utilise
+     *  `affiche_small` (~50 KB) au lieu de `affiche` (1-2 MB HD). La fiche détail garde la HD. */
+    private fun Anime.poster(): String? = afficheSmall ?: affiche
+
+    private fun Anime.toTvShow(): TvShow = TvShow(
+        id = id.toString(),
+        title = titre,
+        poster = poster(),
+        banner = banner ?: poster(),
+        released = annee,
+        overview = description,
     )
 
-    /** 2026-05-17 (user "Les films sont considérés comme des séries") :
-     *  certains animes ont format="Film"/"movie"/"FILM" — ce sont de vrais
-     *  long-métrages (1 épisode/1 saison). Détection insensible à la casse.
-     *  Les ONA/OAV/OVA/Special restent classés en séries (catalogue anime classique). */
-    private fun JSONObject.isFilm(): Boolean {
-        val format = optString("format").lowercase().trim()
-        return format == "film" || format == "movie"
-    }
-
-    private fun JSONObject.toMovie(): Movie = Movie(
-        id = optLong("id").toString(),
-        title = bestTitle(),
-        poster = bestPoster(),
-        banner = bestBanner() ?: bestPoster(),
-        released = bestYear(),
-        overview = bestOverview(),
+    /** 2026-05-17 (user "Les films sont considérés comme des séries") : format Film/movie
+     *  = vrai long-métrage ; ONA/OAV/OVA/Special restent des séries. */
+    private fun Anime.toMovie(): Movie = Movie(
+        id = id.toString(),
+        title = titre,
+        poster = poster(),
+        banner = banner ?: poster(),
+        released = annee,
+        overview = description,
     )
 
-    /** Retourne soit Movie (si format=film) soit TvShow (sinon). Utilisé par
-     *  les list builders (home, search, browse) pour que l'AppAdapter pose
-     *  le bon viewholder + route le clic vers la bonne fragment. */
-    private fun JSONObject.toItem(): com.streamflixreborn.streamflix.adapters.AppAdapter.Item =
-        if (isFilm()) toMovie() else toTvShow()
+    /** Movie (film) ou TvShow (sinon) : l'AppAdapter pose le bon viewholder. */
+    private fun Anime.toItem(): com.streamflixreborn.streamflix.adapters.AppAdapter.Item =
+        if (film) toMovie() else toTvShow()
 
     // ── HOME ─────────────────────────────────────────────────────────────
 
@@ -324,8 +445,12 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
         // pour faire jouer le "Chargement profil/préférences/animes" qui
         // établit la session Next.js. Toutes les extractions d'épisodes
         // suivantes réutiliseront cette même WebView.
-        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try { com.streamflixreborn.streamflix.extractors.FranimeSession.bootstrap() } catch (_: Exception) {}
+        // 2026-10-03 : en mode léger, pas de WebView franime.fr en arrière-plan (~390 Mo de moteur
+        //   web mesurés sur l'Oppo) — elle s'ouvrira au moment de lire un épisode (FranimeExtractor).
+        if (!com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) {
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try { com.streamflixreborn.streamflix.extractors.FranimeSession.bootstrap() } catch (_: Exception) {}
+            }
         }
         val all = loadCatalogue()
         if (all.isEmpty()) return emptyList()
@@ -333,50 +458,41 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
         val categories = mutableListOf<Category>()
 
         // Featured : 8 derniers mis à jour (mix films/séries)
-        val recent = all.sortedByDescending { it.optString("updatedDate") }.take(8)
+        val recent = all.sortedByDescending { it.updated }.take(8)
             .map { it.toItem() }
         if (recent.isNotEmpty()) categories.add(Category(name = Category.FEATURED, list = recent))
 
         // Derniers ajouts (par updatedDate, mix films/séries) — sans les 8 du carousel
         val recentIds = recent.mapNotNull { when (it) { is TvShow -> it.id; is Movie -> it.id; else -> null } }.toSet()
-        val latest = all.sortedByDescending { it.optString("updatedDate") }.take(48)
+        val latest = all.sortedByDescending { it.updated }.take(48)
             .map { it.toItem() }
             .filter { item -> val id = when (item) { is TvShow -> item.id; is Movie -> item.id; else -> "" }; id !in recentIds }
             .take(40)
         if (latest.isNotEmpty()) categories.add(Category(name = "Derniers ajouts", list = latest))
 
         // 2026-05-17 : section dédiée Films (long-métrages anime)
-        val films = all.filter { it.isFilm() }
-            .sortedByDescending { it.optString("updatedDate") }
+        val films = all.filter { it.film }
+            .sortedByDescending { it.updated }
             .take(40)
             .map { it.toMovie() }
         if (films.isNotEmpty()) categories.add(Category(name = "Films", list = films))
 
         // Les plus aimés (par note décroissante, mix)
-        val topRated = all.sortedByDescending { it.optDouble("note", 0.0) }.take(40)
+        val topRated = all.sortedByDescending { it.note }.take(40)
             .map { it.toItem() }
         if (topRated.isNotEmpty()) categories.add(Category(name = "Les plus aimés", list = topRated))
 
         // En cours (status = EN COURS) — séries uniquement (les films n'ont pas de statut "en cours")
-        val ongoing = all.filter { !it.isFilm() && it.optString("status").contains("EN COURS", true) }.take(40)
+        val ongoing = all.filter { !it.film && it.status.contains("EN COURS", true) }.take(40)
             .map { it.toTvShow() }
         if (ongoing.isNotEmpty()) categories.add(Category(name = "En cours de diffusion", list = ongoing))
 
         // Catégories par thème (top thèmes)
         val themeCount = mutableMapOf<String, Int>()
-        all.forEach { a ->
-            val themes = a.optJSONArray("themes") ?: return@forEach
-            for (i in 0 until themes.length()) {
-                val t = themes.optString(i).ifBlank { continue }
-                themeCount[t] = (themeCount[t] ?: 0) + 1
-            }
-        }
+        all.forEach { a -> a.themes.forEach { t -> themeCount[t] = (themeCount[t] ?: 0) + 1 } }
         val topThemes = themeCount.entries.sortedByDescending { it.value }.take(5)
         for ((theme, _) in topThemes) {
-            val items = all.filter { a ->
-                val themes = a.optJSONArray("themes") ?: return@filter false
-                (0 until themes.length()).any { themes.optString(it) == theme }
-            }.take(30).map { it.toItem() }
+            val items = all.filter { theme in it.themes }.take(30).map { it.toItem() }
             if (items.isNotEmpty()) categories.add(Category(name = theme, list = items))
         }
 
@@ -417,13 +533,7 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
         val all = loadCatalogue()
         if (all.isEmpty()) return emptyList()
         val q = query.lowercase().trim()
-        val filtered = all.filter { a ->
-            a.bestTitle().lowercase().contains(q) ||
-                    a.optString("titleO").lowercase().contains(q) ||
-                    a.optJSONObject("titles")?.let { titles ->
-                        titles.keys().asSequence().any { titles.optString(it).lowercase().contains(q) }
-                    } == true
-        }
+        val filtered = all.filter { it.titresRecherche.contains(q) }
         // Pagination interne 60/page
         val pageSize = 60
         val start = (page - 1) * pageSize
@@ -439,12 +549,12 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
         // 2026-05-17 : retourne les animes long-métrages (format=Film/movie).
         val all = loadCatalogue()
         if (all.isEmpty()) return emptyList()
-        val films = all.filter { it.isFilm() }
+        val films = all.filter { it.film }
         if (films.isEmpty()) return emptyList()
         val pageSize = 30
         val start = (page - 1) * pageSize
         if (start >= films.size) return emptyList()
-        val sorted = films.sortedBy { it.bestTitle().lowercase() }
+        val sorted = films.sortedBy { it.titre.lowercase() }
         return sorted.drop(start).take(pageSize).map { it.toMovie() }
     }
 
@@ -452,21 +562,37 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
         val all = loadCatalogue()
         if (all.isEmpty()) return emptyList()
         // 2026-05-17 : exclure les films (mappés via getMovies).
-        val series = all.filter { !it.isFilm() }
+        val series = all.filter { !it.film }
         if (series.isEmpty()) return emptyList()
         val pageSize = 30
         val start = (page - 1) * pageSize
         if (start >= series.size) return emptyList()
         // Tri alphabétique par title
-        val sorted = series.sortedBy { it.bestTitle().lowercase() }
+        val sorted = series.sortedBy { it.titre.lowercase() }
         return sorted.drop(start).take(pageSize).map { it.toTvShow() }
     }
 
     // ── DETAIL ───────────────────────────────────────────────────────────
 
+    /** Fiche COMPLÈTE (saisons, épisodes, lecteurs) relue à la demande dans le fichier cache. */
     private suspend fun getAnimeById(id: Long): JSONObject? {
-        loadCatalogue()
-        return catalogueIndex?.get(id)
+        synchronized(detailCache) { detailCache[id] }?.let { return it }
+        repeat(2) { essai ->
+            loadCatalogue()
+            val a = catalogueIndex?.get(id) ?: return null
+            val obj = withContext(Dispatchers.IO) { lireDetail(cacheFile, a.pos, id) }
+            if (obj != null) {
+                synchronized(detailCache) { detailCache[id] = obj }
+                return obj
+            }
+            if (essai == 0) {
+                // Fichier remplacé ou supprimé entre-temps : on recharge le catalogue une fois.
+                Log.w(TAG, "détail $id introuvable dans le fichier → rechargement du catalogue")
+                catalogue = null
+                catalogueIndex = null
+            }
+        }
+        return null
     }
 
     override suspend fun getTvShow(id: String): TvShow {
@@ -698,12 +824,7 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
         val tokens = genreSlugAliases[id]?.map { normalizeText(it) } ?: listOf(normalizeText(id))
         val matching = all.filter { a ->
             // Vérifier dans themes ET genres (parfois l'un, parfois l'autre selon l'item)
-            val themesArr = a.optJSONArray("themes")
-            val genresArr = a.optJSONArray("genres")
-            val pool = mutableListOf<String>()
-            if (themesArr != null) for (i in 0 until themesArr.length()) pool.add(themesArr.optString(i))
-            if (genresArr != null) for (i in 0 until genresArr.length()) pool.add(genresArr.optString(i))
-            pool.any { item ->
+            (a.themes + a.genres).any { item ->
                 val n = normalizeText(item)
                 tokens.any { tok -> n.contains(tok) }
             }

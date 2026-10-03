@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.withLock
 
 /**
  * LiveTV Hub — provider META qui agrège les chaînes TV mainstream (TF1, France
@@ -1609,7 +1610,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
             .toList()
         suspend fun chainesDe(nom: String, delai: Long = 8_000, max: Int = 60,
                               charge: suspend () -> List<Category>): List<TvShow> = try {
-            filtrer(withTimeoutOrNull(delai) { charge() }, max)
+            // 2026-10-03 : MemDiag = exécution directe hors diagnostic (debug + setprop).
+            com.streamflixreborn.streamflix.utils.MemDiag.mesurer("tvhub-recherche:$nom") {
+                filtrer(withTimeoutOrNull(delai) { charge() }, max)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "search: $nom KO: ${e.message}"); emptyList()
         }
@@ -1621,7 +1625,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //    faibles. Les sources déjà en mémoire (chaînes, dossiers, bibliothèque, Stream4Free,
         //    Reneveo) répondent tout de suite ; les chargements LOURDS passent 2 par 2 (1 par 1
         //    sur appareil à faible mémoire), chacun avec son délai d'origine.
-        val lourds = kotlinx.coroutines.sync.Semaphore(if (appareilFaible()) 1 else 2)
+        // 2026-10-03 : mode léger → une source lourde à la fois (Mix FR +54 Mo, OTF +37, WorldWide +31).
+        val lourds = kotlinx.coroutines.sync.Semaphore(
+            if (appareilFaible() || com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 1 else 2
+        )
         suspend fun <T> lourd(bloc: suspend () -> T): T = lourds.withPermit { bloc() }
         return coroutineScope {
             val io = kotlinx.coroutines.Dispatchers.IO
@@ -3766,13 +3773,14 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return null
     }
 
-    /** Retrouve un TvShow par son id dans folderContents (pour name/poster). */
+    /** Retrouve un TvShow par son id dans folderContents (pour name/poster).
+     *  2026-10-04 : parcours direct de la liste, sans `filterIsInstance` (qui recopiait
+     *  chaque catégorie à chaque appel). Même ordre, même résultat : 1ʳᵉ occurrence. */
     private fun folderItemById(id: String): TvShow? {
         for ((_, cats) in folderContents) {
             for (cat in cats) {
-                val m = (cat.list as? List<*>)?.filterIsInstance<TvShow>()
-                    ?.firstOrNull { it.id == id }
-                if (m != null) return m
+                val items = cat.list as? List<*> ?: continue
+                for (x in items) if (x is TvShow && x.id == id) return x
             }
         }
         return null
@@ -3939,10 +3947,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val siId = channelId.removePrefix("livehub::replay::")
             val rpTitle = replayProgramTitles[siId]
             if (rpTitle != null) return rpTitle
+            // 2026-10-04 : parcours direct (plus de recopie filterIsInstance), même ordre.
             for (cat in replayCacheSections) {
-                val match = (cat.list as? List<*>)?.filterIsInstance<TvShow>()
-                    ?.firstOrNull { it.id == channelId }
-                if (match != null) return match.title
+                val items = cat.list as? List<*> ?: continue
+                for (x in items) if (x is TvShow && x.id == channelId) return x.title
             }
         }
         // 2026-06-27 : items des dossiers TV Hub (Pluto/Plex Films+Live, Mix FR,
@@ -3956,9 +3964,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-06-21 : les replays (lazy-fetched) ont leurs posters dans
         //   replayCacheSections, pas dans channelById (= WiTV-only).
         if (channelId.startsWith("livehub::replay::")) {
+            // 2026-10-04 : parcours direct (plus de recopie filterIsInstance). Même logique :
+            //   1ʳᵉ occurrence de chaque catégorie ; si son poster est nul, catégorie suivante.
             for (cat in replayCacheSections) {
-                val match = (cat.list as? List<*>)?.filterIsInstance<TvShow>()
-                    ?.firstOrNull { it.id == channelId }
+                val items = cat.list as? List<*> ?: continue
+                val match = items.firstOrNull { it is TvShow && it.id == channelId } as TvShow?
                 if (match?.poster != null) return match.poster
             }
         }
@@ -4181,10 +4191,21 @@ object LiveTvHubProvider : Provider, IptvProvider {
         "Arte Voyages et découvertes" to 48,
     )
 
+    // 2026-10-04 : Regex des lecteurs M3U compilées UNE fois (avant : recompilées à chaque
+    //   entrée). Motifs et options copiés à l'identique des anciens appels en ligne.
+    private val M3U_RX_GROUP_TITLE = Regex("""group-title="([^"]+)"""")
+    private val M3U_RX_GROUP_TITLE_VIDE_OK = Regex("""group-title="([^"]*)"""")
+    private val M3U_RX_TVG_LOGO = Regex("""tvg-logo="([^"]+)"""")
+    private val M3U_RX_TVG_TYPE = Regex("""tvg-type="([^"]+)"""")
+    private val M3U_RX_TVG_LANGUAGE = Regex("""tvg-language="([^"]*)"""")
+    private val M3U_RX_TVG_COUNTRY = Regex("""tvg-country="([^"]*)"""")
+    private val M3U_RX_HTTP_UA = Regex("""http-user-agent="([^"]+)"""", RegexOption.IGNORE_CASE)
+    private val M3U_RX_HTTP_REFERRER = Regex("""http-referrer="([^"]+)"""", RegexOption.IGNORE_CASE)
+
     private fun parseReplayM3u(body: String): List<Category> {
         if (body.isBlank() || "#EXTM3U" !in body) return emptyList()
         val groups = LinkedHashMap<String, MutableList<TvShow>>()
-        val lines = body.lines()
+        val lines = body.lineSequence()  // 2026-10-04 : parcourue une seule fois
         var pendingExtinf: String? = null
         for (line in lines) {
             val t = line.trim()
@@ -4225,14 +4246,14 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     src.substringAfter("://").trim()
                 }
                 val title = pendingExtinf!!.substringAfterLast(",").trim()
-                val groupTitle = Regex("""group-title="([^"]+)"""")
+                val groupTitle = M3U_RX_GROUP_TITLE
                     .find(pendingExtinf!!)?.groupValues?.get(1) ?: "Replay"
-                val logo = Regex("""tvg-logo="([^"]+)"""")
+                val logo = M3U_RX_TVG_LOGO
                     .find(pendingExtinf!!)?.groupValues?.get(1) ?: ""
                 // 2026-06-19 : tvg-type="movie" sur les films/spectacles/etc.
                 //   pour afficher le badge "Film" au lieu de "Série" (= ViewHolder
                 //   utilise tvShow.isMovie pour distinguer).
-                val tvgType = Regex("""tvg-type="([^"]+)"""")
+                val tvgType = M3U_RX_TVG_TYPE
                     .find(pendingExtinf!!)?.groupValues?.get(1) ?: ""
                 val tv = TvShow(
                     id = "livehub::replay::$siId",
@@ -4646,6 +4667,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
     // 2026-06-27 : cache de la playlist "Mix FR" (data.m3u, World Live mix).
     @Volatile private var mixFrCacheSections: List<Category> = emptyList()
     @Volatile private var mixFrCacheTs: Long = 0L
+    // 2026-10-04 : un seul téléchargement Mix FR à la fois — un 2e appel simultané attend
+    //   et réutilise le résultat du 1er au lieu de tout retélécharger en parallèle.
+    private val mixFrMutex = kotlinx.coroutines.sync.Mutex()
     private val MIX_FR_TTL_MS = 30 * 60 * 1000L
     private const val MIX_FR_M3U_URL =
         "https://raw.githubusercontent.com/rikital/onyxia-data/main/data.m3u"
@@ -4657,6 +4681,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
     //   (indépendant d'epg.pw + auto-refresh). Même parser que Mix FR.
     @Volatile private var worldwideCacheSections: List<Category> = emptyList()
     @Volatile private var worldwideCacheTs: Long = 0L
+    // 2026-10-04 : idem Mix FR — pas de double téléchargement WorldWide simultané.
+    private val worldwideMutex = kotlinx.coroutines.sync.Mutex()
     private const val WORLDWIDE_M3U_URL =
         "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-worldwide.m3u"
 
@@ -4667,6 +4693,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
     //   direct iptv-org tant que la copie git n'existe pas. Groupé par langue.
     @Volatile private var musiqueCacheSections: List<Category> = emptyList()
     @Volatile private var musiqueCacheTs: Long = 0L
+    // 2026-10-04 : idem Mix FR — pas de double agrégation Musique simultanée.
+    private val musiqueMutex = kotlinx.coroutines.sync.Mutex()
     private const val MUSIQUE_M3U_URL =
         "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-musique.m3u"
     private const val MUSIQUE_FALLBACK_URL =
@@ -4707,12 +4735,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
         val bloc = ArrayList<String>()
         var garder = false
         fun vider() { bloc.clear(); garder = false }
-        for (raw in body.lines()) {
+        for (raw in body.lineSequence()) {  // 2026-10-04 : parcours unique
             val t = raw.trim()
             when {
                 t.startsWith("#EXTINF:") -> {
                     vider()
-                    val g = Regex("""group-title="([^"]*)"""").find(t)?.groupValues?.get(1).orEmpty()
+                    val g = M3U_RX_GROUP_TITLE_VIDE_OK.find(t)?.groupValues?.get(1).orEmpty()
                     garder = g.trim().equals(groupe.trim(), ignoreCase = true)
                     if (garder) bloc.add(t)
                 }
@@ -4755,7 +4783,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
     private fun parseFastM3u(body: String): List<Category> {
         if (body.isBlank() || "#EXTM3U" !in body) return emptyList()
         val groups = LinkedHashMap<String, MutableList<TvShow>>()
-        val lines = body.lines()
+        val lines = body.lineSequence()  // 2026-10-04 : parcourue une seule fois
         var pendingExtinf: String? = null
         for (line in lines) {
             val t = line.trim()
@@ -4764,7 +4792,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             } else if (pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://") || t.startsWith("stream4free://") || t.startsWith("stream4cf://"))) {
                 val url = t
                 val title = pendingExtinf.substringAfterLast(",").trim()
-                val rawGroupTitle = Regex("""group-title="([^"]+)"""")
+                val rawGroupTitle = M3U_RX_GROUP_TITLE
                     .find(pendingExtinf)?.groupValues?.get(1) ?: "FAST"
                 // Remap LG sub-brands → dossiers dédiés (Pluto TV, Rakuten TV,
                 //   Sony One sont catégorisés par le script sous "LG Channels - X"
@@ -4775,7 +4803,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     rawGroupTitle == "LG Channels - Sony One"   -> "Sony One"
                     else -> rawGroupTitle
                 }
-                val logo = Regex("""tvg-logo="([^"]+)"""")
+                val logo = M3U_RX_TVG_LOGO
                     .find(pendingExtinf)?.groupValues?.get(1) ?: ""
                 // ID basé sur un hash court de l'URL pour unicité stable
                 val hash = url.hashCode().toUInt().toString(16)
@@ -4896,16 +4924,16 @@ object LiveTvHubProvider : Provider, IptvProvider {
         var pendingExtinf: String? = null
         val pendingHeaders = HashMap<String, String>()
         fun resetPending() { pendingExtinf = null; pendingHeaders.clear() }
-        for (line in body.lines()) {
+        for (line in body.lineSequence()) {  // 2026-10-04 : parcours unique
             val t = line.trim()
             when {
                 t.startsWith("#EXTINF:") -> {
                     pendingExtinf = t
                     pendingHeaders.clear()
                     // headers inline éventuels dans l'EXTINF
-                    Regex("""http-user-agent="([^"]+)"""", RegexOption.IGNORE_CASE)
+                    M3U_RX_HTTP_UA
                         .find(t)?.let { pendingHeaders["User-Agent"] = it.groupValues[1] }
-                    Regex("""http-referrer="([^"]+)"""", RegexOption.IGNORE_CASE)
+                    M3U_RX_HTTP_REFERRER
                         .find(t)?.let { pendingHeaders["Referer"] = it.groupValues[1] }
                 }
                 t.startsWith("#EXTVLCOPT:", ignoreCase = true) -> {
@@ -4922,9 +4950,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     val ext = pendingExtinf!!
                     val url = t
                     val title = ext.substringAfterLast(",").trim()
-                    val groupTitle = Regex("""group-title="([^"]+)"""")
+                    val groupTitle = M3U_RX_GROUP_TITLE
                         .find(ext)?.groupValues?.get(1) ?: "Mix FR"
-                    val logo = Regex("""tvg-logo="([^"]+)"""")
+                    val logo = M3U_RX_TVG_LOGO
                         .find(ext)?.groupValues?.get(1) ?: ""
                     // id distinct (préfixe mixfr) pour ne pas collisionner avec data-fast,
                     // mais toujours sous "livehub::fast::" pour réutiliser le getVideo direct.
@@ -5069,7 +5097,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
         if (mixFrCacheSections.isNotEmpty() && now - mixFrCacheTs < MIX_FR_TTL_MS) {
             return mixFrCacheSections
         }
-        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        // 2026-10-04 : verrou + re-vérification du cache (un appel concurrent a pu le remplir).
+        return mixFrMutex.withLock {
+        if (mixFrCacheSections.isNotEmpty() && System.currentTimeMillis() - mixFrCacheTs < MIX_FR_TTL_MS) {
+            return@withLock mixFrCacheSections
+        }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 val req = okhttp3.Request.Builder().url(MIX_FR_M3U_URL)
                     .header("User-Agent", "Mozilla/5.0").build()
@@ -5099,6 +5132,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 mixFrCacheSections
             }
         }
+        }
     }
 
     /** 2026-06-27 (user "ajouter WorldWide dans Autres Replays, auto-refresh") :
@@ -5111,7 +5145,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
         if (worldwideCacheSections.isNotEmpty() && now - worldwideCacheTs < MIX_FR_TTL_MS) {
             return worldwideCacheSections
         }
-        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        // 2026-10-04 : verrou + re-vérification du cache (un appel concurrent a pu le remplir).
+        return worldwideMutex.withLock {
+        if (worldwideCacheSections.isNotEmpty() && System.currentTimeMillis() - worldwideCacheTs < MIX_FR_TTL_MS) {
+            return@withLock worldwideCacheSections
+        }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 fun dl(url: String): String = try {
                     val req = okhttp3.Request.Builder().url(url)
@@ -5141,6 +5180,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 Log.w(TAG, "WorldWide fetch failed: ${e.message}")
                 worldwideCacheSections
             }
+        }
         }
     }
 
@@ -5182,7 +5222,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         if (body.isBlank() || "#EXTM3U" !in body) return
         var ext: String? = null
         val hdrs = HashMap<String, String>()
-        for (raw in body.lines()) {
+        for (raw in body.lineSequence()) {  // 2026-10-04 : parcours unique
             val t = raw.trim()
             when {
                 t.startsWith("#EXTINF:") -> { ext = t; hdrs.clear() }
@@ -5200,11 +5240,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     val e = ext!!; ext = null
                     if (!seenUrls.add(t)) { hdrs.clear(); continue }  // dédup URL
                     val title = e.substringAfterLast(",").trim()
-                    val group = Regex("""group-title="([^"]+)"""").find(e)?.groupValues?.get(1) ?: ""
+                    val group = M3U_RX_GROUP_TITLE.find(e)?.groupValues?.get(1) ?: ""
                     if (musicOnly && !MUSIC_KEYWORDS.containsMatchIn("$title $group")) { hdrs.clear(); continue }
-                    val logo = Regex("""tvg-logo="([^"]+)"""").find(e)?.groupValues?.get(1) ?: ""
-                    val lang = Regex("""tvg-language="([^"]*)"""").find(e)?.groupValues?.get(1) ?: ""
-                    val country = Regex("""tvg-country="([^"]*)"""").find(e)?.groupValues?.get(1) ?: ""
+                    val logo = M3U_RX_TVG_LOGO.find(e)?.groupValues?.get(1) ?: ""
+                    val lang = M3U_RX_TVG_LANGUAGE.find(e)?.groupValues?.get(1) ?: ""
+                    val country = M3U_RX_TVG_COUNTRY.find(e)?.groupValues?.get(1) ?: ""
                     val label = musiqueLangLabel(lang, country)
                     val hash = ("musiq" + t).hashCode().toUInt().toString(16)
                     val fastId = "livehub::fast::$hash"
@@ -5320,7 +5360,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
         if (musiqueCacheSections.isNotEmpty() && now - musiqueCacheTs < MIX_FR_TTL_MS) {
             return musiqueCacheSections
         }
-        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        // 2026-10-04 : verrou + re-vérification du cache (un appel concurrent a pu le remplir).
+        return musiqueMutex.withLock {
+        if (musiqueCacheSections.isNotEmpty() && System.currentTimeMillis() - musiqueCacheTs < MIX_FR_TTL_MS) {
+            return@withLock musiqueCacheSections
+        }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 fun dl(url: String): String = try {
                     val req = okhttp3.Request.Builder().url(url)
@@ -5469,6 +5514,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 musiqueCacheSections
             }
         }
+        }
     }
 
     /** 2026-06-29 (REPAIR — re-appliqué) : fetch le M3U Stream4Free dédié et le
@@ -5562,6 +5608,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
     //   au clic, lecture INSTANTANÉE (cache-hit). Mémoire négligeable (53 courtes URLs). Idempotent.
     @Volatile private var cfPreResolveRunning = false
     private fun launchCfPreResolve() {
+        // 2026-10-04 MODE LÉGER : pas de pré-résolution (~50 chaînes, WebView cachées de 12 s) ;
+        //   seule la chaîne cliquée est résolue.
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) {
+            Log.d(TAG, "Stream4Free CF: pré-résolution sautée (mode léger)")
+            return
+        }
         if (cfPreResolveRunning) return
         cfPreResolveRunning = true
         kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {

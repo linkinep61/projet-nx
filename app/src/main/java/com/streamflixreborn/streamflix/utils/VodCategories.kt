@@ -6,6 +6,9 @@ import com.streamflixreborn.streamflix.models.Show
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.utils.TMDb3.w500
 import com.streamflixreborn.streamflix.utils.TMDb3.w1280
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.Calendar
@@ -118,9 +121,19 @@ object VodCategories {
     private const val PAGES_SALLES = 3
     private const val CACHE_SALLES_MS = 6L * 60 * 60 * 1000
 
+    /**
+     * 2026-10-04 — CACHE NÉGATIF. Un échec réseau laisse la liste vide (ou l'ancienne liste
+     * périmée) : sans ce délai, CHAQUE ouverture d'accueil ou de catégorie relançait les
+     * pages TMDB en pure perte tant que le réseau restait indisponible. Après un échec on
+     * renvoie la même chose qu'en cas d'échec (l'ancienne liste, éventuellement vide) pendant
+     * dix minutes, puis on retente.
+     */
+    private const val CACHE_ECHEC_MS = 10L * 60 * 1000
+
     private val verrouSalles = Mutex()
     private var salles: Set<String> = emptySet()
     private var sallesExpire = 0L
+    private var sallesEchecJusqua = 0L
 
     /** Ramasse les identifiants d'une requête `discover/movie` sur plusieurs pages. */
     private suspend fun idsDeDiscover(
@@ -128,16 +141,30 @@ object VodCategories {
         depuis: Calendar,
         types: TMDb3.Params.WithBuilder<TMDb3.Movie.ReleaseType>?,
     ): Set<String> {
+        // 2026-10-04 (accélération) : les pages étaient téléchargées l'une après l'autre
+        //   (3 puis 8 allers-retours TMDB au premier accueil). Elles partent désormais toutes
+        //   en même temps, mais les réponses sont DÉPOUILLÉES DANS L'ORDRE avec exactement les
+        //   mêmes règles qu'avant : arrêt à la première page en échec, arrêt après la dernière
+        //   page annoncée par TMDB. Le résultat est donc identique ; seules des pages au-delà
+        //   de ces arrêts peuvent être téléchargées pour rien, et elles sont ignorées.
+        val reponses = coroutineScope {
+            (1..pages).map { p ->
+                async {
+                    runCatching {
+                        TMDb3.Discover.movie(
+                            language = "fr-FR", page = p, region = REGION,
+                            releaseDate = TMDb3.Params.Range(gte = depuis, lte = Calendar.getInstance()),
+                            withReleaseType = types,
+                            sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
+                        )
+                    }.getOrNull()
+                }
+            }.awaitAll()
+        }
         val trouves = mutableSetOf<String>()
-        for (p in 1..pages) {
-            val reponse = runCatching {
-                TMDb3.Discover.movie(
-                    language = "fr-FR", page = p, region = REGION,
-                    releaseDate = TMDb3.Params.Range(gte = depuis, lte = Calendar.getInstance()),
-                    withReleaseType = types,
-                    sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-                )
-            }.getOrNull() ?: break
+        for ((i, reponse) in reponses.withIndex()) {
+            val p = i + 1
+            if (reponse == null) break
             reponse.results.forEach { trouves.add(it.id.toString()) }
             if (p >= reponse.totalPages) break
         }
@@ -148,6 +175,7 @@ object VodCategories {
     suspend fun enSalles(): Set<String> = verrouSalles.withLock {
         val maintenant = System.currentTimeMillis()
         if (salles.isNotEmpty() && maintenant < sallesExpire) return@withLock salles
+        if (maintenant < sallesEchecJusqua) return@withLock salles   // 2026-10-04 : cache négatif
         val trouves = idsDeDiscover(
             pages = PAGES_SALLES,
             depuis = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -DELAI_CINEMA_JOURS) },
@@ -157,6 +185,8 @@ object VodCategories {
         if (trouves.isNotEmpty()) {
             salles = trouves
             sallesExpire = maintenant + CACHE_SALLES_MS
+        } else {
+            sallesEchecJusqua = maintenant + CACHE_ECHEC_MS
         }
         salles
     }
@@ -188,11 +218,13 @@ object VodCategories {
     private val verrouSortiesFr = Mutex()
     private var sortiesFr: Set<String> = emptySet()
     private var sortiesFrExpire = 0L
+    private var sortiesFrEchecJusqua = 0L
 
     /** Identifiants des films ayant une sortie française récente, tous types confondus. */
     suspend fun sortiesFrancaises(): Set<String> = verrouSortiesFr.withLock {
         val maintenant = System.currentTimeMillis()
         if (sortiesFr.isNotEmpty() && maintenant < sortiesFrExpire) return@withLock sortiesFr
+        if (maintenant < sortiesFrEchecJusqua) return@withLock sortiesFr   // 2026-10-04 : cache négatif
         val trouves = idsDeDiscover(
             pages = PAGES_SORTIES_FR,
             depuis = Calendar.getInstance()
@@ -202,6 +234,8 @@ object VodCategories {
         if (trouves.isNotEmpty()) {
             sortiesFr = trouves
             sortiesFrExpire = maintenant + CACHE_SALLES_MS
+        } else {
+            sortiesFrEchecJusqua = maintenant + CACHE_ECHEC_MS
         }
         sortiesFr
     }

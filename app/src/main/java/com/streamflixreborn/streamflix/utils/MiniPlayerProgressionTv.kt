@@ -91,6 +91,15 @@ object MiniPlayerProgressionTv {
         main.post(tic)
 
         proprietaire.lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+            // 2026-10-04 : en pause quand l'écran n'est plus visible (plein écran, autre
+            //   activité) — avant, elle tournait toute la lecture sans que personne la voie.
+            override fun onStop(owner: androidx.lifecycle.LifecycleOwner) {
+                main.removeCallbacks(tic)
+            }
+            override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
+                main.removeCallbacks(tic)
+                main.post(tic)
+            }
             override fun onDestroy(owner: androidx.lifecycle.LifecycleOwner) {
                 main.removeCallbacks(tic)
                 dejaInstalle.remove(ligne)

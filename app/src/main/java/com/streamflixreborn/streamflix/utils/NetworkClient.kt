@@ -119,8 +119,7 @@ object NetworkClient {
             } catch (_: Throwable) {}
         } else {
             // DIAG: identifier QUI déclenche buildClient sur le main thread au boot
-            Log.w("NetworkClient", "buildClient() on MAIN thread — skipping security wait",
-                Exception("DIAG stack"))
+            Log.w("NetworkClient", "buildClient() on MAIN thread — skipping security wait")
         }
         val builder = OkHttpClient.Builder()
             .cache(httpCache)

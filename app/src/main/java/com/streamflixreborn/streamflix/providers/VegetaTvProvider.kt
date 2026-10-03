@@ -2261,8 +2261,13 @@ object VegetaTvProvider : Provider, IptvProvider {
     }
 
     /** Watch the registry for new streams on `key` after backfill finishes, emit each one. */
+    // 2026-10-04 : le veilleur précédent n'était jamais annulé → en zappant, 5-6 boucles de 45 s
+    //   tournaient ensemble (et émettaient les flux de l'ANCIENNE chaîne). On annule, comme OLA.
+    @Volatile private var lateWatcherJob: kotlinx.coroutines.Job? = null
+
     private fun spawnLateRegistryWatcher(key: String) {
-        scope.launch {
+        lateWatcherJob?.cancel()
+        lateWatcherJob = scope.launch {
             val seenUrls = mutableSetOf<String>()
             synchronized(registryLock) {
                 channelRegistry[key]?.streams?.forEach { seenUrls.add(it.url) }

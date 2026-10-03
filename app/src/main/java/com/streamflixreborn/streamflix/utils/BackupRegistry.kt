@@ -161,6 +161,32 @@ object BackupRegistry {
     //   (Nakios, CoflixWiki…) sont en réalité de simples appels HTTP, sans WebView.
     private val heavyGate = Semaphore(if (LOW_RAM) 4 else 16)
 
+    // 2026-10-03 — MODE LÉGER (UserPreferences.modeLeger, désactivé par défaut) : les sources passent
+    //   en FILE D'ATTENTE, 3 à la fois au lieu d'une quarantaine en même temps. Aucune n'est coupée :
+    //   la file continue jusqu'au bout, les serveurs arrivent au fil de l'eau (user : « s'il n'y en a
+    //   aucune qui marche, il faut qu'il aille en rechercher d'autres »). Les plus gourmandes, mesurées
+    //   sur l'Oppo (pic par fiche : TV Hub +171 Mo, ONYX +83, Cinélux +54, Ciné Films +25), passent
+    //   en fin de file. Le sémaphore de kotlinx est équitable : l'ordre d'arrivée = l'ordre de passage.
+    private val legerGate = Semaphore(3)
+    private val LOURDES_EN_FIN_MODE_LEGER = setOf("TV Hub", "ONYX", "Cinélux", "Ciné Films")
+    private const val RETARD_LOURDES_MODE_LEGER_MS = 5_000L
+    // 2026-10-04 (user) — mode léger, deux règles de plus, AUCUNE source n'est jamais sautée :
+    //   1. les gourmandes passent une SEULE à la fois (jamais 171 + 83 + 54 Mo empilés) ;
+    //   2. la recherche se met en PAUSE dès que la vidéo joue ET qu'au moins 5 sources DIFFÉRENTES
+    //      ont fourni des serveurs (« cinq lots, pas cinq serveurs »). Si la vidéo plante, le lecteur
+    //      le signale et la recherche reprend là où elle s'était arrêtée.
+    private val lourdeGate = Semaphore(1)
+    private const val SOURCES_AVANT_PAUSE_MODE_LEGER = 5
+
+    /** Vrai tant que la vidéo joue réellement (signal du lecteur mobile/TV). */
+    @Volatile private var lectureEnCours = false
+
+    /** Appelé par les lecteurs : true quand la lecture démarre, false sur erreur ou à la sortie. */
+    fun signalerLecture(enCours: Boolean) {
+        if (lectureEnCours != enCours) Log.i(TAG, "lecture en cours = $enCours")
+        lectureEnCours = enCours
+    }
+
     // ── VAGUES DE LANCEMENT (2026-08-08) ────────────────────────────────────────────
     //   Classement établi sur MESURE (film « Obsession », Chromecast), pas à l'intuition.
     //   VAGUE 1 : répondent en 1 à 5 s — API ou id direct. Elles partent tout de suite.
@@ -416,6 +442,8 @@ object BackupRegistry {
      *  tokens de signature. Fusionne les URLs vraiment identiques (même contenu, token
      *  différent) mais garde distincts les serveurs différents (résolveurs ?id=…). */
     private fun normSrc(src: String): String {
+        // 2026-10-04 : même fichier sur deux domaines miroirs = une seule clé (cf. CleFichier).
+        CleFichier.de(src)?.let { return it }
         val noFrag = src.substringBefore("#").trim()
         val base = noFrag.substringBefore("?").trimEnd('/').lowercase()
         val query = noFrag.substringAfter("?", "")
@@ -447,18 +475,30 @@ object BackupRegistry {
      *  au niveau de l'identité. L'année reste comparée SÉPARÉMENT (gate discriminant) pour
      *  distinguer « Naruto 2002 » de « Naruto 2023 ». */
     private val YEAR_TOKEN = Regex("^(19|20)\\d{2}$")
+    // 2026-10-04 : expressions précompilées une fois (avant : recompilées à chaque appel,
+    //   des milliers de fois par fiche ouverte lors de la comparaison des titres des backups).
+    private val RX_MARQUES = Regex("\\p{M}")
+    private val RX_NON_ALNUM_ESP = Regex("[^a-zA-Z0-9 ]")
+    private val RX_ESPACES = Regex("\\s+")
+    private val RX_ANNEE = Regex("\\b(19|20)\\d{2}\\b")
+    private val RX_SAISON = Regex("""(?i)\bsaison\s*(\d+)|\bseason\s*(\d+)|\bs(\d+)\b""")
+    private val RX_SUFFIXE_PAREN = Regex("""(?i)\s*[\(\[]\s*(?:vf|vostfr|vost|vo|multi|fr|hd|fhd|uhd|4k|\d{3,4}p)[^)\]]*[\)\]]\s*$""")
+    private val RX_SUFFIXE_MOT = Regex("""(?i)\s+(?:vf|vostfr|vost|vo|multi|fr|hd|fhd|uhd|4k|\d{3,4}p)\s*$""")
+    private val RX_NUM_FINAL = Regex("""(?:^|\s)(\d{1,2})$""")
+    private val RX_NON_ALNUM_MAJ = Regex("[^a-zA-Z0-9]")
+    private val RX_NON_ALNUM_MIN = Regex("[^a-z0-9]")
     internal fun sigWords(s: String): Set<String> = java.text.Normalizer
         .normalize(s, java.text.Normalizer.Form.NFD)
-        .replace(Regex("\\p{M}"), "")             // strip accents (combining marks) → "é"→"e"
-        .replace(Regex("[^a-zA-Z0-9 ]"), " ")     // other non-alphanum → space separator
+        .replace(RX_MARQUES, "")             // strip accents (combining marks) → "é"→"e"
+        .replace(RX_NON_ALNUM_ESP, " ")     // other non-alphanum → space separator
         .lowercase()
-        .split(Regex("\\s+"))
+        .split(RX_ESPACES)
         .filter { it.length >= 3 && it !in TITLE_STOPWORDS && !YEAR_TOKEN.matches(it) }
         .toSet()
 
     /** Année (19xx/20xx) présente dans un titre, ou null. Sert au gate discriminant. */
     private fun yearIn(s: String): Int? =
-        Regex("\\b(19|20)\\d{2}\\b").find(s)?.value?.toIntOrNull()
+        RX_ANNEE.find(s)?.value?.toIntOrNull()
 
     /**
      * 2026-07-06 — Match d'ŒUVRE (remplace le matching par titre unique dans la boucle
@@ -512,7 +552,7 @@ object BackupRegistry {
     fun seasonTitleOk(candidateTitle: String, isMovieTarget: Boolean, targetSeason: Int): Boolean {
         if (isMovieTarget) return true
         // 1) Forme explicite « Saison N » / « Season N » / « SN ».
-        Regex("""(?i)\bsaison\s*(\d+)|\bseason\s*(\d+)|\bs(\d+)\b""").find(candidateTitle)?.let { m ->
+        RX_SAISON.find(candidateTitle)?.let { m ->
             val declared = (m.groupValues[1].ifBlank { m.groupValues[2].ifBlank { m.groupValues[3] } }).toIntOrNull()
             if (declared != null) return declared == targetSeason
         }
@@ -524,11 +564,11 @@ object BackupRegistry {
         var base = candidateTitle.trim()
         repeat(3) {
             base = base
-                .replace(Regex("""(?i)\s*[\(\[]\s*(?:vf|vostfr|vost|vo|multi|fr|hd|fhd|uhd|4k|\d{3,4}p)[^)\]]*[\)\]]\s*$"""), "")
-                .replace(Regex("""(?i)\s+(?:vf|vostfr|vost|vo|multi|fr|hd|fhd|uhd|4k|\d{3,4}p)\s*$"""), "")
+                .replace(RX_SUFFIXE_PAREN, "")
+                .replace(RX_SUFFIXE_MOT, "")
                 .trim()
         }
-        val trailing = Regex("""(?:^|\s)(\d{1,2})$""").find(base)?.groupValues?.get(1)?.toIntOrNull()
+        val trailing = RX_NUM_FINAL.find(base)?.groupValues?.get(1)?.toIntOrNull()
         if (trailing != null && trailing in 2..50) {
             return trailing == targetSeason
         }
@@ -565,10 +605,10 @@ object BackupRegistry {
         //   (Si le site ne met pas l'année dans le titre → pas d'année à comparer → on retombe sur
         //   le matching normal ; seuls les providers par ID TMDB trouvent alors.)
         val shortKnown = knownTitles.firstOrNull { t ->
-            t.trim().replace(Regex("[^a-zA-Z0-9]"), "").length in 1..2
+            t.trim().replace(RX_NON_ALNUM_MAJ, "").length in 1..2
         }
         if (shortKnown != null) {
-            val token = shortKnown.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+            val token = shortKnown.trim().lowercase().replace(RX_NON_ALNUM_MIN, "")
             // 2026-07-23 (log OPPO : FrenchStream « H - Saison 1 » rejeté) : le titre du candidat
             //   est DÉCORÉ « H - Saison N » et NE CONTIENT PAS l'année (juste un n° de saison) →
             //   l'ancienne voie « token isolé + année DANS le titre » échouait. On NETTOIE d'abord
@@ -577,7 +617,7 @@ object BackupRegistry {
             //   Sûr : égalité exacte après nettoyage (pas un simple contains), et la bonne saison
             //   est vérifiée en aval par seasonTitleOk. On a déjà l'id TMDB + effectiveYear comme
             //   discriminants → pas besoin de l'année dans le titre.
-            val cleanedCand = cleanTitle(candidateTitle).lowercase().replace(Regex("[^a-z0-9]"), "")
+            val cleanedCand = cleanTitle(candidateTitle).lowercase().replace(RX_NON_ALNUM_MIN, "")
             if (cleanedCand == token) return true
             // Ancienne voie conservée : token isolé + année PRÉSENTE dans le titre candidat (±1).
             if (targetYear != null) {
@@ -601,8 +641,8 @@ object BackupRegistry {
         val qw = sigWords(query)
         if (cw.isEmpty() || qw.isEmpty()) {
             // Fallback sous-chaîne si un titre n'a aucun mot significatif (titres très courts)
-            val nc = candidate.lowercase().replace(Regex("[^a-z0-9]"), "")
-            val nq = query.lowercase().replace(Regex("[^a-z0-9]"), "")
+            val nc = candidate.lowercase().replace(RX_NON_ALNUM_MIN, "")
+            val nq = query.lowercase().replace(RX_NON_ALNUM_MIN, "")
             if (nc.isEmpty() || nq.isEmpty()) return false
             // 2026-07-07 : garde anti-faux-match titres ultra-courts (user "K.O." matchait
             //   n'importe quoi contenant "ko"). Si le plus court des deux a ≤ 2 chars → exact
@@ -1146,6 +1186,8 @@ object BackupRegistry {
 
         Log.i(TAG, "fetchAll title='${key.title}' knownTitles=$knownTitles tmdbId=$resolvedTmdbId year=${key.year} effectiveYear=$effectiveYear season=${key.season} ep=${key.episode}")
         val seen = ConcurrentHashMap.newKeySet<String>()
+        /** Sources ayant fourni au moins un serveur nouveau (mode léger : seuil de pause). */
+        val sourcesAvecServeurs = ConcurrentHashMap.newKeySet<String>()
 
         // Dédup (par LANGUE + URL normalisée, ne fusionne JAMAIS VF/VOSTFR/VO) + envoi.
         //   Extrait de emit() pour être réutilisable par la boucle CF séquentielle.
@@ -1158,7 +1200,10 @@ object BackupRegistry {
             noterSucces(source)
             val fresh = servers.filter { it.src.isNotBlank() && seen.add(langBucket(it.name) + "|" + normSrc(it.src)) }
             Log.i(TAG, "$source → ${fresh.size} neufs / ${servers.size} bruts")
-            if (fresh.isNotEmpty()) trySend(fresh.map { wrap(source, it) })
+            if (fresh.isNotEmpty()) {
+                sourcesAvecServeurs.add(source)
+                trySend(fresh.map { wrap(source, it) })
+            }
         }
 
         suspend fun emit(source: String, fetch: suspend () -> List<Video.Server>) {
@@ -1256,10 +1301,42 @@ object BackupRegistry {
                 //   Journal : HANGDUMP dans `CrossProviderResolver.resolveAndFetchServers`.
                 //   Retour aux valeurs éprouvées. Ne les remonter QUE si le pré-chauffage est
                 //   sorti du sémaphore ou annulé au démarrage d'une vraie collecte.
-                if (source in HEAVY_SOURCES) {
-                    heavyGate.withPermit { withTimeoutOrNull(40_000) { fetch() } ?: emptyList() }
+                // 2026-10-03 : MemDiag.mesurer = exécution directe hors diagnostic (build debug +
+                //   setprop debug.onyx.memdiag 1 uniquement). Voir utils/MemDiag.kt.
+                val executer: suspend () -> List<Video.Server> = {
+                    MemDiag.mesurer(source) {
+                        if (source in HEAVY_SOURCES) {
+                            heavyGate.withPermit { withTimeoutOrNull(40_000) { fetch() } ?: emptyList() }
+                        } else {
+                            withTimeoutOrNull(60_000) { fetch() } ?: emptyList()
+                        }
+                    }
+                }
+                // Mode léger : file d'attente 3 par 3 (l'attente de la place ne compte PAS dans le
+                //   délai de la source) ; les gourmandes prennent leur ticket en dernier.
+                if (UserPreferences.modeLeger) {
+                    // Pause tant que la vidéo joue et que 5 sources différentes ont déjà répondu.
+                    suspend fun pauseSiLectureSuffit() {
+                        var annonce = false
+                        while (lectureEnCours && sourcesAvecServeurs.size >= SOURCES_AVANT_PAUSE_MODE_LEGER) {
+                            if (!annonce) {
+                                Log.i(TAG, "$source → en pause (vidéo en lecture, ${sourcesAvecServeurs.size} sources ont répondu)")
+                                annonce = true
+                            }
+                            kotlinx.coroutines.delay(2_000L)
+                        }
+                        if (annonce) Log.i(TAG, "$source → reprise de la recherche")
+                    }
+                    val lourde = source in LOURDES_EN_FIN_MODE_LEGER
+                    if (lourde) kotlinx.coroutines.delay(RETARD_LOURDES_MODE_LEGER_MS)
+                    pauseSiLectureSuffit()
+                    if (lourde) {
+                        lourdeGate.withPermit { legerGate.withPermit { pauseSiLectureSuffit(); executer() } }
+                    } else {
+                        legerGate.withPermit { pauseSiLectureSuffit(); executer() }
+                    }
                 } else {
-                    withTimeoutOrNull(60_000) { fetch() } ?: emptyList()
+                    executer()
                 }
             } catch (e: Exception) {
                 failure = e
@@ -1419,12 +1496,16 @@ object BackupRegistry {
         // Nakios + Moiflix = via helpers exposés (WebJS). Nakios a besoin du tmdbId.
         // 2026-07-21 : Nakios n'a PLUS d'API par tmdbId (site refait en Laravel SSR) → il lui faut
         //   le TITRE pour dériver le slug de la fiche. On lui passe tous les titres connus.
+        // 2026-10-04 : année du film transmise → Nakios/LoiFlix écartent une fiche homonyme
+        //   d'une autre année (Léon 1994 ≠ León 2024).
+        val anneeFilmNakios = effectiveYear
         launch { emit("Nakios") {
             var res = emptyList<Video.Server>()
             for (t in knownTitles) {
                 if (t.isBlank()) continue
                 res = NakiosProvider.fetchNakiosBackupServers(
                     resolvedTmdbId ?: "", videoType, key.season, key.episode, titleHint = t,
+                    annee = anneeFilmNakios,
                 )
                 if (res.isNotEmpty()) break
             }
@@ -1438,6 +1519,7 @@ object BackupRegistry {
                 if (t.isBlank()) continue
                 res = NakiosProvider.fetchLoiflixBackupServers(
                     videoType, key.season, key.episode, titleHint = t,
+                    annee = anneeFilmNakios,
                 )
                 if (res.isNotEmpty()) break
             }

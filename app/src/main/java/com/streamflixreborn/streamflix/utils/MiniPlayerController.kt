@@ -37,6 +37,14 @@ import androidx.core.net.toUri
  * Manages ExoPlayer lifecycle independently from the home fragment.
  */
 object MiniPlayerController {
+    /** Un seul fil pour les rappels Cronet du mini-lecteur : avant, chaque (re)création du
+     *  lecteur en créait un nouveau, jamais arrêté (risque d'échec `pthread_create` sur box 32 bits). */
+    private val executeurCronet: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "MiniLecteurCronet").apply { isDaemon = true }
+        }
+    }
+
 
     private const val TAG = "MiniPlayer"
 
@@ -1893,8 +1901,8 @@ object MiniPlayerController {
                     }
                     if (counter % 5 == 0) {
                         Log.d(TAG, "Live buffer mini: pos=${pos/1000}s buf=${buf/1000}s ahead=${ahead}s")
-                        // 2026-09-05 DIAG hachure : compteurs decodeur video ExoPlayer
-                        try {
+                        // 2026-09-05 DIAG hachure : compteurs decodeur video ExoPlayer (versions de test seulement)
+                        if (com.streamflixreborn.streamflix.BuildConfig.DEBUG) try {
                             val c = p.videoDecoderCounters
                             if (c != null) Log.d(TAG, "DIAG decodeur mini: in=${c.queuedInputBufferCount} " +
                                 "rendu=${c.renderedOutputBufferCount} saute=${c.skippedOutputBufferCount} " +
@@ -1918,6 +1926,8 @@ object MiniPlayerController {
     }
 
     private fun startServerScout() {
+        // 2026-10-04 : comme le grand lecteur TV, pas de sonde HEAD toutes les 10 s en mode léger.
+        if (UserPreferences.modeLeger) return
         scoutJob?.cancel()
         scoutJob = scope.launch(Dispatchers.IO) {
             val client = okhttp3.OkHttpClient.Builder()
@@ -2322,7 +2332,7 @@ object MiniPlayerController {
             try {
                 val cronetClass = Class.forName("androidx.media3.datasource.cronet.CronetDataSource\$Factory")
                 val engineClass = Class.forName("org.chromium.net.CronetEngine")
-                val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+                val executor = executeurCronet
                 val ctor = cronetClass.getConstructor(engineClass, java.util.concurrent.Executor::class.java)
                 val factory = ctor.newInstance(cronetEngine, executor)
                 cronetClass.getMethod("setUserAgent", String::class.java)
@@ -2356,7 +2366,9 @@ object MiniPlayerController {
         //   aligner sur PlayerTvFragment IPTV (lines 5612-5618). Avant : après
         //   une mini-coupure, le mini attendait 2s de buffer avant de reprendre
         //   = user voit la coupure. Après : 0.5s = reprise quasi-instantanée.
-        val loadControl = DefaultLoadControl.Builder()
+        // 2026-10-04 MODE LÉGER : tampon réduit à 16 Mo (le mini n'a pas de « Buffering étendu »).
+        val loadControl = TamponLeger.loadControl(mini = true, extraBuffering = false, rebufferMs = 500)
+            ?: DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 /* minBufferMs */ 60_000,
                 /* maxBufferMs */ 300_000,
@@ -4037,6 +4049,7 @@ object MiniPlayerController {
         cancelPeriodicForcedSwap()
         cancelLazyBackupWatcher()
         cancelServerScout()             // 2026-06-16 (audit) : manquait dans stop()
+        cancelMiniBufferLogger()        // 2026-10-04 : la boucle 1 s n'était jamais arrêtée
         backupJob?.cancel()
         hideFreezeOverlay()             // mirror grand
         val p = player
@@ -4090,6 +4103,11 @@ object MiniPlayerController {
         cancelPeriodicForcedSwap()
         cancelLazyBackupWatcher()
         backupJob?.cancel()
+        // 2026-10-04 : la boucle de buffer et la sonde serveur du mini tournaient encore après
+        //   le passage au grand lecteur (qui a ses propres boucles). Elles ne lisent que `player`,
+        //   remis à null juste après : rien d'utile n'est perdu. Relancées au prochain STATE_READY.
+        cancelMiniBufferLogger()
+        cancelServerScout()
         transitioningToFullscreen = true
         val p = player ?: return null.also { transitioningToFullscreen = false }
         // Detach listener so mini player state changes don't fire
@@ -4132,6 +4150,8 @@ object MiniPlayerController {
         cancelPeriodicForcedSwap()
         cancelLazyBackupWatcher()
         backupJob?.cancel()
+        cancelMiniBufferLogger()        // 2026-10-04 : boucles du mini jamais arrêtées jusqu'ici
+        cancelServerScout()
         transitioningToFullscreen = true
         // 2026-09-27 (user : « je clique sur le carré plein écran du mini-lecteur, ça crée
         //   un double lecteur ») : le bouton plein écran de la Recherche et de l'onglet
@@ -4198,6 +4218,8 @@ object MiniPlayerController {
         cancelPeriodicForcedSwap()
         cancelLazyBackupWatcher()
         backupJob?.cancel()
+        cancelMiniBufferLogger()        // 2026-10-04 : relancées au prochain STATE_READY du mini
+        cancelServerScout()
         detachedPlayer = player
         player = null
         // Keep currentChannelId / currentChannelName / currentChannelPoster

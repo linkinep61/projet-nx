@@ -331,6 +331,43 @@ object FranimeSession {
         }
     private val mutex = Mutex()
 
+    // 2026-10-03 — LIBÉRATION APRÈS INACTIVITÉ (tous les modes, pas seulement le mode léger).
+    //   Mesuré sur l'Oppo : une fois FRAnime ouvert, cette WebView gardait ~390 Mo de moteur web
+    //   jusqu'à la fermeture de l'app (franime.fr, ses scripts et ses pubs tournaient en fond), alors
+    //   que la session est de toute façon re-bootstrappée après BOOTSTRAP_TTL_MS. On la détruit donc
+    //   après IDLE_MS sans usage : la prochaine lecture la recrée, exactement comme après le TTL.
+    private val IDLE_MS = BOOTSTRAP_TTL_MS
+    @Volatile private var lastUseAt: Long = 0L
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val liberationSiInactive = Runnable {
+        val inactif = System.currentTimeMillis() - lastUseAt >= IDLE_MS
+        if (!inactif || mutex.isLocked || currentCapture != null) {
+            planifierLiberation()
+            return@Runnable
+        }
+        val wv = webView ?: return@Runnable
+        Log.d(TAG, "WebView libérée après ${IDLE_MS / 60_000} min d'inactivité")
+        webView = null
+        bootstrappedWebViewHash = 0
+        lastBootstrapAt = 0L
+        try {
+            wv.stopLoading()
+            wv.loadUrl("about:blank")
+            wv.removeJavascriptInterface("FranimeBridge")
+            wv.destroy()
+        } catch (_: Exception) {}
+    }
+
+    private fun marquerUsage() {
+        lastUseAt = System.currentTimeMillis()
+        planifierLiberation()
+    }
+
+    private fun planifierLiberation() {
+        mainHandler.removeCallbacks(liberationSiInactive)
+        mainHandler.postDelayed(liberationSiInactive, IDLE_MS + 5_000L)
+    }
+
     /** État de la capture en cours. Mis à jour par les callbacks JS bridge / network. */
     @Volatile private var currentCapture: CompletableDeferred<String?>? = null
     @Volatile private var currentTargetUrl: String? = null
@@ -479,6 +516,7 @@ object FranimeSession {
             }
             bootstrappedWebViewHash = System.identityHashCode(wv)
             lastBootstrapAt = System.currentTimeMillis()
+            marquerUsage()
             Log.d(TAG, "bootstrap done (wvHash=$bootstrappedWebViewHash, total=${System.currentTimeMillis() - t0}ms)")
         }
     }
@@ -545,6 +583,7 @@ object FranimeSession {
             currentCapture = null
             currentTargetUrl = null
             rejectedEmbedUrl = null
+            marquerUsage()
             if (result != null) {
                 lastEmbedByEpisode[key] = result
                 // v70 : enregistre aussi le lecteur correspondant pour détection

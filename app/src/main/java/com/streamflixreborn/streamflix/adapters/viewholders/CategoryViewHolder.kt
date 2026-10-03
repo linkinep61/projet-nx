@@ -43,7 +43,16 @@ class CategoryViewHolder(
         /** Shared ViewHolder pool across all horizontal category RecyclerViews.
          *  Reduces inflation count when scrolling the vertical list of categories. */
         val sharedPool = RecyclerView.RecycledViewPool().apply {
-            setMaxRecycledViews(0, 12) // keep up to 12 recycled VHs of type 0
+            // 2026-10-04 : le type 0 visé ici était CATEGORY_MOBILE_ITEM (une rangée), pas les
+            //   cartes : celles-ci restaient à la limite par défaut (5) et étaient regonflées à
+            //   chaque rangée qui apparaît au défilement de l'accueil.
+            setMaxRecycledViews(0, 12)
+            listOf(
+                com.streamflixreborn.streamflix.adapters.AppAdapter.Type.MOVIE_TV_ITEM,
+                com.streamflixreborn.streamflix.adapters.AppAdapter.Type.TV_SHOW_TV_ITEM,
+                com.streamflixreborn.streamflix.adapters.AppAdapter.Type.MOVIE_MOBILE_ITEM,
+                com.streamflixreborn.streamflix.adapters.AppAdapter.Type.TV_SHOW_MOBILE_ITEM,
+            ).forEach { setMaxRecycledViews(it.ordinal, 16) }
         }
     }
 
@@ -265,10 +274,13 @@ class CategoryViewHolder(
             }
             if (!url.isNullOrBlank()) {
                 try {
+                    // 2026-10-04 : téléchargement vers le cache DISQUE seulement. Avant, preload(342, 513)
+                    //   décodait en mémoire à une taille que les cartes (300×450) n'utilisent jamais :
+                    //   décodage perdu, et les jaquettes visibles chassées du cache mémoire.
                     com.bumptech.glide.Glide.with(context)
+                        .downloadOnly()
                         .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(url, 400))
-                        .format(com.bumptech.glide.load.DecodeFormat.PREFER_RGB_565)
-                        .preload(342, 513)
+                        .submit()
                 } catch (_: Throwable) {
                 }
             }

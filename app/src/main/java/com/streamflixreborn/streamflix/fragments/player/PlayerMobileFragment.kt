@@ -124,6 +124,175 @@ import java.util.Locale
 
 class PlayerMobileFragment : Fragment() {
     companion object {
+        // 2026-10-04 : client OkHttp « Multi-DoH + TLS permissif » de la lecture, construit UNE
+        //   seule fois (avant : 2 OkHttpClient + 1 SSLContext recréés à chaque vidéo en DoH).
+        //   Il ne dépend d'aucun paramètre de la vidéo (UA et en-têtes sont posés sur la
+        //   fabrique OkHttpDataSource, toujours créée par vidéo).
+        private val cacheResolutionDoH =
+            java.util.concurrent.ConcurrentHashMap<String, Pair<List<java.net.InetAddress>, Long>>()
+        private const val VALIDITE_CACHE_DOH_MS = 5 * 60_000L
+        private val clientDoHLecture: OkHttpClient by lazy {
+            val jsonDohDns = object : okhttp3.Dns {
+                private val fallback = DnsResolver.doh
+                private val dnsClient = OkHttpClient.Builder()
+                    .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+
+                /** Multiple DoH providers — different providers may return different IPs */
+                private val dohProviders = listOf(
+                    "https://cloudflare-dns.com/dns-query",
+                    "https://dns.google/resolve",
+                    "https://dns.quad9.net:5053/dns-query"
+                )
+
+                /** Query a DoH provider and return all A record IPs + any CNAME targets found */
+                private fun queryDoH(provider: String, name: String): Pair<List<String>, List<String>> {
+                    val request = okhttp3.Request.Builder()
+                        .url("$provider?name=$name&type=A")
+                        .header("Accept", "application/dns-json")
+                        .build()
+                    val body = dnsClient.newCall(request).execute().use { it.body?.string() }
+                        ?: return Pair(emptyList(), emptyList())
+
+                    val json = org.json.JSONObject(body)
+                    val answers = json.optJSONArray("Answer")
+                        ?: return Pair(emptyList(), emptyList())
+
+                    val ips = mutableListOf<String>()
+                    val cnames = mutableListOf<String>()
+                    for (i in 0 until answers.length()) {
+                        val answer = answers.getJSONObject(i)
+                        when (answer.optInt("type")) {
+                            1 -> ips.add(answer.optString("data"))   // A record
+                            5 -> cnames.add(answer.optString("data").trimEnd('.')) // CNAME
+                        }
+                    }
+                    return Pair(ips, cnames)
+                }
+
+                override fun lookup(hostname: String): List<java.net.InetAddress> {
+                    if (!hostname.contains("cfglobalcdn.com", ignoreCase = true)) {
+                        return fallback.lookup(hostname)
+                    }
+                    // 2026-10-04 : résultat récent (< 5 min) pour cet hôte → pas de nouvelles requêtes DoH.
+                    cacheResolutionDoH[hostname.lowercase()]?.let { (ipsCache, quand) ->
+                        if (System.currentTimeMillis() - quand < VALIDITE_CACHE_DOH_MS) {
+                            Log.d("PlayerNetwork", "Multi-DoH cache pour $hostname : $ipsCache")
+                            return ipsCache
+                        }
+                    }
+                    Log.d("PlayerNetwork", "Multi-DoH lookup for: $hostname")
+                    try {
+                        val allIps = linkedSetOf<String>() // preserve order, no duplicates
+                        var cnameTarget: String? = null
+
+                        // Phase 1: query all DoH providers for the cfglobalcdn hostname
+                        for (provider in dohProviders) {
+                            try {
+                                val (ips, cnames) = queryDoH(provider, hostname)
+                                Log.d("PlayerNetwork", "DoH ($provider): IPs=$ips, CNAMEs=$cnames")
+                                allIps.addAll(ips)
+                                if (cnames.isNotEmpty() && cnameTarget == null) {
+                                    cnameTarget = cnames.first()
+                                }
+                            } catch (e: Exception) {
+                                Log.w("PlayerNetwork", "DoH provider $provider failed: ${e.message}")
+                            }
+                        }
+
+                        // Phase 2: if CNAME found, also resolve CNAME target directly
+                        // (might give different IPs than the flattened chain)
+                        if (cnameTarget != null) {
+                            Log.d("PlayerNetwork", "CNAME chain: $hostname → $cnameTarget, resolving target...")
+                            for (provider in dohProviders) {
+                                try {
+                                    val (ips, _) = queryDoH(provider, cnameTarget!!)
+                                    if (ips.isNotEmpty()) {
+                                        Log.d("PlayerNetwork", "CNAME target $cnameTarget via $provider: $ips")
+                                        allIps.addAll(ips)
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }
+
+                        if (allIps.isEmpty()) throw Exception("No IPs from any DoH provider")
+                        Log.d("PlayerNetwork", "All candidate IPs for $hostname: $allIps")
+
+                        // Phase 3: TCP pre-check all unique IPs
+                        val reachable = mutableListOf<java.net.InetAddress>()
+                        val unreachable = mutableListOf<java.net.InetAddress>()
+                        for (ipStr in allIps) {
+                            val ip = java.net.InetAddress.getByName(ipStr)
+                            try {
+                                val socket = java.net.Socket()
+                                socket.connect(java.net.InetSocketAddress(ip, 443), 3000)
+                                socket.close()
+                                Log.d("PlayerNetwork", "TCP OK: $hostname → ${ip.hostAddress}:443")
+                                reachable.add(ip)
+                                break // one reachable is enough
+                            } catch (e: Exception) {
+                                Log.w("PlayerNetwork", "TCP FAIL: $hostname → ${ip.hostAddress}:443")
+                                unreachable.add(ip)
+                            }
+                        }
+
+                        val ordered = reachable + unreachable
+                        if (reachable.isEmpty()) {
+                            Log.w("PlayerNetwork", "ALL ${allIps.size} IPs blocked for $hostname")
+                        }
+                        // 2026-10-04 : mémorisé 5 min, seulement si une IP a répondu (sinon on re-sonde).
+                        if (reachable.isNotEmpty()) cacheResolutionDoH[hostname.lowercase()] = ordered to System.currentTimeMillis()
+                        return ordered
+                    } catch (e: Exception) {
+                        Log.w("PlayerNetwork", "Multi-DoH failed for $hostname: ${e.message}, trying wire DoH")
+                        return fallback.lookup(hostname)
+                    }
+                }
+            }
+
+            // 2026-07-30 : trust TLS permissif (voir PlayerTvFragment) — les CDN Vidmoly
+            //   (vmwesa.online / acek-cdn.com) présentent un cert que les vieux appareils
+            //   ne reconnaissent pas (ERR_CERT_AUTHORITY_INVALID). Ce client ne sert qu'au
+            //   streaming de ces CDN → on accepte tout cert pour être indépendant du CA store.
+            val trustAllPlayback = arrayOf<javax.net.ssl.TrustManager>(
+                object : javax.net.ssl.X509TrustManager {
+                    override fun checkClientTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {}
+                    override fun checkServerTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {}
+                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+                }
+            )
+            val sslPlaybackCtx = javax.net.ssl.SSLContext.getInstance("TLS")
+                .apply { init(null, trustAllPlayback, java.security.SecureRandom()) }
+            val dohClient = OkHttpClient.Builder()
+                .dns(jsonDohDns)
+                .sslSocketFactory(sslPlaybackCtx.socketFactory, trustAllPlayback[0] as javax.net.ssl.X509TrustManager)
+                .hostnameVerifier { _, _ -> true }
+                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+            dohClient
+        }
+        // Moteur Cronet partagé par tous les lecteurs mobiles : avant, chaque film en construisait
+        //   un neuf (jamais arrêté) → quelques Mo + un thread réseau perdus par film ouvert.
+        @Volatile private var moteurCronetPartage: CronetEngine? = null
+        private fun moteurCronet(ctx: android.content.Context): CronetEngine? =
+            moteurCronetPartage ?: synchronized(this) {
+                moteurCronetPartage ?: try {
+                    CronetEngine.Builder(ctx.applicationContext)
+                        .enableQuic(true)
+                        .enableHttp2(true)
+                        .build()
+                        .also { moteurCronetPartage = it }
+                } catch (e: Exception) {
+                    Log.e("PlayerNetwork", "Cronet completely unavailable: ${e.message}", e)
+                    null
+                }
+            }
         /** 2026-06-21 (user "panel reste ouvert quand on change d'épisode") :
          *  Set à true par le click handler du panel AVANT switchToEpisode().
          *  Lu par onViewCreated du nouveau fragment instance → réouvre le
@@ -1495,7 +1664,12 @@ class PlayerMobileFragment : Fragment() {
                                     if (miniIsOnWrongServer) {
                                         Log.w("PlayerMobileFragment", "Mini joue '$miniPlayingId' mais favori = '${favServer?.id}' → force switch sur favori (${favServer?.name})")
                                     }
-                                    viewModel.getVideo(initialServer)
+                                    // 2026-10-04 : auto = l'app a choisi (patience 12 s, cf. ViewModel) —
+                                    //   sauf favori du user ou reprise du mini : on ne les abandonne pas.
+                                    viewModel.getVideo(
+                                        initialServer,
+                                        auto = favServer == null && matchedMiniServer == null,
+                                    )
                                 } else {
                                     // 2026-07-07 : serveurs AFFICHÉS, mais auto-play EN ATTENTE d'un serveur
                                     //   non-VOSTFR/VO. On ne lance rien ; le ViewModel ré-émet
@@ -1590,7 +1764,7 @@ class PlayerMobileFragment : Fragment() {
                         val nextServer = if (isLiveIptv) null
                             else nextAutoFallbackServer(servers, state.server)
                         if (nextServer != null) {
-                            viewModel.getVideo(nextServer)
+                            viewModel.getVideo(nextServer, auto = true)
                         } else if (tryNextChannelVariant(state.server)) {
                             // OLA channel variant fallback succeeded — playing next variant
                         } else {
@@ -2016,6 +2190,7 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(false)
         // 2026-08-02 : on sort du lecteur → plus d'hébergeur courant. Sans ça, un changement de
         //   format fait depuis les réglages généraux serait attribué au dernier hébergeur lu.
         UserPreferences.currentPlayerHost = null
@@ -4822,7 +4997,10 @@ class PlayerMobileFragment : Fragment() {
         val softwareDecoder = PlayerSettingsView.Settings.SoftwareDecoder.isEnabled
 
         // Switch DataSource if the video URL needs a different engine
-        val urlNeedsCronet = needsCronet(video.source)
+        // 2026-10-04 : un hôte où Cronet a échoué (cronetFailedHosts) est lu en DefaultHttp →
+        //   ne pas le compter comme « a besoin de Cronet », sinon reconstruction inutile du lecteur.
+        val urlNeedsCronet = needsCronet(video.source) &&
+            hostOf(video.source)?.let { cronetFailedHosts.contains(it) } != true
         val urlNeedsDoH = needsDoH(video.source)
         val urlNeedsBrowserOkHttp = needsBrowserOkHttp(video.source)
         val dataSourceMismatch = (urlNeedsCronet && !usingCronet) || (!urlNeedsCronet && usingCronet)
@@ -5665,6 +5843,8 @@ class PlayerMobileFragment : Fragment() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 super.onIsPlayingChanged(isPlaying)
                 binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
+                // 2026-10-04 : mode léger → la recherche de serveurs se met en pause pendant la lecture.
+                if (isPlaying) com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(true)
 
                 if (isPlaying) {
                     // 2026-08-07 : lecture réellement démarrée (parité TV) — au-delà de ce
@@ -5792,6 +5972,8 @@ class PlayerMobileFragment : Fragment() {
 
             override fun onPlayerError(error: PlaybackException) {
                 super.onPlayerError(error)
+                // 2026-10-04 : la vidéo a planté → la recherche de serveurs reprend (mode léger).
+                com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(false)
                 // 2026-05-21 : ce serveur a ÉCHOUÉ pour CE titre → DEAD (rouge) uniquement
                 //   pour ce titre (args.id). Un échec ici ne colore pas les autres épisodes.
                 currentServer?.let {
@@ -5930,6 +6112,11 @@ class PlayerMobileFragment : Fragment() {
                     //   (rappelé par initializePlayer) forcera DoT-OkHttp pour lui, sinon il
                     //   re-choisissait Cronet et rebouclait en UnknownHost.
                     if (dnsBlocked) hostOf(video.source)?.let { dnsBlockedHosts.add(it) }
+                    // 2026-10-04 : erreur Cronet HORS DNS → on mémorise l'hôte pour que
+                    //   createHttpDataSourceFactory (rappelé par initializePlayer) ne reprenne
+                    //   pas Cronet (sinon boucle). Sauf ERR_NETWORK_CHANGED : simple changement
+                    //   de réseau (Wi-Fi ↔ 4G), Cronet doit rester utilisable ensuite.
+                    if (!dnsBlocked && !causeMsg.contains("ERR_NETWORK_CHANGED")) hostOf(video.source)?.let { cronetFailedHosts.add(it) }
                     httpDataSource = if (dnsBlocked) createDoHOkHttpDataSourceFactory() else createDefaultHttpDataSourceFactory()
                     Log.w("PlayerNetwork", "Cronet network error ($causeMsg) → retry via ${if (dnsBlocked) "DoH-OkHttp (DNS bypass)" else "DefaultHttp"}")
                     dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
@@ -7150,7 +7337,10 @@ class PlayerMobileFragment : Fragment() {
         //   sans setter (plus bas).
         val isOtfForLoadCtrl = args.id.startsWith("livehub::otf::") ||
             (currentServer?.id?.startsWith("livehub::otf::") == true)
-        val loadControl = if (isOtfForLoadCtrl) {
+        // 2026-10-04 MODE LÉGER : tampon réduit (~-120 Mo), sauf si « Buffering étendu » est activé.
+        val loadControl = com.streamflixreborn.streamflix.utils.TamponLeger.loadControl(
+            mini = false, extraBuffering = extraBuffering, rebufferMs = if (isLiveIptv) 500 else 1_500
+        ) ?: if (isOtfForLoadCtrl) {
             DefaultLoadControl()  // Strictement comme OTF TV V3.2 : aucun setter
         } else if (isLiveIptv) {
             // 2026-05-20 (parité PlayerTvFragment) : aligné sur les valeurs TV
@@ -7246,10 +7436,7 @@ class PlayerMobileFragment : Fragment() {
         CronetProviderInstaller.installProvider(requireContext())
             .addOnSuccessListener {
                 try {
-                    cronetEngine = CronetEngine.Builder(requireContext())
-                        .enableQuic(true)
-                        .enableHttp2(true)
-                        .build()
+                    cronetEngine = moteurCronet(context ?: return@addOnSuccessListener)
                     Log.d("PlayerNetwork", "Cronet engine pre-initialized: ${cronetEngine?.javaClass?.name}")
                 } catch (e: Exception) {
                     Log.e("PlayerNetwork", "Cronet engine build failed after provider install: ${e.message}")
@@ -7383,6 +7570,11 @@ class PlayerMobileFragment : Fragment() {
     //   qui bloquent l'hôte (ex. uqload strmN.uqload.is), Cronet (DNS système) reboucle
     //   en UnknownHost et le repli était écrasé par le re-pick de createHttpDataSourceFactory.
     private val dnsBlockedHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    // 2026-10-04 : hôtes de flux sur lesquels Cronet a échoué HORS DNS (ERR_SSL, RESET,
+    //   TIMED_OUT…). Le repli posait DefaultHttp, mais initializePlayer() rappelle
+    //   createHttpDataSourceFactory() qui re-choisissait Cronet → même erreur → reconstruction
+    //   d'ExoPlayer en boucle. Même principe et même durée de vie que dnsBlockedHosts.
+    private val cronetFailedHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private fun hostOf(url: String?): String? = runCatching { android.net.Uri.parse(url).host }.getOrNull()
 
     private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
@@ -7391,6 +7583,12 @@ class PlayerMobileFragment : Fragment() {
         if (vHost != null && dnsBlockedHosts.contains(vHost)) {
             Log.w("PlayerNetwork", "Forced DoT-OkHttp for DNS-blocked host $vHost")
             return createDoHOkHttpDataSourceFactory()
+        }
+        // 2026-10-04 : Cronet a déjà échoué (hors DNS) sur cet hôte → on garde DefaultHttp,
+        //   exactement le choix du repli dans onPlayerError, au lieu de reprendre Cronet.
+        if (vHost != null && cronetFailedHosts.contains(vHost) && needsCronet(videoUrl)) {
+            Log.w("PlayerNetwork", "Cronet déjà en échec sur $vHost → DefaultHttp")
+            return createDefaultHttpDataSourceFactory()
         }
         if (!needsCronet(videoUrl)) {
             if (needsDoH(videoUrl)) {
@@ -7422,16 +7620,7 @@ class PlayerMobileFragment : Fragment() {
         }
 
         // Use pre-initialized engine from Play Services, or build one on-demand
-        val engine = cronetEngine ?: try {
-            Log.d("PlayerNetwork", "Cronet engine not pre-initialized, building on demand...")
-            CronetEngine.Builder(requireContext())
-                .enableQuic(true)
-                .enableHttp2(true)
-                .build()
-        } catch (e: Exception) {
-            Log.e("PlayerNetwork", "Cronet completely unavailable: ${e.message}", e)
-            null
-        }
+        val engine = cronetEngine ?: moteurCronet(requireContext())?.also { cronetEngine = it }
 
         if (engine == null) {
             Log.w("PlayerNetwork", "No Cronet engine available, falling back to OkHttp")
@@ -7475,140 +7664,8 @@ class PlayerMobileFragment : Fragment() {
         usingDoH = true
         usingBrowserOkHttp = false
 
-        val jsonDohDns = object : okhttp3.Dns {
-            private val fallback = DnsResolver.doh
-            private val dnsClient = OkHttpClient.Builder()
-                .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-                .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .build()
-
-            /** Multiple DoH providers — different providers may return different IPs */
-            private val dohProviders = listOf(
-                "https://cloudflare-dns.com/dns-query",
-                "https://dns.google/resolve",
-                "https://dns.quad9.net:5053/dns-query"
-            )
-
-            /** Query a DoH provider and return all A record IPs + any CNAME targets found */
-            private fun queryDoH(provider: String, name: String): Pair<List<String>, List<String>> {
-                val request = okhttp3.Request.Builder()
-                    .url("$provider?name=$name&type=A")
-                    .header("Accept", "application/dns-json")
-                    .build()
-                val body = dnsClient.newCall(request).execute().use { it.body?.string() }
-                    ?: return Pair(emptyList(), emptyList())
-
-                val json = org.json.JSONObject(body)
-                val answers = json.optJSONArray("Answer")
-                    ?: return Pair(emptyList(), emptyList())
-
-                val ips = mutableListOf<String>()
-                val cnames = mutableListOf<String>()
-                for (i in 0 until answers.length()) {
-                    val answer = answers.getJSONObject(i)
-                    when (answer.optInt("type")) {
-                        1 -> ips.add(answer.optString("data"))   // A record
-                        5 -> cnames.add(answer.optString("data").trimEnd('.')) // CNAME
-                    }
-                }
-                return Pair(ips, cnames)
-            }
-
-            override fun lookup(hostname: String): List<java.net.InetAddress> {
-                if (!hostname.contains("cfglobalcdn.com", ignoreCase = true)) {
-                    return fallback.lookup(hostname)
-                }
-                Log.d("PlayerNetwork", "Multi-DoH lookup for: $hostname")
-                try {
-                    val allIps = linkedSetOf<String>() // preserve order, no duplicates
-                    var cnameTarget: String? = null
-
-                    // Phase 1: query all DoH providers for the cfglobalcdn hostname
-                    for (provider in dohProviders) {
-                        try {
-                            val (ips, cnames) = queryDoH(provider, hostname)
-                            Log.d("PlayerNetwork", "DoH ($provider): IPs=$ips, CNAMEs=$cnames")
-                            allIps.addAll(ips)
-                            if (cnames.isNotEmpty() && cnameTarget == null) {
-                                cnameTarget = cnames.first()
-                            }
-                        } catch (e: Exception) {
-                            Log.w("PlayerNetwork", "DoH provider $provider failed: ${e.message}")
-                        }
-                    }
-
-                    // Phase 2: if CNAME found, also resolve CNAME target directly
-                    // (might give different IPs than the flattened chain)
-                    if (cnameTarget != null) {
-                        Log.d("PlayerNetwork", "CNAME chain: $hostname → $cnameTarget, resolving target...")
-                        for (provider in dohProviders) {
-                            try {
-                                val (ips, _) = queryDoH(provider, cnameTarget!!)
-                                if (ips.isNotEmpty()) {
-                                    Log.d("PlayerNetwork", "CNAME target $cnameTarget via $provider: $ips")
-                                    allIps.addAll(ips)
-                                }
-                            } catch (_: Exception) {}
-                        }
-                    }
-
-                    if (allIps.isEmpty()) throw Exception("No IPs from any DoH provider")
-                    Log.d("PlayerNetwork", "All candidate IPs for $hostname: $allIps")
-
-                    // Phase 3: TCP pre-check all unique IPs
-                    val reachable = mutableListOf<java.net.InetAddress>()
-                    val unreachable = mutableListOf<java.net.InetAddress>()
-                    for (ipStr in allIps) {
-                        val ip = java.net.InetAddress.getByName(ipStr)
-                        try {
-                            val socket = java.net.Socket()
-                            socket.connect(java.net.InetSocketAddress(ip, 443), 3000)
-                            socket.close()
-                            Log.d("PlayerNetwork", "TCP OK: $hostname → ${ip.hostAddress}:443")
-                            reachable.add(ip)
-                            break // one reachable is enough
-                        } catch (e: Exception) {
-                            Log.w("PlayerNetwork", "TCP FAIL: $hostname → ${ip.hostAddress}:443")
-                            unreachable.add(ip)
-                        }
-                    }
-
-                    val ordered = reachable + unreachable
-                    if (reachable.isEmpty()) {
-                        Log.w("PlayerNetwork", "ALL ${allIps.size} IPs blocked for $hostname")
-                    }
-                    return ordered
-                } catch (e: Exception) {
-                    Log.w("PlayerNetwork", "Multi-DoH failed for $hostname: ${e.message}, trying wire DoH")
-                    return fallback.lookup(hostname)
-                }
-            }
-        }
-
-        // 2026-07-30 : trust TLS permissif (voir PlayerTvFragment) — les CDN Vidmoly
-        //   (vmwesa.online / acek-cdn.com) présentent un cert que les vieux appareils
-        //   ne reconnaissent pas (ERR_CERT_AUTHORITY_INVALID). Ce client ne sert qu'au
-        //   streaming de ces CDN → on accepte tout cert pour être indépendant du CA store.
-        val trustAllPlayback = arrayOf<javax.net.ssl.TrustManager>(
-            object : javax.net.ssl.X509TrustManager {
-                override fun checkClientTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {}
-                override fun checkServerTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {}
-                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-            }
-        )
-        val sslPlaybackCtx = javax.net.ssl.SSLContext.getInstance("TLS")
-            .apply { init(null, trustAllPlayback, java.security.SecureRandom()) }
-        val dohClient = OkHttpClient.Builder()
-            .dns(jsonDohDns)
-            .sslSocketFactory(sslPlaybackCtx.socketFactory, trustAllPlayback[0] as javax.net.ssl.X509TrustManager)
-            .hostnameVerifier { _, _ -> true }
-            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .build()
+        // 2026-10-04 : client partagé (companion), cf. clientDoHLecture.
+        val dohClient = clientDoHLecture
         Log.d("PlayerNetwork", "Using OkHttpDataSource with Multi-DoH (cfglobalcdn resolution) + trust-all TLS")
         return OkHttpDataSource.Factory(dohClient)
             .setUserAgent(NetworkClient.USER_AGENT)
@@ -7773,6 +7830,8 @@ class PlayerMobileFragment : Fragment() {
      *  éviter un re-init du player. Quand le flux live s'épuise (STATE_ENDED)
      *  ou se déconnecte (STATE_IDLE), on re-prepare() pour re-fetch l'URL. */
     private fun attachTransferRecoveryListener() {
+        // 2026-10-04 (parité TV) : retirer l'écouteur précédent éventuel avant d'ajouter celui-ci.
+        activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
         val recoveryListener = object : androidx.media3.common.Player.Listener {
             private val estClipVodTransfert: Boolean
                 get() = args.id.startsWith("livehub::rutube::") ||
@@ -7891,6 +7950,10 @@ class PlayerMobileFragment : Fragment() {
             }
         }
         try { player.addListener(recoveryListener) } catch (_: Exception) {}
+        // 2026-10-04 (parité TV) : mémorisé comme écouteur actif → displayVideo() (bascule de
+        //   serveur) et releasePlayer() le retirent, au lieu de le laisser réagir en double
+        //   (prepare() du même flux) à côté de l'écouteur complet.
+        activePlayerListener = recoveryListener
     }
 
     private fun initializePlayer(extraBuffering: Boolean, softwareDecoder: Boolean = currentSoftwareDecoder, videoUrl: String = "") {
@@ -8345,7 +8408,7 @@ class PlayerMobileFragment : Fragment() {
         //   l'overlay plein écran sur la racine.
         // 2026-07-17 : abyss = mode MIROIR (contrôles natifs play/pause/seek qui pilotent la WebView,
         //   fonctionne à la télécommande sur TV). + interception → bascule native si abyss mint l'URL.
-        val webViewIsPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") || embedUrl.contains("abyss") || embedUrl.contains("4meplayer") || embedUrl.contains("swiftflow") || embedUrl.contains("upbolt") || embedUrl.contains("embed4me")
+        val webViewIsPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") || embedUrl.contains("abyss") || embedUrl.contains("4meplayer") || embedUrl.contains("swiftflow") || embedUrl.contains("blinkflux") || embedUrl.contains("upbolt") || embedUrl.contains("embed4me")
         val nativeVideoOverlay = binding.pvPlayer.overlayFrameLayout
         val useNativeControls = webViewIsPlayer && nativeVideoOverlay != null
         val rootView: ViewGroup = if (useNativeControls) nativeVideoOverlay!! else binding.root as ViewGroup
@@ -8404,7 +8467,7 @@ class PlayerMobileFragment : Fragment() {
         // 2026-07-16 : SwiftFlow (swiftflow.lol) — player Movix Plyr à ad-gide (« Regarder
         //   maintenant »). Même famille de traitement que seekplayer (nav-block, ad-block,
         //   overlay lecteur), mais avec son propre JS d'auto-clic sur l'ad-gate.
-        val isSwiftFlow = embedUrl.contains("swiftflow")
+        val isSwiftFlow = embedUrl.contains("swiftflow") || embedUrl.contains("blinkflux") // 2026-10-04 : nouveau domaine
         // 2026-07-27 : upbolt (upbolt.to/e/<id>) — CDN edge0X.upbolt.to protégé DDoS-Guard,
         //   inextractible (403 en natif). On le JOUE dans l'overlay WebView comme abyss/seekplayer :
         //   nav top-level hors upbolt bloquée (tue la redirection /dl + les pop pub), pubs coupées,
@@ -8467,7 +8530,7 @@ class PlayerMobileFragment : Fragment() {
                 //   Toute autre navigation = redirect pub de l'ad-gate → bloquée.
                 if (isSwiftFlow) {
                     val nh = request?.url?.host ?: return false
-                    if (!nh.contains("swiftflow.")) { Log.d("PlayerMobile", "SwiftFlow NAV BLOCKED: $nh"); return true }
+                    if (!nh.contains("swiftflow.") && !nh.contains("blinkflux.")) { Log.d("PlayerMobile", "SwiftFlow NAV BLOCKED: $nh"); return true }
                     return false
                 }
                 // upbolt : seule la page upbolt.to doit naviguer top-level. Le clic play tente de
@@ -8762,7 +8825,10 @@ class PlayerMobileFragment : Fragment() {
             // SwiftFlow : chargement DIRECT du player swiftflow.lol (le Plyr joue dedans après
             //   auto-clic de l'ad-gate). Referer swiftflow.lol pour le signing cheksum/citron.
             Log.d("PlayerMobile", "Loading SwiftFlow directly: ${embedUrl.take(100)}")
-            wv.loadUrl(embedUrl, mapOf("Referer" to "https://swiftflow.lol/"))
+            // 2026-10-04 : Referer = l'origine RÉELLE du lecteur (swiftflow.lol ou blinkflux.lol).
+            val origineSf = runCatching { android.net.Uri.parse(embedUrl).let { "${it.scheme}://${it.host}/" } }
+                .getOrDefault("https://swiftflow.lol/")
+            wv.loadUrl(embedUrl, mapOf("Referer" to origineSf))
         } else if (isUpbolt) {
             // upbolt : chargement DIRECT de l'embed (le player du site joue dedans après auto-clic
             //   #vid_play). Referer onregardeou.site = contexte attendu par l'embed (ub_ext_host).

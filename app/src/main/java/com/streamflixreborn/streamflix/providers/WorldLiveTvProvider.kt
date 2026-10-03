@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -871,11 +872,11 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                     val extinf = pendingExtinf
                     if (extinf != null) {
                         val name = extinf.substringAfterLast(",").trim()
-                        val logo = Regex("""tvg-logo="([^"]+)"""").find(extinf)?.groupValues?.get(1)
-                        val groupTitle = Regex("""group-title="([^"]+)"""").find(extinf)
+                        val logo = M3U_TVG_LOGO.find(extinf)?.groupValues?.get(1)
+                        val groupTitle = M3U_GROUP_TITLE.find(extinf)
                             ?.groupValues?.get(1) ?: g.name
-                        val tvgLanguage = Regex("""tvg-language="([^"]+)"""").find(extinf)?.groupValues?.get(1)
-                        val tvgId = Regex("""tvg-id="([^"]*)"""").find(extinf)?.groupValues?.get(1)
+                        val tvgLanguage = M3U_TVG_LANGUAGE.find(extinf)?.groupValues?.get(1)
+                        val tvgId = M3U_TVG_ID.find(extinf)?.groupValues?.get(1)
                         val chSlug = slugify(name)
 
                         // 2026-06-15 : si tvg-id présent ET (tvg-id, group-title)
@@ -1498,9 +1499,17 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         return null
     }
 
+    // 2026-10-04 : Regex compilées une seule fois (slugify et le parseur M3U sont appelés
+    //   pour CHAQUE chaîne — plus d'un millier sur un panel Xtream). Motifs inchangés.
+    private val SLUG_NON_ALNUM = Regex("[^a-z0-9]+")
+    private val M3U_TVG_LOGO = Regex("""tvg-logo="([^"]+)"""")
+    private val M3U_GROUP_TITLE = Regex("""group-title="([^"]+)"""")
+    private val M3U_TVG_LANGUAGE = Regex("""tvg-language="([^"]+)"""")
+    private val M3U_TVG_ID = Regex("""tvg-id="([^"]*)"""")
+
     private fun slugify(s: String): String {
         return s.lowercase().trim()
-            .replace(Regex("[^a-z0-9]+"), "_")
+            .replace(SLUG_NON_ALNUM, "_")
             .trim('_')
             .ifEmpty { "x" }
     }
@@ -2066,7 +2075,20 @@ object WorldLiveTvProvider : Provider, IptvProvider {
     //   Live (getServers/getVideo), que channelById sait retrouver via [iptvWebFr].
     @Volatile private var iptvWebFr: List<WlChannel> = emptyList()
     @Volatile private var iptvWebFrTs = 0L
+    // 2026-10-04 : un seul chargement du panel « IPTV du web » à la fois — un 2e appel
+    //   simultané attend et réutilise la liste chargée par le 1er.
+    private val iptvWebFrMutex = kotlinx.coroutines.sync.Mutex()
     private const val IPTV_WEB_FR_TTL_MS = 6 * 60 * 60 * 1000L
+    // 2026-10-04 : cache négatif — si le dernier chargement n'a donné AUCUNE chaîne FR
+    //   (panel injoignable ou vide), on ne retélécharge pas tout le panel à chaque appel :
+    //   on attend 10 min avant de réessayer (la liste précédente, s'il y en a une, reste servie).
+    @Volatile private var iptvWebFrVideTs = 0L
+    private const val IPTV_WEB_FR_VIDE_TTL_MS = 10 * 60 * 1000L
+    private fun iptvWebFrARecharger(): Boolean {
+        val t = System.currentTimeMillis()
+        return (iptvWebFr.isEmpty() || t - iptvWebFrTs > IPTV_WEB_FR_TTL_MS) &&
+            t - iptvWebFrVideTs > IPTV_WEB_FR_VIDE_TTL_MS
+    }
     private val MARQUEUR_FR = Regex("""(^|[^A-Z])(FR|FRANCE|FRENCH|FRANÇAIS|FRANCAIS)([^A-Z]|$)""")
 
     private fun estChaineFr(categorie: String, nom: String): Boolean {
@@ -2088,7 +2110,10 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         val url = WorldLiveSourcesStore.BUILTIN_SOURCES
             .firstOrNull { it.name == "IPTV du web" }?.url ?: return@withContext emptyList()
         val maintenant = System.currentTimeMillis()
-        if (iptvWebFr.isEmpty() || maintenant - iptvWebFrTs > IPTV_WEB_FR_TTL_MS) {
+        if (iptvWebFrARecharger()) iptvWebFrMutex.withLock {
+        // 2026-10-04 : re-vérification sous verrou (un appel concurrent a pu remplir la liste
+        //   ou constater un résultat vide).
+        if (iptvWebFrARecharger()) {
             val tout = try {
                 fetchXtreamChannels(WlGroup(name = "IPTV du web", image = null, url = url))
             } catch (t: Throwable) {
@@ -2099,7 +2124,9 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 estChaineFr(it.groupName, it.name) && !estPubContact(it.name) && !estPubContact(it.groupName)
             }
             Log.d(TAG, "IPTV du web (FR) : ${fr.size} chaînes FR sur ${tout.size}")
-            if (fr.isNotEmpty()) { iptvWebFr = fr; iptvWebFrTs = maintenant }
+            if (fr.isNotEmpty()) { iptvWebFr = fr; iptvWebFrTs = maintenant; iptvWebFrVideTs = 0L }
+            else iptvWebFrVideTs = System.currentTimeMillis()
+        }
         }
         iptvWebFr.groupBy { it.groupName }.map { (cat, liste) ->
             Category(

@@ -180,7 +180,7 @@ class SplashActivity : Activity() {
         }
         // Auto-détection : TV si leanback, sinon mobile.
         val cls = try {
-            if (packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK))
+            if (com.streamflixreborn.streamflix.utils.DetectionTv.interfaceTv(this))
                 MainTvActivity::class.java else MainMobileActivity::class.java
         } catch (_: Throwable) { MainMobileActivity::class.java }
         route(logo, cls)

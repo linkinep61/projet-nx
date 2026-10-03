@@ -306,6 +306,18 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                 .replaceFirstChar { it.uppercase() }
         } catch (_: Exception) { "Server" }
 
+    /** 2026-10-04 — Numéro de saison écrit dans un titre : « Season 3 », « Saison 2 », ou un
+     *  petit nombre final (« Taxi Driver 2 », « Hospital Playlist 2 »), une éventuelle année
+     *  entre parenthèses retirée d'abord. Les nombres de 3-4 chiffres (« Reply 1988 ») ne
+     *  comptent pas. @return null si aucun numéro (= saison 1 pour l'appelant). */
+    private fun saisonDansTitre(titre: String): Int? {
+        val t = titre.replace(Regex("""\s*\(\d{4}\)\s*"""), " ").trim()
+        Regex("""(?i)\b(?:season|saison|s)\s*(\d{1,2})\b""").find(t)
+            ?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        return Regex("""\s(\d{1,2})$""").find(t)?.groupValues?.get(1)?.toIntOrNull()
+            ?.takeIf { it in 1..20 }
+    }
+
     /** Cherche le show sur Dramacool par titre, et si trouvé fetch les
      *  servers de l'épisode demandé. Utilisé pour ENRICHIR les servers
      *  VoirDrama natifs (au cas où ceux-ci sont morts/lents).
@@ -332,6 +344,10 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                 .replace(Regex("""\s+"""), " ")
                 .trim()
             val targetWords = normalize(cleanTitle).split(" ").filter { it.length >= 3 }.toSet()
+            // 2026-10-04 : saison demandée — d'abord le numéro ÉCRIT dans le titre (« Taxi
+            //   Driver 2 » est une fiche à part chez VoirDrama, dont la « saison » vaut 1),
+            //   sinon le paramètre, sinon 1.
+            val saisonCible = saisonDansTitre(cleanTitle) ?: seasonNumber?.takeIf { it > 0 } ?: 1
             val targetNorm = normalize(cleanTitle)
             val candidates = searchOnDramacool(cleanTitle)
 
@@ -355,6 +371,24 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                 //   AVEC ≥2 mots. Année/saison seules ne suffisent pas → score forcé à 0.
                 val exact = dcNorm == targetNorm
                 val wordsCovered = targetWords.size >= 2 && dcWords.containsAll(targetWords)
+                // 2026-10-04 (user : « encore un mauvais match ») — CONTRÔLE DE SAISON.
+                //   « Taxi Driver 2 » (VoirDrama) retenait « Taxi Driver Season 3 (2025) » : le
+                //   « 2 » n'était pas lu comme une saison, et Dramacool n'a PAS la saison 2
+                //   (seulement 2021 et Season 3). Résultat : l'épisode 1 de la saison 3 servi
+                //   pour la saison 2. Règle : saison demandée (paramètre, « Season/Saison N »,
+                //   ou petit nombre final « … 2 ») = saison du résultat (« Season N », sinon 1).
+                //   Différentes → écarté. Mieux vaut aucun serveur que le mauvais épisode.
+                // 2026-10-04 : même contrôle pour l'ANNÉE (remakes / homonymes), à ±1 an.
+                val anneeDc = Regex("""\((\d{4})\)""").find(dc.title)?.groupValues?.get(1)?.toIntOrNull()
+                if (year != null && anneeDc != null && kotlin.math.abs(anneeDc - year) > 1) {
+                    Log.d("VoirDramaProvider", "DC enrich: '${dc.title}' écarté — année $anneeDc ≠ $year")
+                    return@map Scored(dc, 0)
+                }
+                val saisonDc = saisonDansTitre(dc.title) ?: 1
+                if (saisonDc != saisonCible) {
+                    Log.d("VoirDramaProvider", "DC enrich: '${dc.title}' écarté — saison $saisonDc ≠ $saisonCible demandée")
+                    return@map Scored(dc, 0)
+                }
                 var score = 0
                 if (exact) score += 100
                 if (wordsCovered) score += 50
@@ -931,7 +965,45 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
         val seasonNumber: Int?,
         val episodeNumber: Int,
         val nativeSrcs: Set<String>,
+        /** 2026-10-04 : slug de la FICHE (`taxi-driver-2` pour l'épisode `taxi-driver-2/…`). */
+        val slugFiche: String? = null,
     )
+
+    /** 2026-10-04 — Titre anglais + année de début lus sur la fiche VoirDrama. */
+    private data class InfosFiche(val titreAnglais: String?, val anneeDebut: Int?)
+    private val infosFicheCache = java.util.concurrent.ConcurrentHashMap<String, InfosFiche>()
+
+    /**
+     * 2026-10-04 (user : « Dramacool fonctionne, mais on loupe pas mal de choses à cause de la
+     *   recherche ») — Dramacool nomme ses dramas en ANGLAIS, avec l'année : « Taxi Driver
+     *   Season 3 (2025) ». On cherchait avec le titre VoirDrama (« Taxi Driver 2 »), sans année.
+     *   Or la fiche VoirDrama donne justement « English : Taxi Driver Season 2 » et
+     *   « Start date : Feb 17, 2023 ». Lu une fois par fiche, gardé en mémoire.
+     */
+    private suspend fun infosFiche(slug: String): InfosFiche {
+        infosFicheCache[slug]?.let { return it }
+        val infos = try {
+            val doc = service.getPage("${baseUrl}drama/$slug/")
+            var anglais: String? = null
+            var annee: Int? = null
+            doc.select(".post-content_item").forEach { item ->
+                val titre = item.selectFirst(".summary-heading")?.text()?.trim().orEmpty()
+                val valeur = item.selectFirst(".summary-content")?.text()?.trim().orEmpty()
+                when {
+                    titre.equals("English", true) && valeur.isNotBlank() -> anglais = valeur
+                    titre.startsWith("Start", true) ->
+                        annee = Regex("""\b(19|20)\d{2}\b""").find(valeur)?.value?.toIntOrNull()
+                }
+            }
+            InfosFiche(anglais, annee)
+        } catch (e: Exception) {
+            Log.w("VoirDramaProvider", "infos fiche '$slug' : ${e.message}")
+            InfosFiche(null, null)
+        }
+        if (infosFicheCache.size > 200) infosFicheCache.clear()
+        infosFicheCache[slug] = infos
+        return infos
+    }
 
     /** Serveurs NATIFS VoirDrama (parse JS `LECTEUR` + iframes DOM, triés par
      *  fiabilité d'hôte) + contexte (titre nettoyé, année, saison/épisode). */
@@ -1007,13 +1079,28 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
             val host = try { java.net.URL(server.src).host.lowercase() } catch (_: Exception) { "" }
             priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
         }
-        return voirDramaSorted to VdCtx(showTitle, year, seasonNumber, episodeNumber, voirDramaSorted.map { it.src }.toHashSet())
+        val slugFiche = id.removePrefix(baseUrl).removePrefix("drama/").trim('/').substringBefore('/')
+            .takeIf { it.isNotBlank() && !it.startsWith("http") }
+        return voirDramaSorted to VdCtx(showTitle, year, seasonNumber, episodeNumber, voirDramaSorted.map { it.src }.toHashSet(), slugFiche)
     }
 
     /** Enrichissement Dramacool par titre (le caller dédup contre nativeSrcs). */
     private suspend fun fetchVdDramacoolEnrich(ctx: VdCtx): List<Video.Server> {
         if (ctx.showTitle.isNullOrBlank()) return emptyList()
-        return try { fetchDramacoolServersByTitle(ctx.showTitle, ctx.episodeNumber, ctx.year, ctx.seasonNumber) }
+        return try {
+            // 2026-10-04 : d'abord le titre ANGLAIS de la fiche (nommage Dramacool) avec l'année
+            //   de début, puis le titre VoirDrama en second essai s'il diffère.
+            val infos = ctx.slugFiche?.let { infosFiche(it) }
+            val annee = ctx.year ?: infos?.anneeDebut
+            val titres = listOfNotNull(infos?.titreAnglais, ctx.showTitle)
+                .map { it.trim() }.filter { it.isNotBlank() }
+                .distinctBy { it.lowercase() }
+            for (t in titres) {
+                val res = fetchDramacoolServersByTitle(t, ctx.episodeNumber, annee, ctx.seasonNumber)
+                if (res.isNotEmpty()) return res
+            }
+            emptyList()
+        }
         catch (_: Exception) { emptyList() }
     }
 

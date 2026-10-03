@@ -74,6 +74,23 @@ class HomeMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-10-04 (bug du mini-lecteur « tout en longueur sur la droite » en portrait) :
+        //   dès que l'écran change de forme (portrait ↔ paysage), on réapplique la géométrie du
+        //   mini-lecteur d'après la taille réelle — quelle que soit la cause de la rotation
+        //   (dossier ou clavier ouvert, retour du grand lecteur…). Avant, seuls certains
+        //   chemins la réappliquaient, et la géométrie paysage pouvait rester en portrait.
+        view.addOnLayoutChangeListener { v, gauche, haut, droite, bas, aGauche, aHaut, aDroite, aBas ->
+            val l = droite - gauche; val h = bas - haut
+            val al = aDroite - aGauche; val ah = aBas - aHaut
+            if (l > 0 && h > 0 && al > 0 && ah > 0 && (l > h) != (al > ah)) {
+                v.post {
+                    if (_binding != null && isAdded) {
+                        try { updateMiniPlayerLayout(orientationReelle(resources.configuration.orientation)) } catch (_: Throwable) {}
+                    }
+                }
+            }
+        }
+
         // Garde : si aucun provider sélectionné (cold start, restauration fragment),
         // revenir au picker au lieu de crasher sur AppDatabase.getInstance().
         if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider == null) {
@@ -186,6 +203,10 @@ class HomeMobileFragment : Fragment() {
         // Don't clear onIptvChannelClick — the new fragment's onViewCreated sets it,
         // but this onDestroyView can fire AFTER, causing a race condition.
         // Don't release the player — it survives view recreation (e.g. rotation)
+        // Débranche la liste : sinon l'adaptateur (gardé par le fragment) retient l'ancienne vue à chaque aller-retour.
+        // swapAdapter(null, false) et PAS adapter = null : ce dernier recycle les cartes visibles, ce qui
+        // annule leurs jaquettes (cartes noires au retour sur l'accueil).
+        binding.rvHome.swapAdapter(null, false)
         _binding = null
     }
 
@@ -551,7 +572,10 @@ class HomeMobileFragment : Fragment() {
                             )
                         }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
-                        updateMiniPlayerLayout(resources.configuration.orientation)
+                        // 2026-10-04 : orientation lue sur la taille RÉELLE de l'écran — la config
+                        //   peut retarder (rotation pendant un dossier/clavier ouvert) et laissait la
+                        //   géométrie paysage (1/3 à droite) en portrait.
+                        updateMiniPlayerLayout(orientationReelle(resources.configuration.orientation))
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
@@ -564,7 +588,10 @@ class HomeMobileFragment : Fragment() {
                             )
                         }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
-                        updateMiniPlayerLayout(resources.configuration.orientation)
+                        // 2026-10-04 : orientation lue sur la taille RÉELLE de l'écran — la config
+                        //   peut retarder (rotation pendant un dossier/clavier ouvert) et laissait la
+                        //   géométrie paysage (1/3 à droite) en portrait.
+                        updateMiniPlayerLayout(orientationReelle(resources.configuration.orientation))
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()

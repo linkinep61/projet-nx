@@ -209,14 +209,17 @@ class StreamFlixApp : Application() {
         // 2026-09-27 : session mobile NetMirror préparée au démarrage (≈1 min en arrière-plan,
         //   une fois toutes les ~11 h) → la 1re lecture NetMirror n'attend pas. 10 s de délai pour
         //   laisser les préférences s'initialiser et ne pas concurrencer le démarrage.
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+        //   2026-10-04 : en arrière-plan (avant : sur le thread de l'écran, où la lecture de
+        //   currentProvider pouvait charger toutes les sources). Même délai, même condition.
+        applicationScope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(10_000L)
             runCatching {
                 if (com.streamflixreborn.streamflix.utils.UserPreferences.isBackupSourceEnabled("NetMirror") ||
                     com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name == "NetMirror") {
                     com.streamflixreborn.streamflix.providers.NetMirrorProvider.prechaufferSessionMobile()
                 }
             }
-        }, 10_000L)
+        }
         // 2026-08-27 (VPN global) : le ProxySelector doit être posé AVANT que
         //   le moindre OkHttpClient ne soit construit — OkHttp capture
         //   ProxySelector.getDefault() à la construction du client, pas à
@@ -273,10 +276,21 @@ class StreamFlixApp : Application() {
                 ).apply()
             }
             // Wipe INCONDITIONNEL
+            // 2026-10-04 : RENOMMER (instantané) puis supprimer en arrière-plan. Avant, la
+            //   suppression récursive (souvent des milliers de fichiers du cache Chromium) se
+            //   faisait ici, sur le thread de l'écran, sur la mémoire lente des box. Le résultat
+            //   est identique : Chromium repart d'un dossier vide. Repli : l'ancienne suppression.
+            val corbeille = java.io.File(applicationInfo.dataDir, "corbeille_webview").apply { mkdirs() }
+            fun viderPlusTard(dossier: java.io.File) {
+                if (!dossier.exists()) return
+                val cible = java.io.File(corbeille, dossier.name + "_" + System.nanoTime())
+                if (!dossier.renameTo(cible)) runCatching { dossier.deleteRecursively() }
+            }
             val wvDir = java.io.File(applicationInfo.dataDir, "app_webview")
-            val okWipe = runCatching { if (wvDir.exists()) wvDir.deleteRecursively() else true }
-                .getOrDefault(false)
-            runCatching { java.io.File(cacheDir, "WebView").deleteRecursively() }
+            runCatching { viderPlusTard(wvDir) }
+            runCatching { viderPlusTard(java.io.File(cacheDir, "WebView")) }
+            Thread({ runCatching { corbeille.listFiles()?.forEach { it.deleteRecursively() } } },
+                "VidageWebView").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
             // Éviction des connection pools au boot (connexions idle mortes du process
             //   précédent, si le process a été keep-alive au lieu de killed par le système)
             runCatching { com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool.evictAll() }
@@ -298,10 +312,27 @@ class StreamFlixApp : Application() {
         //   son <clinit> construit un OkHttpClient avec .dns(DnsResolver.doh), pas prêt si tôt →
         //   ExceptionInInitializerError = crash au lancement. On déporte sur IO, APRÈS un délai
         //   (DnsResolver stabilisé), sous try/catch (un throw d'init est rattrapé, jamais fatal).
+        // 2026-10-04 : préchargement CONDITIONNEL — seulement si OLA a servi dans les 7 derniers
+        //   jours (pref « ola_derniere_ouverture_ms », écrite par OlaTvProvider.ensureRegistry).
+        //   Sans horodatage (1er démarrage de cette version) : on précharge comme avant et on pose
+        //   l'horodatage maintenant → 7 jours de grâce ; si OLA n'est jamais ouvert entre-temps,
+        //   le préchargement s'arrête. OLA reste pleinement fonctionnel sans préchargement : il
+        //   charge live-cids lui-même à l'ouverture. Pref illisible → préchargement (comme avant).
         kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 kotlinx.coroutines.delay(8_000L)
-                com.streamflixreborn.streamflix.providers.OlaTvProvider.prefetchLiveCidsAtBoot()
+                val prechargerOla = try {
+                    val spOla = androidx.preference.PreferenceManager
+                        .getDefaultSharedPreferences(this@StreamFlixApp)
+                    val maintenant = System.currentTimeMillis()
+                    val derniere = spOla.getLong("ola_derniere_ouverture_ms", 0L)
+                    if (derniere <= 0L) {
+                        spOla.edit().putLong("ola_derniere_ouverture_ms", maintenant).apply()
+                        true
+                    } else maintenant - derniere < 7L * 24 * 60 * 60 * 1000L
+                } catch (_: Throwable) { true }
+                if (prechargerOla)
+                    com.streamflixreborn.streamflix.providers.OlaTvProvider.prefetchLiveCidsAtBoot()
             } catch (_: Throwable) {}
         }
 
@@ -365,7 +396,12 @@ class StreamFlixApp : Application() {
             while (true) {
                 try {
                     kotlinx.coroutines.delay(8L * 60L * 1000L) // toutes les 8 min
+                    // 2026-10-04 : app en arrière-plan (aucune activité visible) → on saute ce
+                    //   tour (pas de WebView/catalogue relancé pour rien) ; la boucle continue.
+                    if (visibleActivityCount <= 0) continue
+                    // 2026-10-03 : en mode léger, pas de WebView Cloudflare relancée en arrière-plan.
                     val onDessinAnime = try {
+                        !com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger &&
                         com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
                             com.streamflixreborn.streamflix.providers.DessinAnimeProvider
                     } catch (_: Throwable) { false }
@@ -639,7 +675,9 @@ class StreamFlixApp : Application() {
             //   = gaspillage RAM/CPU qui peut faire crash le process.
             //   Si TV Hub actif → warm en background (chauffe le cache pour
             //   ouverture instantanée). Sinon → on attend que l'user navigue.
+            // 2026-10-03 : en mode léger, aucun préchargement Replay/FAST au démarrage.
             val warmTvHub = try {
+                !com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger &&
                 com.streamflixreborn.streamflix.utils.UserPreferences
                     .currentProvider is com.streamflixreborn.streamflix.providers.LiveTvHubProvider
             } catch (_: Throwable) { false }

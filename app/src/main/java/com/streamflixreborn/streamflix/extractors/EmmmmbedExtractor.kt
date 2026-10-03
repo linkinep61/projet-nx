@@ -60,7 +60,10 @@ class EmmmmbedExtractor : Extractor() {
 
     override suspend fun extract(link: String): Video {
         Log.d(TAG, "extract($link)")
-        val mp4 = captureMp4InWebView(link, timeoutMs = 45_000L)
+        // 2026-10-04 : 45 s → 20 s. Mesuré sur Léon (Movix « Vidéo HD ») : quand ça marche, le
+        //   mp4 est capté en 6-7 s ; quand le passage Cloudflare n'aboutit pas, on attendait 45 s
+        //   pour rien avant le serveur suivant (et il est en tête de liste chez Movix).
+        val mp4 = captureMp4InWebView(link, timeoutMs = 20_000L)
             ?: throw Exception("Emmmmbed: failed to capture mp4 from $link")
         Log.d(TAG, "captured mp4=${mp4.take(80)}")
         return Video(

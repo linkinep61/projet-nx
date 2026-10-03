@@ -141,6 +141,9 @@ object ArtworkRepair {
             .getArtworkRepairCandidates()
             .distinctBy { it.id }
             .forEach { movie ->
+                // 2026-10-04 : la requête renvoie TOUS les favoris ; on ne refait l'appel
+                //   réseau que si la jaquette (poster + banner) n'est pas déjà utilisable.
+                if (isRemoteArtworkUrl(movie.poster) && isRemoteArtworkUrl(movie.banner)) return@forEach
                 repairMovie(context, provider, database, movie)
             }
 
@@ -148,6 +151,8 @@ object ArtworkRepair {
             .getArtworkRepairCandidates()
             .distinctBy { it.id }
             .forEach { tvShow ->
+                // 2026-10-04 : idem films — favori déjà complet = pas d'appel réseau.
+                if (isRemoteArtworkUrl(tvShow.poster) && isRemoteArtworkUrl(tvShow.banner)) return@forEach
                 repairTvShow(context, provider, database, tvShow)
             }
     }

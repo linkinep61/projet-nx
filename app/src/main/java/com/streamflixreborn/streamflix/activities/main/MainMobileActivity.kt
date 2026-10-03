@@ -208,10 +208,7 @@ class MainMobileActivity : FragmentActivity() {
             supportFragmentManager.findFragmentById(R.id.nav_main_fragment) as NavHostFragment
         val navController = navHost.navController
 
-        if (BuildConfig.APP_LAYOUT == "tv" ||
-            (BuildConfig.APP_LAYOUT != "mobile" &&
-                packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK))
-        ) {
+        if (com.streamflixreborn.streamflix.utils.DetectionTv.interfaceTv(this)) {
             finish()
             startActivity(Intent(this, MainTvActivity::class.java))
             return
@@ -485,6 +482,9 @@ class MainMobileActivity : FragmentActivity() {
             }
             com.streamflixreborn.streamflix.utils.MiniPlayerController.isProviderSwitching = false
         }
+        // Le réservoir de cartes est statique : sans ce vidage, il gardait des cartes créées
+        //   avec cette Activity (donc l'Activity entière) après un changement de source.
+        runCatching { com.streamflixreborn.streamflix.adapters.viewholders.CategoryViewHolder.sharedPool.clear() }
         dismissUpdateDialog()
         _binding = null
         super.onDestroy()
@@ -1013,5 +1013,27 @@ class MainMobileActivity : FragmentActivity() {
         try {
             navController.navigate(R.id.home)
         } catch (_: Throwable) {}
+    }
+
+    // 2026-10-04 : 1re action à la télécommande (aucun appui au doigt) sur l'interface mobile
+    //   d'un build universel → proposer l'interface TV. Voir DetectionTv.proposerInterfaceTv.
+    private var toucheDoigtVue = false
+    private var questionTvPosee = false
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        toucheDoigtVue = true
+        return super.dispatchTouchEvent(ev)
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (!toucheDoigtVue && !questionTvPosee && event.action == android.view.KeyEvent.ACTION_DOWN &&
+            com.streamflixreborn.streamflix.utils.DetectionTv.estToucheTelecommande(event.keyCode) &&
+            com.streamflixreborn.streamflix.utils.DetectionTv.peutProposerTv(this)
+        ) {
+            questionTvPosee = true
+            com.streamflixreborn.streamflix.utils.DetectionTv.proposerInterfaceTv(this)
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 }

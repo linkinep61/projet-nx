@@ -238,6 +238,27 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         return attendus.any { it == declare }
     }
 
+    /**
+     * 2026-10-04 — La fiche Wiflix/CineStream servie par Movix est-elle bien l'œuvre demandée ?
+     *   `wiflix_url` = `…/film/leon-1994` ou `…/saison-complete/16333-game-of-thrones-saison-1…`.
+     *   On isole le nom dans le slug (sans l'id, l'année, « saison N », « complete »…) et on exige
+     *   l'ÉGALITÉ avec un titre connu (leçon Twilight Zone / Star Trek : jamais de « contains »).
+     *   Fail-open : slug absent ou illisible → on garde (on ne supprime que sur contradiction).
+     */
+    private fun slugWiflixCorrespond(url: String?, titresConnus: List<String?>): Boolean {
+        if (url.isNullOrBlank()) return true
+        val fichier = url.substringBefore('?').trimEnd('/').substringAfterLast('/')
+            .removeSuffix(".html").replaceFirst(Regex("^\\d+-"), "")
+        val mots = Regex("(?i)\\b(saison|season|complete|integrale|film|serie)\\b")
+        fun net(s: String) = mots.replace(MARQUEURS_SLUG.replace(normTitre(s), " "), " ")
+            .replace(Regex("\\s+"), " ").trim()
+        val declare = net(fichier.replace('-', ' '))
+        if (declare.isBlank()) return true
+        val attendus = titresConnus.filterNotNull().map { net(it) }.filter { it.isNotBlank() }.distinct()
+        if (attendus.isEmpty()) return true
+        return attendus.any { it == declare }
+    }
+
     private const val TMDB_API_KEY = "f3d757824f08ea2cff45eb8f47ca3a1e"
     private const val TMDB_BASE_URL = "https://api.themoviedb.org/3/"
     private const val TMDB_IMG_W500 = "https://image.tmdb.org/t/p/w500"
@@ -846,14 +867,34 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
 
     data class WiflixTvResponse(
         val success: Boolean?,
-        val episodes: Map<String, Map<String, List<WiflixEpisodeSource>>>?
+        val episodes: Map<String, Map<String, List<WiflixEpisodeSource>>>?,
+        // 2026-10-04 : fiche réellement servie (contrôle d'identité, cf. slugWiflixCorrespond).
+        val wiflix_url: String? = null,
+        val title: String? = null,
+        val original_title: String? = null,
     )
 
     data class WiflixMovieResponse(
         val success: Boolean?,
         val players: Map<String, List<WiflixEpisodeSource>>?,
         val error: String?,
-        val message: String?
+        val message: String?,
+        val wiflix_url: String? = null,
+        val title: String? = null,
+        val original_title: String? = null,
+    )
+
+    // 2026-10-04 — endpoint `api/imdb/movie/{imdbId}` (groupe « Lecteurs Omega » du site :
+    //   Dropload, Mixdrop, Doodstream via frenchcloud.cam). Recherché par identifiant IMDb.
+    data class ImdbMovixLink(
+        val player: String? = null,
+        val link: String? = null,
+        val is_hd: Boolean? = null,
+    )
+
+    data class ImdbMovixResponse(
+        val iframe_src: String? = null,
+        val player_links: List<ImdbMovixLink>? = null,
     )
 
     // --- Cpasmal API responses ---
@@ -945,6 +986,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val vote_average: Double?,
         val runtime: Int?,
         val imdb_id: String?,
+        val original_title: String? = null,
         val genres: List<TmdbGenre>?,
         val credits: TmdbCredits?
     )
@@ -1281,11 +1323,15 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             // ════════════════════════════════════════════════════════════════
             val limiteSortie = java.util.Calendar.getInstance()
                 .apply { add(java.util.Calendar.DAY_OF_YEAR, -7) }.time
-            val formatTmdb = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+            // 2026-10-04 : un formateur PAR APPEL. SimpleDateFormat n'est pas sûr entre threads,
+            //   or `dejaSorti` est appelé par plusieurs rangées qui tournent en même temps
+            //   (genres, et désormais aussi les rangées du haut). Même format, même résultat.
             fun dejaSorti(date: String?): Boolean {
                 if (date.isNullOrBlank()) return true
-                return runCatching { formatTmdb.parse(date)?.before(limiteSortie) ?: true }
-                    .getOrDefault(true)
+                return runCatching {
+                    java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                        .parse(date)?.before(limiteSortie) ?: true
+                }.getOrDefault(true)
             }
             // 2026-08-04 (user : « si le film est du 3 juillet et qu'il sort au cinéma, il peut
             //   pas être déjà là ») — DEUXIÈME ÉTAGE : la semaine ci-dessus suffit pour une
@@ -1295,8 +1341,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             //   film par film : on écarte la liste des films encore à l'affiche en France.
             //   Réseau indisponible → liste vide → aucun écartement, l'accueil reste garni.
             val vod = com.streamflixreborn.streamflix.utils.VodCategories
-            val enSalles = vod.enSalles()
-            val sortiesFr = vod.sortiesFrancaises()
+            // 2026-10-04 : les deux listes sont indépendantes → calculées en même temps.
+            val (enSalles, sortiesFr) = coroutineScope {
+                val sallesD = async { vod.enSalles() }
+                val sortiesFrD = async { vod.sortiesFrancaises() }
+                sallesD.await() to sortiesFrD.await()
+            }
 
             // TROISIÈME ÉTAGE — un film RÉCENT jamais distribué en France n'aura jamais de
             //   source française. C'est le cas de `The Odyssey` de Marcel Walz, homonyme du
@@ -1365,133 +1415,6 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 released = item.first_air_date,
             )
 
-            // 2026-07-11 (user « sur Movix le bouton filtre ne produit aucun changement ») :
-            //   le trending TMDB n'est PAS filtrable par langue → le haut du home (Featured,
-            //   Tendances, Populaires) restait identique quel que soit le filtre. FIX : si une
-            //   langue est choisie (langFilter != null), on construit TOUT le haut via discover
-            //   filtré par langue (donc le bouton change visiblement le catalogue). Si « Monde »
-            //   (null) → réplique EXACTE movix.chat (trending), comportement historique inchangé.
-            if (langFilter == null) {
-                // ===== MONDE — réplique movix.chat (trending, non filtrable par langue) =====
-                val trending = tmdbService.getTrending(apiKey = TMDB_API_KEY)
-                fun trendItem(item: TmdbTrendingItem): AppAdapter.Item? = when (item.media_type) {
-                    "movie" -> Movie(
-                        id = item.id.toString(),
-                        title = item.title ?: item.name ?: "",
-                        poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
-                        banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                        rating = item.vote_average, overview = item.overview, released = item.release_date,
-                    )
-                    "tv" -> TvShow(
-                        id = item.id.toString(),
-                        title = item.name ?: item.title ?: "",
-                        poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
-                        banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                        rating = item.vote_average, overview = item.overview, released = item.first_air_date,
-                    )
-                    else -> null
-                }
-                // FEATURED (carrousel) et « Tendances du jour » = INSTANCES DISTINCTES (itemType
-                //   mutable par instance ; partager = crash ViewPager2 « Pages must fill... »).
-                // 2026-08-04 (user : « on a Tendances du jour et Tendances, est-ce que ça vaut
-                //   le coup d'en avoir deux ? ») — NON, mesuré : sur cinq pages de chaque,
-                //   93 titres d'un côté, 93 de l'autre, 69 EN COMMUN — 74 % de recouvrement.
-                //   Deux rangées qui se répètent aux trois quarts n'apportent rien ; réunies
-                //   et dédoublonnées elles donnent 117 titres, soit une rangée bien garnie.
-                //   Le jour passe en premier (l'actualité prime), la semaine complète derrière.
-                val trendingRaw = completer(
-                    voulu = 60, pageMax = 10, cle = { it.id },
-                    garde = { notAnim(it.genre_ids) && dispo(it.id, it.release_date, it.first_air_date) },
-                    page = { p ->
-                        when {
-                            p == 1 -> trending.results ?: emptyList()
-                            p <= 5 -> tmdbService.getTrending(apiKey = TMDB_API_KEY, page = p)
-                                .results ?: emptyList()
-                            else -> tmdbService.getTrendingWeek(apiKey = TMDB_API_KEY, page = p - 5)
-                                .results ?: emptyList()
-                        }
-                    },
-                )
-                // FEATURED (carrousel) et « Tendances » = INSTANCES DISTINCTES (itemType
-                //   mutable par instance ; partager = crash ViewPager2 « Pages must fill... »).
-                val featuredList = trendingRaw.take(10).mapNotNull { trendItem(it) }
-                val tendances = trendingRaw.mapNotNull { trendItem(it) }
-                if (featuredList.isNotEmpty()) {
-                    categories.add(Category(name = Category.FEATURED, list = featuredList))
-                    categories.add(Category(name = "Tendances", list = tendances))
-                }
-
-                // Les sagas incontournables (collections TMDB — franchises = language-agnostic,
-                //   donc uniquement en vue Monde ; en vue langue elles n'auraient pas de sens).
-                val sagas = listOf(
-                    "Star Wars" to 10, "Harry Potter" to 1241, "Le Seigneur des Anneaux" to 119,
-                    "Avengers" to 86311, "Spider-Man" to 556, "Fast & Furious" to 9485,
-                    "Matrix" to 2344, "Alien" to 8091, "X-Men" to 748,
-                    "Iron Man" to 131292, "Thor" to 131296, "Captain America" to 131295,
-                    "Le Hobbit" to 121938, "Pirates des Caraïbes" to 295,
-                    "Mission: Impossible" to 87359, "Die Hard" to 1570,
-                    "Terminator" to 528, "L'Arme Fatale" to 945,
-                )
-                val sagaFilms = coroutineScope {
-                    sagas.map { (_, sId) ->
-                        async {
-                            runCatching {
-                                tmdbService.getCollection(id = sId, apiKey = TMDB_API_KEY).parts
-                                    ?.filter { !it.poster_path.isNullOrBlank() && !it.title.isNullOrBlank() }
-                                    ?.sortedByDescending { it.vote_average ?: 0.0 }
-                                    ?.take(3)
-                                    ?.map { mv(it) }
-                                    ?: emptyList()
-                            }.getOrNull().orEmpty()
-                        }
-                    }.awaitAll()
-                }
-                // Ajoutée tout en bas, après l'assemblage (cf. déclaration de `sagaRow`).
-                sagaRow = sagaFilms.flatten().distinctBy { it.id }
-
-                // Films populaires — pagination jusqu'à 20 retenus (cf. `completer`).
-                runCatching {
-                    val items = completer(
-                        voulu = 40, pageMax = 10, cle = { it.id },
-                        garde = { notAnim(it.genre_ids) && dispoFilm(it.id, it.release_date) },
-                        page = { p ->
-                            tmdbService.getPopularMovies(apiKey = TMDB_API_KEY, page = p).results
-                                ?: emptyList()
-                        },
-                    ).map { mv(it) }
-                    if (items.isNotEmpty()) categories.add(Category(name = "Films populaires", list = items))
-                }
-            } else {
-                // ===== FILTRE LANGUE — haut du home via discover filtré (le bouton agit) =====
-                suspend fun discMoviePage(p: Int) = tmdbService.discoverMovies(
-                    apiKey = TMDB_API_KEY, page = p, sortBy = "popularity.desc",
-                    withOriginalLanguage = langFilter, withoutGenres = "16",
-                ).results ?: emptyList()
-                val popMovies = completer(
-                    voulu = 40, pageMax = 10, cle = { it.id },
-                    garde = { notAnim(it.genre_ids) && dispoFilm(it.id, it.release_date) },
-                    page = { p -> discMoviePage(p) },
-                )
-                if (popMovies.isNotEmpty()) {
-                    // Featured + Populaires = mv() crée des instances NEUVES à chaque map → pas de
-                    //   partage d'instance (donc pas de crash ViewPager2).
-                    categories.add(Category(name = Category.FEATURED, list = popMovies.take(10).map { mv(it) }))
-                    categories.add(Category(name = "Films populaires", list = popMovies.take(20).map { mv(it) }))
-                }
-                suspend fun discTvPage(p: Int) = tmdbService.discoverTvShows(
-                    apiKey = TMDB_API_KEY, page = p, sortBy = "popularity.desc",
-                    withOriginalLanguage = langFilter, withoutGenres = "16",
-                ).results ?: emptyList()
-                val popTv = completer(
-                    voulu = 40, pageMax = 10, cle = { it.id },
-                    garde = { notAnim(it.genre_ids) && dejaSorti(it.first_air_date) },
-                    page = { p -> discTvPage(p) },
-                )
-                if (popTv.isNotEmpty()) {
-                    categories.add(Category(name = "Séries populaires", list = popTv.map { tv(it) }))
-                }
-            }
-
             // Fenêtre « récents » : 18 derniers mois, déterministe (borne = aujourd'hui)
             val dateFmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
             val todayStr = dateFmt.format(java.util.Date())
@@ -1499,36 +1422,214 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 add(java.util.Calendar.MONTH, -18)
             }.time)
 
-            // Séries récentes (2 pages → reste rempli après retrait des doublons)
-            runCatching {
-                suspend fun recTvPage(p: Int) = tmdbService.discoverTvShows(
-                    apiKey = TMDB_API_KEY, page = p, sortBy = "first_air_date.desc",
-                    voteCountGte = 30, firstAirDateGte = sinceStr, firstAirDateLte = todayStr,
-                    withOriginalLanguage = langFilter, withoutGenres = "16",
-                ).results ?: emptyList()
-                val items = completer(
-                    voulu = 60, pageMax = 8, cle = { it.id },
-                    garde = { dejaSorti(it.first_air_date) },
-                    page = { p -> recTvPage(p) },
-                ).map { tv(it) }
-                if (items.isNotEmpty()) categories.add(Category(name = "Séries récentes", list = items))
-            }
+            // 2026-07-11 (user « sur Movix le bouton filtre ne produit aucun changement ») :
+            //   le trending TMDB n'est PAS filtrable par langue → le haut du home (Featured,
+            //   Tendances, Populaires) restait identique quel que soit le filtre. FIX : si une
+            //   langue est choisie (langFilter != null), on construit TOUT le haut via discover
+            //   filtré par langue (donc le bouton change visiblement le catalogue). Si « Monde »
+            //   (null) → réplique EXACTE movix.chat (trending), comportement historique inchangé.
+            // 2026-10-04 (accélération accueil) — les rangées Tendances, sagas, Films populaires
+            //   (ou, avec un filtre langue, Films/Séries populaires), Séries récentes et Films récents
+            //   s'enchaînaient : chacune attendait la fin de la précédente. Elles sont maintenant
+            //   LANCÉES ensemble puis ASSEMBLÉES dans l'ordre d'origine, une fois les résultats reçus.
+            //   La liste `categories` vue par l'anti-doublon plus bas est donc strictement la même.
+            //   Comportement en cas d'erreur conservé : les rangées qui étaient protégées par un
+            //   runCatching le restent (getOrNull), celles qui ne l'étaient pas relancent leur erreur
+            //   (getOrThrow) au même moment de l'assemblage, ce qui interrompt la suite comme avant.
+            //   L'intérieur de `completer` (pages une par une, arrêt au compte voulu) est inchangé.
+            coroutineScope {
+                // Séries récentes (2 pages → reste rempli après retrait des doublons)
+                val seriesRecentesD = async {
+                    runCatching {
+                        suspend fun recTvPage(p: Int) = tmdbService.discoverTvShows(
+                            apiKey = TMDB_API_KEY, page = p, sortBy = "first_air_date.desc",
+                            voteCountGte = 30, firstAirDateGte = sinceStr, firstAirDateLte = todayStr,
+                            withOriginalLanguage = langFilter, withoutGenres = "16",
+                        ).results ?: emptyList()
+                        val items = completer(
+                            voulu = 60, pageMax = 8, cle = { it.id },
+                            garde = { dejaSorti(it.first_air_date) },
+                            page = { p -> recTvPage(p) },
+                        ).map { tv(it) }
+                        items
+                    }
+                }
 
-            // Films récents (2 pages)
-            runCatching {
-                suspend fun recMoviePage(p: Int) = tmdbService.discoverMovies(
-                    apiKey = TMDB_API_KEY, page = p, sortBy = "primary_release_date.desc",
-                    voteCountGte = 30, primaryReleaseDateGte = sinceStr, primaryReleaseDateLte = todayStr,
-                    withOriginalLanguage = langFilter, withoutGenres = "16",
-                ).results ?: emptyList()
-                val items = completer(
-                    voulu = 60, pageMax = 8, cle = { it.id },
-                    garde = {
-                        !it.title.isNullOrBlank() && dispoFilm(it.id, it.release_date)
-                    },
-                    page = { p -> recMoviePage(p) },
-                ).map { mv(it) }
-                if (items.isNotEmpty()) categories.add(Category(name = "Films récents", list = items))
+                // Films récents (2 pages)
+                val filmsRecentsD = async {
+                    runCatching {
+                        suspend fun recMoviePage(p: Int) = tmdbService.discoverMovies(
+                            apiKey = TMDB_API_KEY, page = p, sortBy = "primary_release_date.desc",
+                            voteCountGte = 30, primaryReleaseDateGte = sinceStr, primaryReleaseDateLte = todayStr,
+                            withOriginalLanguage = langFilter, withoutGenres = "16",
+                        ).results ?: emptyList()
+                        val items = completer(
+                            voulu = 60, pageMax = 8, cle = { it.id },
+                            garde = {
+                                !it.title.isNullOrBlank() && dispoFilm(it.id, it.release_date)
+                            },
+                            page = { p -> recMoviePage(p) },
+                        ).map { mv(it) }
+                        items
+                    }
+                }
+
+                if (langFilter == null) {
+                    // ===== MONDE — réplique movix.chat (trending, non filtrable par langue) =====
+                    val trending = tmdbService.getTrending(apiKey = TMDB_API_KEY)
+                    fun trendItem(item: TmdbTrendingItem): AppAdapter.Item? = when (item.media_type) {
+                        "movie" -> Movie(
+                            id = item.id.toString(),
+                            title = item.title ?: item.name ?: "",
+                            poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
+                            banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
+                            rating = item.vote_average, overview = item.overview, released = item.release_date,
+                        )
+                        "tv" -> TvShow(
+                            id = item.id.toString(),
+                            title = item.name ?: item.title ?: "",
+                            poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
+                            banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
+                            rating = item.vote_average, overview = item.overview, released = item.first_air_date,
+                        )
+                        else -> null
+                    }
+                    // FEATURED (carrousel) et « Tendances du jour » = INSTANCES DISTINCTES (itemType
+                    //   mutable par instance ; partager = crash ViewPager2 « Pages must fill... »).
+                    // 2026-08-04 (user : « on a Tendances du jour et Tendances, est-ce que ça vaut
+                    //   le coup d'en avoir deux ? ») — NON, mesuré : sur cinq pages de chaque,
+                    //   93 titres d'un côté, 93 de l'autre, 69 EN COMMUN — 74 % de recouvrement.
+                    //   Deux rangées qui se répètent aux trois quarts n'apportent rien ; réunies
+                    //   et dédoublonnées elles donnent 117 titres, soit une rangée bien garnie.
+                    //   Le jour passe en premier (l'actualité prime), la semaine complète derrière.
+                    val trendingD = async {
+                        runCatching {
+                            completer(
+                                voulu = 60, pageMax = 10, cle = { it.id },
+                                garde = { notAnim(it.genre_ids) && dispo(it.id, it.release_date, it.first_air_date) },
+                                page = { p ->
+                                    when {
+                                        p == 1 -> trending.results ?: emptyList()
+                                        p <= 5 -> tmdbService.getTrending(apiKey = TMDB_API_KEY, page = p)
+                                            .results ?: emptyList()
+                                        else -> tmdbService.getTrendingWeek(apiKey = TMDB_API_KEY, page = p - 5)
+                                            .results ?: emptyList()
+                                    }
+                                },
+                            )
+                        }
+                    }
+
+                    // Les sagas incontournables (collections TMDB — franchises = language-agnostic,
+                    //   donc uniquement en vue Monde ; en vue langue elles n'auraient pas de sens).
+                    val sagas = listOf(
+                        "Star Wars" to 10, "Harry Potter" to 1241, "Le Seigneur des Anneaux" to 119,
+                        "Avengers" to 86311, "Spider-Man" to 556, "Fast & Furious" to 9485,
+                        "Matrix" to 2344, "Alien" to 8091, "X-Men" to 748,
+                        "Iron Man" to 131292, "Thor" to 131296, "Captain America" to 131295,
+                        "Le Hobbit" to 121938, "Pirates des Caraïbes" to 295,
+                        "Mission: Impossible" to 87359, "Die Hard" to 1570,
+                        "Terminator" to 528, "L'Arme Fatale" to 945,
+                    )
+                    val sagaD = async {
+                        runCatching {
+                            coroutineScope {
+                                sagas.map { (_, sId) ->
+                                    async {
+                                        runCatching {
+                                            tmdbService.getCollection(id = sId, apiKey = TMDB_API_KEY).parts
+                                                ?.filter { !it.poster_path.isNullOrBlank() && !it.title.isNullOrBlank() }
+                                                ?.sortedByDescending { it.vote_average ?: 0.0 }
+                                                ?.take(3)
+                                                ?.map { mv(it) }
+                                                ?: emptyList()
+                                        }.getOrNull().orEmpty()
+                                    }
+                                }.awaitAll()
+                            }
+                        }
+                    }
+
+                    // Films populaires — pagination jusqu'à 20 retenus (cf. `completer`).
+                    val populairesD = async {
+                        runCatching {
+                            val items = completer(
+                                voulu = 40, pageMax = 10, cle = { it.id },
+                                garde = { notAnim(it.genre_ids) && dispoFilm(it.id, it.release_date) },
+                                page = { p ->
+                                    tmdbService.getPopularMovies(apiKey = TMDB_API_KEY, page = p).results
+                                        ?: emptyList()
+                                },
+                            ).map { mv(it) }
+                            items
+                        }
+                    }
+
+                    // Assemblage dans l'ordre d'origine (2026-10-04).
+                    val trendingRaw = trendingD.await().getOrThrow()
+                    // FEATURED (carrousel) et « Tendances » = INSTANCES DISTINCTES (itemType
+                    //   mutable par instance ; partager = crash ViewPager2 « Pages must fill... »).
+                    val featuredList = trendingRaw.take(10).mapNotNull { trendItem(it) }
+                    val tendances = trendingRaw.mapNotNull { trendItem(it) }
+                    if (featuredList.isNotEmpty()) {
+                        categories.add(Category(name = Category.FEATURED, list = featuredList))
+                        categories.add(Category(name = "Tendances", list = tendances))
+                    }
+                    val sagaFilms = sagaD.await().getOrThrow()
+                    // Ajoutée tout en bas, après l'assemblage (cf. déclaration de `sagaRow`).
+                    sagaRow = sagaFilms.flatten().distinctBy { it.id }
+                    populairesD.await().getOrNull()?.let { items ->
+                        if (items.isNotEmpty()) categories.add(Category(name = "Films populaires", list = items))
+                    }
+                } else {
+                    // ===== FILTRE LANGUE — haut du home via discover filtré (le bouton agit) =====
+                    suspend fun discMoviePage(p: Int) = tmdbService.discoverMovies(
+                        apiKey = TMDB_API_KEY, page = p, sortBy = "popularity.desc",
+                        withOriginalLanguage = langFilter, withoutGenres = "16",
+                    ).results ?: emptyList()
+                    val popMoviesD = async {
+                        runCatching {
+                            completer(
+                                voulu = 40, pageMax = 10, cle = { it.id },
+                                garde = { notAnim(it.genre_ids) && dispoFilm(it.id, it.release_date) },
+                                page = { p -> discMoviePage(p) },
+                            )
+                        }
+                    }
+                    suspend fun discTvPage(p: Int) = tmdbService.discoverTvShows(
+                        apiKey = TMDB_API_KEY, page = p, sortBy = "popularity.desc",
+                        withOriginalLanguage = langFilter, withoutGenres = "16",
+                    ).results ?: emptyList()
+                    val popTvD = async {
+                        runCatching {
+                            completer(
+                                voulu = 40, pageMax = 10, cle = { it.id },
+                                garde = { notAnim(it.genre_ids) && dejaSorti(it.first_air_date) },
+                                page = { p -> discTvPage(p) },
+                            )
+                        }
+                    }
+
+                    // Assemblage dans l'ordre d'origine (2026-10-04).
+                    val popMovies = popMoviesD.await().getOrThrow()
+                    if (popMovies.isNotEmpty()) {
+                        // Featured + Populaires = mv() crée des instances NEUVES à chaque map → pas de
+                        //   partage d'instance (donc pas de crash ViewPager2).
+                        categories.add(Category(name = Category.FEATURED, list = popMovies.take(10).map { mv(it) }))
+                        categories.add(Category(name = "Films populaires", list = popMovies.take(20).map { mv(it) }))
+                    }
+                    val popTv = popTvD.await().getOrThrow()
+                    if (popTv.isNotEmpty()) {
+                        categories.add(Category(name = "Séries populaires", list = popTv.map { tv(it) }))
+                    }
+                }
+
+                seriesRecentesD.await().getOrNull()?.let { items ->
+                    if (items.isNotEmpty()) categories.add(Category(name = "Séries récentes", list = items))
+                }
+                filmsRecentsD.await().getOrNull()?.let { items ->
+                    if (items.isNotEmpty()) categories.add(Category(name = "Films récents", list = items))
+                }
             }
 
             // Rangées par genre — discover/movie?with_genres=X&sort_by=popularity.desc&page=1
@@ -1765,8 +1866,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             //   bout à bout conserve l'ordre chronologique global — c'est justement ce qui
             //   manquait au tri local.
             val vod = com.streamflixreborn.streamflix.utils.VodCategories
-            val enSalles = vod.enSalles()
-            val sortiesFr = vod.sortiesFrancaises()
+            // 2026-10-04 : les deux listes sont indépendantes → calculées en même temps.
+            val (enSalles, sortiesFr) = coroutineScope {
+                val sallesD = async { vod.enSalles() }
+                val sortiesFrD = async { vod.sortiesFrancaises() }
+                sallesD.await() to sortiesFrD.await()
+            }
             // 2026-08-04 — FILTRE D'ANNÉE (second clic sur « Films », cf. YearFilter).
             //   La borne haute retenue est la PLUS BASSE des deux : le délai de sortie et la
             //   fin de l'année choisie. Les dates sont au format `yyyy-MM-dd`, dont l'ordre
@@ -2037,8 +2142,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             val originCountry = specialGenres[id]
             val genreFilter = if (originCountry != null) null else id
             val vod = com.streamflixreborn.streamflix.utils.VodCategories
-            val enSalles = vod.enSalles()
-            val sortiesFr = vod.sortiesFrancaises()
+            // 2026-10-04 : les deux listes sont indépendantes → calculées en même temps.
+            val (enSalles, sortiesFr) = coroutineScope {
+                val sallesD = async { vod.enSalles() }
+                val sortiesFrD = async { vod.sortiesFrancaises() }
+                sallesD.await() to sortiesFrD.await()
+            }
             val limiteSortie = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
                 .format(java.util.Calendar.getInstance()
                     .apply { add(java.util.Calendar.DAY_OF_YEAR, -DELAI_SOURCES_JOURS) }.time)
@@ -2374,7 +2483,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
      * pourra repasser à `true` — CineStream a 10 lecteurs contre 7 à Wiflix, donc il en a
      * peut-être d'exclusifs qu'on perd ici.
      */
-    private const val MOVIX_WIFLIX_ACTIF = false
+    // 2026-10-04 (user : « fais ce qui est le mieux ») — ROUVERT. La vraie correction annoncée
+    //   ci-dessus est en place : la dédup reconnaît désormais un même fichier sur deux domaines
+    //   miroirs (utils/CleFichier : uqload.cx = uqload.is, playmogo = dood…). Le bridage, lui,
+    //   faisait perdre des lecteurs : sur Léon (tmdb 101), le Wiflix direct rendait 0 (délai
+    //   dépassé) quand CineStream, via Movix, en avait 13 — tous écartés. On ajoute en plus un
+    //   CONTRÔLE D'IDENTITÉ sur la fiche servie (`wiflix_url`), cf. slugWiflixCorrespond.
+    private const val MOVIX_WIFLIX_ACTIF = true
 
     /**
      * 2026-08-16, SOIR — l'endpoint `fstream` de Movix est bridé lui aussi, pour la même raison
@@ -2443,8 +2558,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
      * On ne garde donc de `links` que les lecteurs propres à Movix : Moiflix/xtremestream,
      * Rpmvid (coflix.upn…), SeekStreaming/seekplayer et EmbedSeek. Le reste est écarté.
      */
+    // 2026-10-04 (user, Léon : « Vidéo HD » marche sur le site, « c'était un CF derrière ») —
+    //   emmmmbed.com EST un lecteur maison de Movix : c'est sa source « Vidéo HD / PAS DE
+    //   PUBLICITE » (api/tmdb, player_links). Il était jeté comme « tiers ». Résolu par
+    //   EmmmmbedExtractor (WebView : la page déchiffre la source, mp4 rumble.cloud).
     private val HOTES_NATIFS_MOVIX = Regex(
-        "(xtremestream|seekplayer|embedseek|seekstreaming|rpmvid|rpmplay|rpmstream|upns?\\.|upn\\.one|moiflix)",
+        "(xtremestream|seekplayer|embedseek|seekstreaming|rpmvid|rpmplay|rpmstream|upns?\\.|upn\\.one|moiflix|emmmmbed)",
         RegexOption.IGNORE_CASE,
     )
 
@@ -2596,6 +2715,17 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         runEndpoint("wiflix-movie") {
                             val wiflix = movixServiceInstance.getWiflixMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
+                            // 2026-10-04 : contrôle d'identité de la fiche servie.
+                            val detailsWf = tmdbMovieDetailsDeferred.await()
+                            if (!slugWiflixCorrespond(
+                                    wiflix.wiflix_url,
+                                    listOf((videoType as? Video.Type.Movie)?.title, detailsWf?.title,
+                                        detailsWf?.original_title, wiflix.title, wiflix.original_title),
+                                )
+                            ) {
+                                Log.w("MovixProvider", "wiflix-movie ÉCARTÉ — fiche « ${wiflix.wiflix_url} » ≠ « ${(videoType as? Video.Type.Movie)?.title} »")
+                                return@runEndpoint list
+                            }
                             if (wiflix.success == true) {
                                 wiflix.players?.forEach { (lang, sources) ->
                                     val displayLang = formatLang(lang)
@@ -2829,7 +2959,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val displayLang = formatLang(lang)
                                     players.forEach { p ->
                                         val url = p.url ?: return@forEach
-                                        if (url.isBlank() || !url.contains("swiftflow", ignoreCase = true)) return@forEach
+                                        // 2026-10-04 : le lecteur a changé de domaine (swiftflow.lol →
+                                        //   blinkflux.lol). Filtrer sur « swiftflow » écartait TOUS les
+                                        //   liens → serveur disparu. On accepte les deux noms.
+                                        if (url.isBlank() || !(url.contains("swiftflow", ignoreCase = true) ||
+                                                url.contains("blinkflux", ignoreCase = true))) return@forEach
                                         val label = p.label?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
                                         list.add(Video.Server(
                                             id = "swiftflow-$lang-${list.size}",
@@ -2850,7 +2984,26 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     // 2026-07-09 : fstream REMIS — le user préfère avoir les serveurs FS même si
                     //   le matching Movix API est parfois imprécis (ex: "FROM" → "From Dusk Till Dawn").
                     //   Mieux vaut quelques serveurs en trop que zéro FrenchStream.
-                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, j1fDeferred, purstreamDeferred, swiftflowDeferred)
+                    // 2026-10-04 — « Lecteurs Omega » du site (Dropload, Mixdrop, Doodstream) :
+                    //   endpoint `api/imdb/movie/{imdbId}`, que l'app n'appelait pas du tout.
+                    //   Recherché par identifiant IMDb → aucune confusion de titre possible.
+                    val imdbOmegaDeferred = async {
+                        runEndpoint("imdb-movie") {
+                            val list = mutableListOf<Video.Server>()
+                            val imdbId = tmdbMovieDetailsDeferred.await()?.imdb_id
+                                ?.takeIf { it.startsWith("tt") } ?: return@runEndpoint list
+                            val r = movixServiceInstance.getImdbMovie(imdbId)
+                            r.player_links?.forEach { p ->
+                                val url = p.link ?: return@forEach
+                                if (url.isBlank() || isHiddenHost(url)) return@forEach
+                                val nom = p.player?.substringAfter("(", "")?.substringBefore(")")?.trim()
+                                    ?.takeIf { it.isNotBlank() } ?: prettyPlayerName(null, url)
+                                list.add(Video.Server(id = "imdbomega-${list.size}", name = "Movix · $nom (VF)", src = url))
+                            }
+                            list
+                        }
+                    }
+                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, j1fDeferred, purstreamDeferred, swiftflowDeferred, imdbOmegaDeferred)
                         .map { d -> async { val r = d.await(); if (r.isNotEmpty() && onPartial != null) onPartial(r); r } }
                         .awaitAll()
                 }
@@ -2960,6 +3113,15 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         runEndpoint("wiflix-tv") {
                             val wiflix = movixServiceInstance.getWiflixTv(tmdbId, seasonNum)
                             val list = mutableListOf<Video.Server>()
+                            // 2026-10-04 : contrôle d'identité de la fiche servie.
+                            if (!slugWiflixCorrespond(
+                                    wiflix.wiflix_url,
+                                    listOf(videoType.tvShow.title, wiflix.title, wiflix.original_title),
+                                )
+                            ) {
+                                Log.w("MovixProvider", "wiflix-tv ÉCARTÉ — fiche « ${wiflix.wiflix_url} » ≠ « ${videoType.tvShow.title} »")
+                                return@runEndpoint list
+                            }
                             wiflix.episodes?.get(episodeNum.toString())?.forEach { (lang, sources) ->
                                 val displayLang = formatLang(lang)
                                 sources.forEach { source ->
@@ -4679,6 +4841,11 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
             @Path("tmdbId") tmdbId: String,
             @Path("season") season: Int
         ): WiflixTvResponse
+
+        @GET("api/imdb/movie/{imdbId}")
+        suspend fun getImdbMovie(
+            @Path("imdbId") imdbId: String
+        ): ImdbMovixResponse
 
         // --- Cpasmal endpoints ---
 

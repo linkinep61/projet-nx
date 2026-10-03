@@ -676,6 +676,30 @@ object NakiosProvider : Provider, ProviderConfigUrl {
     }
 
     /**
+     * 2026-10-04 (user : « encore un mauvais match ») — ANNÉE affichée sur une fiche film.
+     *   Sur Léon (1994), le slug deviné `leon` ouvrait la fiche de **León (2024)**, un autre
+     *   film (80 min, argentin) : 11 serveurs du mauvais film. Le vrai Léon est `leon-2`.
+     *   Les deux fiches portent le même titre ; seule l'année les distingue. Elle figure juste
+     *   après le titre `<h1>` (`<span>1994</span>`, vérifié sur nakios.live et movix.zip).
+     *   @return l'année, ou null si illisible (on ne juge pas → on garde).
+     */
+    private fun anneeFiche(html: String): Int? {
+        val i = html.indexOf("<h1")
+        if (i < 0) return null
+        val zone = html.substring(i, minOf(html.length, i + 3000))
+        return Regex(""">\s*((?:19|20)\d{2})\s*<""").find(zone)?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    /** Vrai si la fiche film est d'une AUTRE année que celle demandée (écart > 1 an). */
+    private fun mauvaiseAnnee(html: String, annee: Int?, page: String): Boolean {
+        if (annee == null) return false
+        val a = anneeFiche(html) ?: return false
+        if (kotlin.math.abs(a - annee) <= 1) return false
+        Log.d(TAG, "fiche $page écartée : année $a ≠ $annee demandée (autre film du même titre)")
+        return true
+    }
+
+    /**
      * Backup Nakios. On n'a plus d'API par tmdbId : on retrouve la fiche par SLUG dérivé du
      * titre, puis on lit les serveurs dans le HTML. On essaie les titres fournis (FR puis
      * original) pour absorber les différences de nommage du site.
@@ -686,6 +710,7 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         season: Int = 0,
         episode: Int = 0,
         titleHint: String? = null,
+        annee: Int? = null,
     ): List<Video.Server> {
         val titles = listOfNotNull(titleHint?.takeIf { it.isNotBlank() })
             .flatMap { listOf(it) }
@@ -728,6 +753,8 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                 val html = httpGetRaw(page) ?: continue
                 // Page 404 Laravel → pas de blob serveurs.
                 if (!html.contains("server_name")) continue
+                // 2026-10-04 : même titre, autre film → on passe au candidat suivant.
+                if (wantMovie && mauvaiseAnnee(html, annee, page)) continue
                 val servers = parseNakiosServers(html)
                 if (servers.isNotEmpty()) {
                     Log.d(TAG, "backup: $page → ${servers.size} serveurs")
@@ -760,6 +787,7 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         season: Int = 0,
         episode: Int = 0,
         titleHint: String? = null,
+        annee: Int? = null,
     ): List<Video.Server> {
         val titles = listOfNotNull(titleHint?.takeIf { it.isNotBlank() }).distinct()
         if (titles.isEmpty()) return emptyList()
@@ -791,6 +819,8 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                 for (page in pages) {
                     val html = httpGetRaw(page) ?: continue
                     if (!html.contains("server_name")) continue
+                    // 2026-10-04 : même contrôle d'année que Nakios (même moteur de site).
+                    if (wantMovie && mauvaiseAnnee(html, annee, page)) continue
                     // Réutilise le parseur Nakios (lecture seule), puis renomme le préfixe LoiFlix.
                     val servers = parseNakiosServers(html).map { s ->
                         s.copy(

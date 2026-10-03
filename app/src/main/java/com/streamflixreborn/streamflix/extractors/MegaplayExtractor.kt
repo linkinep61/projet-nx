@@ -78,6 +78,7 @@ class MegaplayExtractor : Extractor() {
         val origine = URL(link).let { "${it.protocol}://${it.host}" }
 
         val client = OkHttpClient.Builder()
+            .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
             .dns(DnsResolver.doh)
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)

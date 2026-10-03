@@ -479,7 +479,14 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                     //   bascule sur le WebView qui attend le chunk streamé.
                     val markerOk = contentMarker == null || body.contains(contentMarker) ||
                         body.contains(contentMarker.replace("\"", "\\\""))
-                    if (!isChallenge && markerOk && body.length > 200) {
+                    // 2026-10-03 : les réponses /api/ sont du JSON court et légitime (une recherche
+                    //   à 1 résultat = ~195 o). La garde body.length > 200 (anti page d'erreur HTML)
+                    //   les rejetait → resolveSlugFromId recevait null → « aucun slug trouvé » sur les
+                    //   titres à peu de résultats (ex. Jumpers). Pour /api/ on exige juste un JSON
+                    //   non vide (commence par [ ou {) ; le seuil 200 reste pour les pages HTML.
+                    val minOk = if (isApi) body.trimStart().firstOrNull()?.let { it == '[' || it == '{' } == true
+                                else body.length > 200
+                    if (!isChallenge && markerOk && minOk) {
                         Log.d(TAG, "httpGet OK $url (${body.length} chars)")
                         pageCachePut(cacheKey, body)
                         return@withContext body
@@ -1662,6 +1669,24 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
      * Serveurs natifs DessinAnime (RSC + miroirs empilés). Renvoie emptyList
      *   en cas d'échec (pas d'exception) pour que les backups prennent le relais.
      */
+    /** Nom d'hôte lisible dérivé du domaine de l'URL d'embed (pour l'affichage serveur). */
+    private fun hostLabelFromUrl(url: String): String {
+        val host = try { java.net.URL(url).host.removePrefix("www.").lowercase() } catch (_: Exception) { "" }
+        return when {
+            host.contains("abysscdn") || host.contains("hydrax") || host.contains("abyss") -> "Hydrax"
+            host.contains("uqload") -> "Uqload"
+            host.contains("vidmoly") -> "VidMoly"
+            host.contains("voe") -> "VOE"
+            host.contains("filemoon") || host.contains("moon") -> "Filemoon"
+            host.contains("dood") -> "Dood"
+            host.contains("sendvid") -> "Sendvid"
+            host.contains("streamwish") || host.contains("wish") -> "StreamWish"
+            host.contains("minochin") -> "Minochinos"
+            host.isBlank() -> "Lecteur"
+            else -> host.substringBefore('.').replaceFirstChar { it.uppercase() }
+        }
+    }
+
     private suspend fun fetchNativeServers(id: String, videoType: Video.Type): List<Video.Server> = withContext(Dispatchers.IO) {
         // 2026-07-09 : bypass CF AVANT le fetch RSC — c'est le SEUL endroit qui touche au site.
         ensureCfBypass()
@@ -1689,7 +1714,15 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         //   L'ancien marqueur "sources":[{"type" n'existe PLUS → le WebView pollait ~60× dans le
         //   vide (markerOk=false) puis « No iframe found » = 0 serveur. On attend le NOUVEAU
         //   marqueur (fallback sur l'ancien pour compat si une vieille page traîne en cache).
+        // 2026-10-03 : le site (Next.js) embarque DEUX tableaux "players", tous deux commençant
+        //   par {"id":… — l'ancien marqueur "players":[{"host" ne matchait AUCUN des deux → le
+        //   fetch markerOk échouait (WebView pollait dans le vide) = sources cassées. On attend
+        //   désormais "players":[{"id" (présent dans les deux layouts), repli sur les anciens.
         val html = httpGet(
+            pageUrl,
+            contentMarker = "\"players\":[{\"id\"",
+            rscFetchUrl = pageUrl,
+        ) ?: httpGet(
             pageUrl,
             contentMarker = "\"players\":[{\"host\"",
             rscFetchUrl = pageUrl,
@@ -1699,39 +1732,46 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             rscFetchUrl = pageUrl,
         ) ?: return@withContext emptyList()
 
-        // ── 2026-07-06 : NOUVEAU format du site — "players":[{"host":"...","url":"..."}] ──
-        //   Le lecteur liste directement les embeds (hydrax→abysscdn.com, uqload→uqload.is…).
-        //   Chaque url est un embed jouable par les extracteurs in-app (getVideo route par domaine).
+        // ── 2026-10-03 : format ACTUEL — le tableau "players" jouable a la forme
+        //   [{"id","name","url","direct","language"}] où `url` est l'embed réel de l'hôte
+        //   (abysscdn.com=Hydrax, vidmoly.biz, uqload.vc…). Il peut y avoir un AUTRE tableau
+        //   "players" de métadonnées ({id,host,name,language,embedId}, sans `url`) → on parcourt
+        //   toutes les occurrences et on prend la PREMIÈRE dont les objets portent `url`.
+        //   `name` du site (Panda/Loutre/Koala) = code interne → on affiche l'hôte dérivé de l'URL
+        //   + la langue. src = url embed → getVideo délègue à Extractor.extract (route par domaine).
         run {
             val h = if (html.contains("\\\"players\\\"")) html.replace("\\\"", "\"") else html
-            val marker = "\"players\":[{\"host\""
-            val idx = h.indexOf(marker)
-            if (idx < 0) return@run
-            val arrStart = h.indexOf('[', idx)
-            if (arrStart < 0) return@run
-            var depth = 0
-            var arrEnd = -1
-            for (i in arrStart until minOf(h.length, arrStart + 20000)) {
-                when (h[i]) {
-                    '[' -> depth++
-                    ']' -> { depth--; if (depth == 0) { arrEnd = i + 1; break } }
+            var searchFrom = 0
+            while (true) {
+                val idx = h.indexOf("\"players\":[", searchFrom)
+                if (idx < 0) break
+                searchFrom = idx + 10
+                val arrStart = h.indexOf('[', idx)
+                if (arrStart < 0) continue
+                var depth = 0
+                var arrEnd = -1
+                for (i in arrStart until minOf(h.length, arrStart + 20000)) {
+                    when (h[i]) {
+                        '[' -> depth++
+                        ']' -> { depth--; if (depth == 0) { arrEnd = i + 1; break } }
+                    }
                 }
-            }
-            if (arrEnd < 0) return@run
-            val arr = try { JSONArray(h.substring(arrStart, arrEnd)) } catch (_: Exception) { return@run }
-            val servers = mutableListOf<Video.Server>()
-            val seen = HashSet<String>()
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                val host = o.optString("host").ifBlank { "lecteur" }
-                val url = o.optString("url")
-                if (url.startsWith("http") && seen.add(url)) {
-                    servers.add(Video.Server(id = url, name = host.replaceFirstChar { it.uppercase() }, src = url))
+                if (arrEnd < 0) continue
+                val arr = try { JSONArray(h.substring(arrStart, arrEnd)) } catch (_: Exception) { continue }
+                val servers = mutableListOf<Video.Server>()
+                val seen = HashSet<String>()
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val url = o.optString("url")
+                    if (!url.startsWith("http") || !seen.add(url)) continue
+                    val lang = o.optString("language").uppercase()
+                        .let { if (it == "VF" || it == "VOSTFR") " [$it]" else "" }
+                    servers.add(Video.Server(id = url, name = "${hostLabelFromUrl(url)}$lang", src = url))
                 }
-            }
-            if (servers.isNotEmpty()) {
-                Log.d(TAG, "getServers players[]: ${servers.size} embeds (${servers.joinToString { it.name }})")
-                return@withContext servers
+                if (servers.isNotEmpty()) {
+                    Log.d(TAG, "getServers players[] (url): ${servers.size} embeds (${servers.joinToString { it.name }})")
+                    return@withContext servers
+                }
             }
         }
 

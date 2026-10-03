@@ -42,7 +42,10 @@ object DnsResolver : Dns {
     fun adresseEnCache(hostname: String): String? =
         cache[hostname]?.takeIf { it.expiresAt > System.currentTimeMillis() }
             ?.addresses?.firstOrNull()?.hostAddress
-    private val logging = HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BASIC)
+    // Journal réseau des requêtes DNS : versions de test seulement.
+    private val logging = HttpLoggingInterceptor().setLevel(
+        if (com.streamflixreborn.streamflix.BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC
+        else HttpLoggingInterceptor.Level.NONE)
 
     private val trustAllCerts = arrayOf<TrustManager>(
         object : X509TrustManager {

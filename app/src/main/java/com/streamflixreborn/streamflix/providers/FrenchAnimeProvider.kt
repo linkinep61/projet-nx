@@ -99,7 +99,8 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
 
     // Cache mémoire des documents (5 min) — évite les bypass redondants.
     private const val DOC_CACHE_TTL_MS = 5 * 60 * 1000L
-    private val documentCache = mutableMapOf<String, Pair<Document, Long>>()
+    // ConcurrentHashMap : le cache est lu/écrit depuis plusieurs coroutines en parallèle.
+    private val documentCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Document, Long>>()
 
     private fun getCachedDocument(url: String): Document? {
         val entry = documentCache[url] ?: return null
@@ -111,11 +112,17 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
     }
 
     private fun cacheDocument(url: String, doc: Document) {
-        if (documentCache.size > 20) {
-            val now = System.currentTimeMillis()
-            documentCache.entries.removeAll { now - it.value.second > DOC_CACHE_TTL_MS }
+        // 2026-10-04 : purge des pages périmées à CHAQUE ajout + vrai plafond de 20 (les plus
+        //   anciennes partent). Avant, la purge n'avait lieu qu'au-delà de 20 entrées et des
+        //   pages HTML entières (1-3 Mo chacune) restaient en mémoire pour toute la session.
+        val now = System.currentTimeMillis()
+        documentCache.entries.removeAll { now - it.value.second > DOC_CACHE_TTL_MS }
+        val enTrop = documentCache.size - 19
+        if (enTrop > 0) {
+            documentCache.entries.sortedBy { it.value.second }.take(enTrop)
+                .forEach { documentCache.remove(it.key) }
         }
-        documentCache[url] = Pair(doc, System.currentTimeMillis())
+        documentCache[url] = Pair(doc, now)
     }
 
     private val challengeKeywords = listOf(

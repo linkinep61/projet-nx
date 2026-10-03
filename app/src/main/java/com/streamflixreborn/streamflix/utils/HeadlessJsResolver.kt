@@ -56,10 +56,27 @@ object HeadlessJsResolver {
     ): String? {
         val deferred = CompletableDeferred<String?>()
         val mainHandler = Handler(Looper.getMainLooper())
+        // La WebView doit être détruite dans TOUS les cas (flux trouvé, échec, délai dépassé,
+        //   zapping) : avant, seul le cas « flux trouvé » la détruisait et chaque zap raté
+        //   laissait une WebView vivante (20-50 Mo) qui continuait d'exécuter la page.
+        val vue = java.util.concurrent.atomic.AtomicReference<WebView?>(null)
+        val fini = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun detruire() {
+            val w = vue.getAndSet(null) ?: return
+            mainHandler.post {
+                try {
+                    w.stopLoading()
+                    w.destroy()
+                } catch (_: Throwable) {}
+            }
+        }
 
         mainHandler.post {
+            if (fini.get()) return@post
             try {
                 val webView = WebView(ctx)
+                vue.set(webView)
+                if (fini.get()) { detruire(); return@post }
                 webView.settings.javaScriptEnabled = true
                 webView.settings.userAgentString = userAgent
                 webView.settings.domStorageEnabled = true
@@ -76,12 +93,7 @@ object HeadlessJsResolver {
                             Log.d(TAG, "intercepted media URL: $url")
                             if (!deferred.isCompleted) {
                                 deferred.complete(url)
-                                mainHandler.post {
-                                    try {
-                                        view.stopLoading()
-                                        view.destroy()
-                                    } catch (_: Throwable) {}
-                                }
+                                detruire()
                             }
                             // Renvoyer une réponse vide pour éviter que le WebView
                             // télécharge le segment et expose notre IP.
@@ -116,7 +128,12 @@ object HeadlessJsResolver {
             }
         }
 
-        return withTimeoutOrNull(timeoutMs) { deferred.await() }
+        return try {
+            withTimeoutOrNull(timeoutMs) { deferred.await() }
+        } finally {
+            fini.set(true)
+            detruire()
+        }
     }
 
     private fun looksLikeMedia(url: String): Boolean {

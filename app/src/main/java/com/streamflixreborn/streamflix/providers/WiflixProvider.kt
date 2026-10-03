@@ -128,7 +128,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     // In-memory document cache to avoid redundant Cloudflare bypasses.
     // Key = URL, Value = (Document, timestampMs)
     private const val CACHE_TTL_MS = 5 * 60 * 1000L // 5 minutes
-    private val documentCache = mutableMapOf<String, Pair<Document, Long>>()
+    // ConcurrentHashMap : le cache est lu/écrit depuis plusieurs coroutines en parallèle.
+    private val documentCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Document, Long>>()
 
     // 2026-06-23 (user "Wiflix ne relance pas son captcha quand cookie périme,
     //   c'est juste un bug de cash") : quand le silent bypass timeout (= 30s
@@ -174,12 +175,17 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     }
 
     private fun cacheDocument(url: String, doc: Document) {
-        // Keep cache size reasonable
-        if (documentCache.size > 20) {
-            val now = System.currentTimeMillis()
-            documentCache.entries.removeAll { now - it.value.second > CACHE_TTL_MS }
+        // 2026-10-04 : purge des pages périmées à CHAQUE ajout + vrai plafond de 20 (les plus
+        //   anciennes partent). Avant, la purge n'avait lieu qu'au-delà de 20 entrées et des
+        //   pages HTML entières (1-3 Mo chacune) restaient en mémoire pour toute la session.
+        val now = System.currentTimeMillis()
+        documentCache.entries.removeAll { now - it.value.second > CACHE_TTL_MS }
+        val enTrop = documentCache.size - 19
+        if (enTrop > 0) {
+            documentCache.entries.sortedBy { it.value.second }.take(enTrop)
+                .forEach { documentCache.remove(it.key) }
         }
-        documentCache[url] = Pair(doc, System.currentTimeMillis())
+        documentCache[url] = Pair(doc, now)
     }
 
     private fun getResolver(): WebViewResolver {

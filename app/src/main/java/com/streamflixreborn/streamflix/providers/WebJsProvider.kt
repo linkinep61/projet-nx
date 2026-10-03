@@ -94,7 +94,20 @@ open class WebJsProvider(
     //   (meminfo : 2 WebViews = 53MB Graphics à plat) → le heap sature → GC de 3s → gel.
     //   FIX : sur low-RAM, on DÉTRUIT la WebView après un délai d'inactivité (idle = 0
     //   WebView). Recréée à la demande (nav relancée). Rien n'est déconnecté. Mobile : inchangé.
-    private val lowRam = Runtime.getRuntime().maxMemory() < 200L * 1024 * 1024
+    //   2026-10-04 : avec android:largeHeap, maxMemory vaut 512 Mo sur les box (TCL, Chromecast…)
+    //   → ce test seul ne se déclenchait JAMAIS là où il est prévu. On ajoute les appareils
+    //   déclarés « faible mémoire » et les TV dont la classe mémoire normale est ≤ 192 Mo.
+    //   Téléphones : inchangé (seul le test d'origine s'applique).
+    private val lowRam: Boolean by lazy {
+        if (Runtime.getRuntime().maxMemory() < 200L * 1024 * 1024) return@lazy true
+        runCatching {
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+            val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            val ui = ctx.getSystemService(android.content.Context.UI_MODE_SERVICE) as? android.app.UiModeManager
+            val estTv = ui?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+            am?.isLowRamDevice == true || (estTv && (am?.memoryClass ?: 512) <= 192)
+        }.getOrDefault(false)
+    }
     @Volatile private var releaseScheduled: Runnable? = null
 
     /** Programme la destruction de la WebView après 15s d'inactivité (low-RAM only).

@@ -39,6 +39,9 @@ class UqloadExtractor : Extractor() {
         "https://uqload.io",
         "https://uqload.com",
         "https://uqload.ws",
+        // 2026-10-03 (dessinanime.cc) : nouveau domaine servi par DessinAnime — sans lui,
+        //   la source « Koala » (uqload) ne routait pas → serveur cassé.
+        "https://uqload.vc",
     )
 
     override val cacheTtlMs: Long = 5L * 60L * 1000L
@@ -220,6 +223,7 @@ class UqloadExtractor : Extractor() {
     private fun fetchEmbedViaOkHttpDoH(url: String): Pair<String, String>? {
         return try {
             val client = OkHttpClient.Builder()
+                .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
                 .dns(com.streamflixreborn.streamflix.utils.DnsResolver.doh)
                 .connectTimeout(12, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)

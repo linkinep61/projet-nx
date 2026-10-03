@@ -119,6 +119,10 @@ class SeasonTvFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        // Débranche la liste : sinon l'adaptateur (gardé par le fragment) retient l'ancienne vue à chaque aller-retour.
+        // swapAdapter(null, false) et PAS adapter = null : ce dernier recycle les cartes visibles, ce qui
+        // annule leurs jaquettes (cartes noires au retour sur l'accueil).
+        binding.hgvEpisodes.swapAdapter(null, false)
         _binding = null
     }
 

@@ -74,6 +74,16 @@ private fun android.widget.EditText.filtreDiffere(action: (String) -> Unit) {
         action(text?.toString()?.trim().orEmpty())
     }
     VALIDER_FILTRE[this] = lancer
+    // La fonction stockée lit `text`, donc retient le champ : dans une WeakHashMap, l'entrée
+    //   n'était jamais libérée et gardait tout le dialogue (liste des chaînes comprise) pour
+    //   la session. On la retire quand le champ quitte l'écran, et on la remet s'il y revient.
+    addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: android.view.View) { VALIDER_FILTRE[this@filtreDiffere] = lancer }
+        override fun onViewDetachedFromWindow(v: android.view.View) {
+            enAttente?.let { h.removeCallbacks(it) }; enAttente = null
+            VALIDER_FILTRE.remove(this@filtreDiffere)
+        }
+    })
     setOnEditorActionListener { _, _, _ -> lancer(); if (tv) fermerClavierTv(); true }
     addTextChangedListener(object : android.text.TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -99,11 +109,15 @@ private fun android.widget.EditText.fermerClavierTv() {
     post { (focusSearch(android.view.View.FOCUS_DOWN) ?: rootView?.findFocus())?.requestFocus() }
 }
 
+// 2026-10-04 : motifs compilés une seule fois (au lieu de deux Regex par appel de normSearch).
+private val RE_NORM_ACCENTS = Regex("\\p{Mn}+")
+private val RE_NORM_NON_ALNUM = Regex("[^a-z0-9]+")
+
 private fun normSearch(s: String): String =
         java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
-            .replace(Regex("\\p{Mn}+"), "")
+            .replace(RE_NORM_ACCENTS, "")
             .lowercase()
-            .replace(Regex("[^a-z0-9]+"), "")
+            .replace(RE_NORM_NON_ALNUM, "")
 
     /** 2026-06-21 (user "fond d'écran des dialogs doit suivre le thème user") :
      *  applique le background du thème user (= ThemeManager.palette
@@ -589,6 +603,15 @@ private fun normSearch(s: String): String =
                     }
                 }
             }
+            return
+        }
+        // 2026-10-04 (user : « l'ouverture de Autres Replays est assez longue, alors qu'on ne va
+        //   pas choisir toutes les catégories ») : le dossier s'ouvre TOUT DE SUITE, et chaque
+        //   sous-dossier (Replays, Mix FR, WorldWide, Rakuten, Sony, OTF Films) n'est chargé qu'au
+        //   clic. Avant, les 5 sources étaient téléchargées d'un coup (10-30 s, 20-40 Mo gardés).
+        if (folderKey == "autres_replay") {
+            displayCategoriesWithMixFr(ctx, folderName, emptyList(), emptyList(),
+                onChannelSelected, paresseux = true)
             return
         }
         // Si on a du contenu cache (= WiTV/Adrar déjà chargés au boot, ou
@@ -1608,6 +1631,8 @@ private fun normSearch(s: String): String =
         sonyCategories: List<Category> = emptyList(),
         // 2026-09-19 : films VF du catalogue OTF — sous-dossier placé EN DERNIER (demande user).
         otfFilmCategories: List<Category> = emptyList(),
+        // 2026-10-04 : true = sous-dossiers chargés au clic (Autres Replays), listes vides en entrée.
+        paresseux: Boolean = false,
     ) {
         val dp = ctx.resources.displayMetrics.density
         val isTV = ctx.resources.configuration.uiMode and
@@ -1632,6 +1657,46 @@ private fun normSearch(s: String): String =
         // Sous-dossiers : Replays + Mix FR + Live MIX + WorldWide + Sport,
         //   Rakuten TV, Sony One. Chacun ouvre son sous-dialog.
         val folders = ArrayList<Pair<String, () -> Unit>>()
+        // 2026-10-04 : mode paresseux — chaque entrée charge SA source au clic (caches des
+        //   fetch*Public : les clics suivants sont instantanés). Même ordre que ci-dessous.
+        fun ouvrirParesseux(titre: String, charger: suspend () -> List<Category>) {
+            android.widget.Toast.makeText(ctx, "Chargement de $titre…", android.widget.Toast.LENGTH_SHORT).show()
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                val cats = try { charger() } catch (e: Throwable) {
+                    android.util.Log.w("LiveHubFolderDialog", "$titre KO : ${e.message}")
+                    emptyList()
+                }
+                withContext(Dispatchers.Main) {
+                    val ctx2 = ctxVivant(ctx)
+                    if (cats.isEmpty()) {
+                        android.widget.Toast.makeText(ctx2, "Aucune catégorie pour $titre",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                    } else {
+                        displayCategories(ctx2, titre, cats, onChannelSelected)
+                    }
+                }
+            }
+        }
+        suspend fun chargerMix(): List<Category> = LiveTvHubProvider.fetchMixFrCategoriesPublic()
+        suspend fun chargerReplays(): List<Category> =
+            LiveTvHubProvider.folderContents["autres_replay"]?.takeIf { it.isNotEmpty() }
+                ?: filterReplayByFolder(LiveTvHubProvider.fetchReplayCategoriesPublic(), "autres_replay")
+        if (paresseux) {
+            folders.add("📡 Multi Live" to { ouvrirParesseux("Multi Live") {
+                chargerMix().filter { it.name.startsWith("Multi Live", ignoreCase = true) } } })
+            folders.add("📺 Replays" to { ouvrirParesseux("Replays") { chargerReplays() } })
+            folders.add("📁 Mix FR" to { ouvrirParesseux("Mix FR") {
+                chargerMix().filter { !it.name.equals("Live MIX", ignoreCase = true) &&
+                    !it.name.startsWith("Multi Live", ignoreCase = true) } } })
+            folders.add("📺 Live MIX" to { ouvrirParesseux("Live MIX") {
+                chargerMix().filter { it.name.equals("Live MIX", ignoreCase = true) } } })
+            folders.add("🌍 WorldWide" to { ouvrirParesseux("WorldWide") {
+                LiveTvHubProvider.fetchWorldwideCategoriesPublic() } })
+            folders.add("🎬 Rakuten TV" to { ouvrirParesseux("Rakuten TV") {
+                filterFastByFolder(LiveTvHubProvider.fetchFastCategoriesPublic(), "rakuten_tv") } })
+            folders.add("📡 Sony One" to { ouvrirParesseux("Sony One") {
+                filterFastByFolder(LiveTvHubProvider.fetchFastCategoriesPublic(), "sony_one") } })
+        }
         // EN PREMIER (demande user) : le bouquet Multi Live.
         if (multiLiveCategories.isNotEmpty()) folders.add("📡 Multi Live" to {
             displayCategories(ctx, "Multi Live", multiLiveCategories, onChannelSelected) })
@@ -1721,8 +1786,9 @@ private fun normSearch(s: String): String =
         folders.add("\uD83D\uDCDA Film / série" to {
             show(ctx, "ma_bibliotheque", "Film / série", onChannelSelected)
         })
-        com.streamflixreborn.streamflix.utils.VegetaVod.prechauffer()
-        com.streamflixreborn.streamflix.utils.OlaVod.prechauffer()
+        // 2026-10-04 : plus de préchauffage VegetaVod / OlaVod à l'ouverture d'Autres Replays —
+        //   la carte Ciné Films charge elle-même les deux index au clic s'ils ne sont pas prêts
+        //   (et getTvShow / getServers / secours les chargent aussi à la demande).
 
         // 2026-09-19 (user « au pire tu mets ça dans le TV Hub, tout en bas dans Autres
         //   Replays ») : films VF d'OTF, ajoutés EN DERNIER pour être vraiment en bas de la
@@ -1757,11 +1823,14 @@ private fun normSearch(s: String): String =
 
         if (otfFilmCategories.isNotEmpty()) folders.add("🎬 OTF Films (VF)" to {
             displayCategories(ctx, "OTF Films (VF)", otfFilmCategories, onChannelSelected) })
+        else if (paresseux) folders.add("🎬 OTF Films (VF)" to { ouvrirParesseux("OTF Films (VF)") {
+            LiveTvHubProvider.fetchOtfFilmsCategoriesPublic() } })
 
         // 2026-06-27 (user "mets une recherche à l'ouverture du dossier") :
         //   agrège TOUTES les chaînes des sous-dossiers pour une recherche globale.
         val allChannels = ArrayList<TvShow>()
         val seenIds = HashSet<String>()
+        var sourcesRecherche = false
         for (cat in (baseCategories + mixCategories + worldwideCategories +
                 rakutenCategories + sonyCategories)) {
             (cat.list as? List<*>)?.filterIsInstance<TvShow>()?.forEach {
@@ -1807,7 +1876,7 @@ private fun normSearch(s: String): String =
                 setColor(android.graphics.Color.argb(0xCC, 0x20, 0x20, 0x20))
                 cornerRadius = 6 * dp
             }
-            filtreDiffere { s ->
+            fun appliquerRecherche(s: String) {
                     val q = normSearch(s)
                     if (q.isEmpty()) {
                         folderList.visibility = android.view.View.VISIBLE
@@ -1819,6 +1888,35 @@ private fun normSearch(s: String): String =
                         resultsAdapter.notifyDataSetChanged()
                         folderList.visibility = android.view.View.GONE
                         resultsList.visibility = android.view.View.VISIBLE
+                    }
+            }
+            filtreDiffere { s ->
+                    appliquerRecherche(s)
+                    // 2026-10-04 : mode paresseux — la recherche doit rester COMPLÈTE : à la
+                    //   première recherche, on charge toutes les sources en fond puis on relance.
+                    if (paresseux && !sourcesRecherche && normSearch(s).isNotEmpty()) {
+                        sourcesRecherche = true
+                        android.widget.Toast.makeText(ctx, "Recherche dans tous les sous-dossiers…",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                            val toutes = ArrayList<Category>()
+                            for (charge in listOf<suspend () -> List<Category>>(
+                                { chargerReplays() }, { chargerMix() },
+                                { LiveTvHubProvider.fetchWorldwideCategoriesPublic() },
+                                { val fast = LiveTvHubProvider.fetchFastCategoriesPublic()
+                                  filterFastByFolder(fast, "rakuten_tv") + filterFastByFolder(fast, "sony_one") },
+                            )) {
+                                toutes += try { charge() } catch (_: Throwable) { emptyList() }
+                            }
+                            withContext(Dispatchers.Main) {
+                                for (cat in toutes) {
+                                    (cat.list as? List<*>)?.filterIsInstance<TvShow>()?.forEach {
+                                        if (seenIds.add(it.id)) allChannels.add(it)
+                                    }
+                                }
+                                appliquerRecherche(text?.toString()?.trim().orEmpty())
+                            }
+                        }
                     }
                 }
         }

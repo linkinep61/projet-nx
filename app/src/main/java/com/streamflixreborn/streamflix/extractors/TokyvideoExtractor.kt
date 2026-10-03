@@ -57,6 +57,7 @@ class TokyvideoExtractor : Extractor() {
         Log.d(TAG, "extract() link=$link")
 
         val client = OkHttpClient.Builder()
+            .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
             .dns(DnsResolver.doh)
             .followRedirects(true)
             .connectTimeout(8, TimeUnit.SECONDS)

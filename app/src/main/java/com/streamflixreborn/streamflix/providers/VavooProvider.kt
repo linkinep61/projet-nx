@@ -55,6 +55,28 @@ object VavooProvider : Provider, IptvProvider {
     private const val MEDIAHUBMX_UA = "MediaHubMX/2"
     private const val CLIENT_VERSION = "3.0.2"
 
+    // 2026-10-04 : Regex à motif constant de normalizeKey / cleanDisplayName /
+    //   logo de secours, précompilées UNE fois (avant : ~13 compilations par appel,
+    //   pour chaque chaîne). Motifs et options copiés à l'identique. Déclarées en
+    //   tête d'objet pour être prêtes avant tout val qui appellerait normalizeKey.
+    private val RE_NK_MARQUEUR_SOURCE = Regex("\\s*\\.[a-z]\\s*$")
+    private val RE_NK_CROCHETS = Regex("\\[.*?\\]")
+    private val RE_NK_PARENTHESES = Regex("\\(.*?\\)")
+    private val RE_NK_ACCENT_E = Regex("[éèêë]")
+    private val RE_NK_ACCENT_A = Regex("[àâä]")
+    private val RE_NK_ACCENT_U = Regex("[ùûü]")
+    private val RE_NK_ACCENT_I = Regex("[îï]")
+    private val RE_NK_ACCENT_O = Regex("[ôö]")
+    private val RE_NK_QUALITE = Regex("\\b(fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv|backup|alt|premium|gold|fullhd|full|1080p?|720p?|480p?|test|ott|raw)\\b")
+    private val RE_NK_PLUS_UN = Regex("\\+\\s?1\\b")
+    private val RE_NK_PREFIXE_FR = Regex("^(fr|france)\\s*[:|.\\-]\\s*")
+    private val RE_NK_SUFFIXE_FR = Regex("\\s+(fr|french|francais|france)\\s*$")
+    private val RE_NK_NON_ALNUM = Regex("[^a-z0-9]")
+    private val RE_CD_MARQUEUR_SOURCE = Regex("\\s*\\.[a-zA-Z]\\s*$")
+    private val RE_CD_QUALITE = Regex("\\b(FHD|UHD|HD|SD|4K|RAW|HEVC|H265|PPV|BACKUP|FULLHD|FULL|1080p?|720p?)\\b", RegexOption.IGNORE_CASE)
+    private val RE_ESPACES = Regex("\\s+")
+    private val RE_CROCHETS_OU_PARENTHESES = Regex("[\\[\\(].*?[\\]\\)]")
+
     // ───────── API domains (fallback chain) ─────────
     // 2026-05-28 : miroir préféré en premier (choix user dans Paramètres),
     // les autres restent en fallback.
@@ -459,34 +481,34 @@ object VavooProvider : Provider, IptvProvider {
     private fun normalizeKey(name: String): String {
         return name.lowercase()
             // 1) Strip trailing source marker " .b" / " .c" / " .s"
-            .replace(Regex("\\s*\\.[a-z]\\s*$"), "")
+            .replace(RE_NK_MARQUEUR_SOURCE, "")
             // 2) Strip brackets and parens content
-            .replace(Regex("\\[.*?\\]"), " ")
-            .replace(Regex("\\(.*?\\)"), " ")
+            .replace(RE_NK_CROCHETS, " ")
+            .replace(RE_NK_PARENTHESES, " ")
             // 3) Diacritic normalization
-            .replace(Regex("[éèêë]"), "e")
-            .replace(Regex("[àâä]"), "a")
-            .replace(Regex("[ùûü]"), "u")
-            .replace(Regex("[îï]"), "i")
-            .replace(Regex("[ôö]"), "o")
+            .replace(RE_NK_ACCENT_E, "e")
+            .replace(RE_NK_ACCENT_A, "a")
+            .replace(RE_NK_ACCENT_U, "u")
+            .replace(RE_NK_ACCENT_I, "i")
+            .replace(RE_NK_ACCENT_O, "o")
             .replace("ç", "c")
             // 4) Quality / variant tags (word-bounded)
             // 2026-05-11 : "live" retiré du strip car "Canal+ Live 1/2/3" est un
             // distinguishing marker (multi-feed Canal+). Sans ça, normalizeKey
             // collapse Canal+ Live 1, 2, 3, ... → "canal" → tous matchent la même
             // entrée → 1 seule Canal+ Live affichée + placeholder "CA" pour les autres.
-            .replace(Regex("\\b(fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv|backup|alt|premium|gold|fullhd|full|1080p?|720p?|480p?|test|ott|raw)\\b"), " ")
+            .replace(RE_NK_QUALITE, " ")
             // 5) +1 timeshift
-            .replace(Regex("\\+\\s?1\\b"), " ")
+            .replace(RE_NK_PLUS_UN, " ")
             // 6) Symbols → text
             .replace("+", "plus")
             .replace("&", "and")
             // 7) Leading "FR :" / "FR -" / "France:" prefix
-            .replace(Regex("^(fr|france)\\s*[:|.\\-]\\s*"), "")
+            .replace(RE_NK_PREFIXE_FR, "")
             // 8) Trailing FR / French
-            .replace(Regex("\\s+(fr|french|francais|france)\\s*$"), "")
+            .replace(RE_NK_SUFFIXE_FR, "")
             // 9) Final strip non-alphanumeric (collapses everything to canonical key)
-            .replace(Regex("[^a-z0-9]"), "")
+            .replace(RE_NK_NON_ALNUM, "")
     }
 
     // ───────── Logos officiels FR (calqué sur VegetaTvProvider.manualLogoMap) ─────────
@@ -929,8 +951,8 @@ object VavooProvider : Provider, IptvProvider {
             else -> "1E88E5"
         }
         val initials = name
-            .replace(Regex("[\\[\\(].*?[\\]\\)]"), " ")
-            .split(Regex("\\s+"))
+            .replace(RE_CROCHETS_OU_PARENTHESES, " ")
+            .split(RE_ESPACES)
             .filter { it.isNotBlank() }
             .take(3)
             .joinToString("+")
@@ -1203,6 +1225,9 @@ object VavooProvider : Provider, IptvProvider {
     /** Pré-chauffe le catalogue Mon IPTV (mémoire) en arrière-plan, sans bloquer la home. */
     @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     private fun prechaufferMonIptv() {
+        // 2026-10-04 MODE LÉGER : pas de préchargement du catalogue Mon IPTV à l'accueil Vavoo ;
+        //   il sera chargé à la demande (serveursMonIptvPour) quand une chaîne est ouverte.
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) return
         kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
             try { MyIptvProvider.chainesDirectes() } catch (_: Throwable) {}
         }
@@ -1409,9 +1434,9 @@ object VavooProvider : Provider, IptvProvider {
      *  ou ".c" tout seul), fallback au nom raw pour éviter les UI vides. */
     private fun cleanDisplayName(raw: String): String {
         val cleaned = raw
-            .replace(Regex("\\s*\\.[a-zA-Z]\\s*$"), "")
-            .replace(Regex("\\b(FHD|UHD|HD|SD|4K|RAW|HEVC|H265|PPV|BACKUP|FULLHD|FULL|1080p?|720p?)\\b", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(RE_CD_MARQUEUR_SOURCE, "")
+            .replace(RE_CD_QUALITE, " ")
+            .replace(RE_ESPACES, " ")
             .trim()
         return cleaned.ifBlank { raw.trim().ifBlank { "Chaîne" } }
     }

@@ -787,6 +787,15 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         // 2026-10-03 (user : « une petite notification au-dessus de télécharger ») : bouton
         //   « Télécharger la dernière version » + ligne 🔔 visible seulement quand un écrasement
         //   (version corrigée au même numéro) est en ligne. Voir InAppUpdater.ecrasementDisponible.
+        // 2026-10-04 : Interface (Automatique / TV / Mobile). Masqué sur les builds forcés TV ou mobile.
+        findPreference<Preference>("APP_INTERFACE")?.apply {
+            isVisible = com.streamflixreborn.streamflix.utils.DetectionTv.buildUniversel()
+            summary = com.streamflixreborn.streamflix.utils.DetectionTv.libelleChoix(requireContext())
+            setOnPreferenceClickListener {
+                activity?.let { com.streamflixreborn.streamflix.utils.DetectionTv.choisirDansParametres(it) }
+                true
+            }
+        }
         findPreference<Preference>("APP_ECRASEMENT")?.isVisible = false
         findPreference<Preference>("APP_DERNIERE_VERSION")?.setOnPreferenceClickListener {
             telechargerDerniereVersion(); true

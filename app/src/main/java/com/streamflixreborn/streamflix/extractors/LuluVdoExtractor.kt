@@ -336,6 +336,8 @@ class LuluVdoExtractor : Extractor() {
                             // so shouldInterceptRequest allows all requests through
                             inPlaybackMode = true
                             Log.d(TAG, "Keeping WebView alive for segment fetching (playback mode, file:// origin)")
+                            // L'ancienne WebView partagée était écrasée sans destroy() → fuite de 20-50 Mo.
+                            if (sharedWebView != null && sharedWebView !== webView) releaseSharedWebView()
                             sharedWebView = webView
                         } else {
                             mainHandler.post {

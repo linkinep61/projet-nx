@@ -503,6 +503,13 @@ class PlayerViewModel(
         val providerName = UserPreferences.currentProvider?.name.orEmpty()
         if (providerName in IPTV_PROVIDER_NAMES) return
         allKnownServers = servers
+        // 2026-10-04 (user : « on coupe, c'est vraiment du bonus ») : en mode léger, pas de sonde
+        //   de qualité — elle extrayait CHAQUE serveur (4 en parallèle, WebView/PoW compris) pendant
+        //   la lecture juste pour afficher 720p/1080p. La liste reste dans l'ordre d'arrivée.
+        if (UserPreferences.modeLeger) {
+            Log.i("QualityProbe", "mode léger : sonde de qualité désactivée")
+            return
+        }
 
         // Idempotent : une seule instance à la fois
         if (qualityProbeJob?.isActive == true) {
@@ -913,7 +920,8 @@ class PlayerViewModel(
             val selfJob = coroutineContext[kotlinx.coroutines.Job]
             viewModelScope.launch(Dispatchers.IO) {
                 delay(12_000L)
-                if (selfJob?.isActive == true) {
+                // 2026-10-04 : versions de test seulement (le dump fige l'app pendant la capture).
+                if (selfJob?.isActive == true && com.streamflixreborn.streamflix.BuildConfig.DEBUG) {
                     Log.e("HANGDUMP", "getServers >12s SANS FIN pour id=$id — DUMP THREADS ↓")
                     Thread.getAllStackTraces().forEach { (t, st) ->
                         val relevant = st.any { it.className.contains("streamflixreborn") } ||
@@ -1286,9 +1294,13 @@ class PlayerViewModel(
                         //     pas ré-introduire de faux doublons.
                         val lecteurTag = Regex("""#lecteur=([a-z0-9_\-]+)""", RegexOption.IGNORE_CASE)
                             .find(srv.src)?.groupValues?.get(1)?.lowercase()
-                        val normUrl = srv.src.substringBefore("#").trim()
-                            .substringBefore("?").trimEnd('/').lowercase() +
-                            (lecteurTag?.let { "#$it" } ?: "")
+                        // 2026-10-04 : même fichier sur deux domaines miroirs (uqload.cx/.is,
+                        //   playmogo/dood…) = UN serveur (cf. CleFichier). Hors familles connues :
+                        //   clé d'URL habituelle, inchangée.
+                        val normUrl = com.streamflixreborn.streamflix.utils.CleFichier.de(srv.src)
+                            ?: (srv.src.substringBefore("#").trim()
+                                .substringBefore("?").trimEnd('/').lowercase() +
+                                (lecteurTag?.let { "#$it" } ?: ""))
                         seenSrcKeys.add("$lang|$normUrl")
                     }
                 if (fresh.isEmpty()) {
@@ -1446,8 +1458,15 @@ class PlayerViewModel(
                             // Puis appliquer la grâce FR si pas de VF
                             val hasVfNow = allKnownServers.any { isVf(it) }
                             if (!hasVfNow && FR_GRACE_MS > STABILIZE_MS) {
-                                // Pas de VF → attendre le reste de la grâce FR
-                                kotlinx.coroutines.delay(FR_GRACE_MS - STABILIZE_MS)
+                                // Pas de VF → attendre le reste de la grâce FR, mais par tranches de 400 ms :
+                                //   on s'arrête dès qu'un VF arrive (avant : 8 s d'un bloc, même si le VF
+                                //   arrivait au bout d'une seconde). Plafond inchangé.
+                                var resteGrace = FR_GRACE_MS - STABILIZE_MS
+                                while (resteGrace > 0 && allKnownServers.none { isVf(it) }) {
+                                    val tranche = minOf(400L, resteGrace)
+                                    kotlinx.coroutines.delay(tranche)
+                                    resteGrace -= tranche
+                                }
                             }
                             if (!autoPlayEmitted) {
                                 autoPlayEmitted = true
@@ -1980,7 +1999,59 @@ class PlayerViewModel(
         progressiveStillCollecting = false
     }
 
-    fun getVideo(server: Video.Server): kotlinx.coroutines.Job {
+    /** 2026-10-04 — Veille de « patience » sur une extraction lancée AUTOMATIQUEMENT (cf. getVideo). */
+    private var patienceJob: kotlinx.coroutines.Job? = null
+    /** Id du contenu ouvert : la patience ne s'applique JAMAIS au direct (chaînes collantes). */
+    private val idContenuPatience = id
+
+    /**
+     * 2026-10-04 (user : « comment ça se fait que le lecteur bloque aussi longtemps sur un
+     *   serveur ? », « plus de 20 secondes, c'est déjà énorme », puis « attention aux serveurs
+     *   lents, ne pas les casser ») — sur Léon, l'auto-play a attendu une minute un serveur muet
+     *   alors que Doodstream était DÉJÀ extrait (0,7 s) et prêt à jouer.
+     *
+     * Règle, volontairement étroite :
+     *   · uniquement pour un serveur choisi par l'APP (auto-play, repli automatique) — un serveur
+     *     choisi à la main par le user n'est JAMAIS abandonné ;
+     *   · on ne bascule QUE vers un serveur dont la vidéo est déjà extraite (cache du pré-extract),
+     *     de même langue (VF reste VF) → démarrage instantané, aucun pari ;
+     *   · le serveur lent n'est PAS marqué mort : pas de FailedLoadingVideo, il reste normal dans
+     *     la liste et se relance d'un tap ;
+     *   · la famille Filemoon (vérification humaine ~20 s) garde 40 s de patience.
+     * S'il n'y a aucune alternative prête, on laisse le serveur finir comme avant.
+     */
+    private fun surveillerPatience(server: Video.Server, job: kotlinx.coroutines.Job) {
+        patienceJob?.cancel()
+        val direct = listOf(
+            "ch::", "sport::", "ola::", "ola_ep::", "vegeta::", "vegeta_ep::", "livehub::",
+            "sportlive::", "match::", "vavoo::", "myiptv-live::",
+        ).any { idContenuPatience.startsWith(it) }
+        if (direct || UserPreferences.currentProvider is com.streamflixreborn.streamflix.providers.IptvProvider) return
+        val s = server.src.lowercase()
+        val lentParNature = listOf(
+            "filemoon", "lukefirst", "weneverbeenfree", "moflix-stream", "bysebuho",
+            "bysezoxexe", "bysejikuar", "bysekoze", "bysesayeveum", "gn1r5n",
+        ).any { s.contains(it) }
+        val patienceMs = if (lentParNature) 40_000L else 12_000L
+        patienceJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(patienceMs)
+            if (!job.isActive || getVideoJob !== job) return@launch
+            val memeLangue = isVfServer(server)
+            val alternative = allKnownServers.firstOrNull { alt ->
+                alt.id != server.id &&
+                    alt.src.isNotBlank() &&
+                    (!memeLangue || isVfServer(alt)) &&
+                    com.streamflixreborn.streamflix.extractors.Extractor.peekCachedVideo(alt.src) != null
+            } ?: run {
+                Log.d("PlayerViewModel", "Patience ${patienceMs / 1000}s dépassée sur ${server.name}, aucune alternative prête → on attend")
+                return@launch
+            }
+            Log.w("PlayerViewModel", "Patience ${patienceMs / 1000}s dépassée sur ${server.name} → bascule sur ${alternative.name} (déjà extrait)")
+            getVideo(alternative, auto = true)
+        }
+    }
+
+    fun getVideo(server: Video.Server, auto: Boolean = false): kotlinx.coroutines.Job {
         // 2026-07-27 : si une extraction est DÉJÀ en cours pour CE serveur, on la RÉUTILISE au lieu
         //   de l'annuler+relancer. Sinon Filemoon (vérif WebView ~20s) se faisait tuer par un 2e
         //   getVideo du même serveur (déclenché par la liste progressive) → « cancelled » en boucle,
@@ -1995,6 +2066,7 @@ class PlayerViewModel(
         //   parallèle saturent CPU + mémoire et le player tourne dans le vide.
         getVideoJob?.cancel()
         preExtractJob?.cancel()
+        patienceJob?.cancel()
         getVideoServerId = server.id
         // 2026-06-30 (user "la qualité serveur ne se déclenche plus") : NE PLUS
         //   annuler qualityProbeJob ici. L'auto-play du meilleur serveur appelle
@@ -2084,6 +2156,7 @@ class PlayerViewModel(
         }
         }
         getVideoJob = job
+        if (auto) surveillerPatience(server, job)
         return job
     }
 

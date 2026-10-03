@@ -192,7 +192,8 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     private const val CF_TAG = "AnimeSamaBypass"
 
     private const val CACHE_TTL_MS = 5 * 60 * 1000L // 5 minutes
-    private val documentCache = mutableMapOf<String, Pair<Document, Long>>()
+    // ConcurrentHashMap : le cache est lu/écrit depuis plusieurs coroutines en parallèle.
+    private val documentCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Document, Long>>()
 
     @Volatile private var lastVisibleBypassAt = 0L
     private const val VISIBLE_BYPASS_COOLDOWN_MS = 60_000L
@@ -215,12 +216,53 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     }
 
     private fun cacheDocument(url: String, doc: Document) {
-        if (documentCache.size > 20) {
-            val now = System.currentTimeMillis()
-            documentCache.entries.removeAll { now - it.value.second > CACHE_TTL_MS }
+        // 2026-10-04 : purge des pages périmées à CHAQUE ajout + vrai plafond de 20 (les plus
+        //   anciennes partent). Avant, la purge n'avait lieu qu'au-delà de 20 entrées et des
+        //   pages HTML entières (1-3 Mo chacune) restaient en mémoire pour toute la session.
+        val now = System.currentTimeMillis()
+        documentCache.entries.removeAll { now - it.value.second > CACHE_TTL_MS }
+        val enTrop = documentCache.size - 19
+        if (enTrop > 0) {
+            documentCache.entries.sortedBy { it.value.second }.take(enTrop)
+                .forEach { documentCache.remove(it.key) }
         }
-        documentCache[url] = Pair(doc, System.currentTimeMillis())
+        documentCache[url] = Pair(doc, now)
     }
+
+    // 2026-10-04 : cache TEXTE des episodes.js (clé = URL exacte, 5 min, ~40 entrées max).
+    //   getTvShow, getEpisodesBySeason, getServers et search retéléchargeaient le même
+    //   fichier plusieurs fois de suite. On ne garde QUE les réponses valides : celles qui
+    //   contiennent « var eps1 » (critère que tous les appelants utilisent déjà) et aucun
+    //   marqueur de challenge Cloudflare. Les erreurs HTTP / soft 404 lèvent une exception
+    //   dans fetchTextWith → jamais mises en cache, comportement inchangé.
+    private val episodesJsCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+    private const val EPISODES_JS_CACHE_MAX = 40
+
+    /** episodes.js avec cache ; probe = true → client court (probeClient), sinon client normal. */
+    private suspend fun chargerEpisodesJs(url: String, probe: Boolean = false): String {
+        val entree = episodesJsCache[url]
+        if (entree != null) {
+            if (System.currentTimeMillis() - entree.second <= CACHE_TTL_MS) return entree.first
+            episodesJsCache.remove(url, entree)
+        }
+        val texte = if (probe) probeText(url) else fetchText(url)
+        if (texte.contains("var eps1") && challengeKeywords.none { texte.contains(it, ignoreCase = true) }) {
+            val now = System.currentTimeMillis()
+            episodesJsCache.entries.removeAll { now - it.value.second > CACHE_TTL_MS }
+            val enTrop = episodesJsCache.size - (EPISODES_JS_CACHE_MAX - 1)
+            if (enTrop > 0) {
+                episodesJsCache.entries.sortedBy { it.value.second }.take(enTrop)
+                    .forEach { episodesJsCache.remove(it.key) }
+            }
+            episodesJsCache[url] = Pair(texte, now)
+        }
+        return texte
+    }
+
+    // 2026-10-04 : les sondes episodes.js partent désormais à 4 en parallèle. Si plusieurs
+    //   tombent en même temps sur un challenge CF, on ne lance qu'UN bypass à la fois : les
+    //   suivants attendent puis trouvent la page déjà en cache (getDocumentWithBypass).
+    private val ressourceBypassMutex = Mutex()
 
     private fun getResolver(): com.streamflixreborn.streamflix.utils.WebViewResolver {
         return webViewResolver
@@ -412,7 +454,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         //   cookie + l'UA stealth associé.
         if (challengeKeywords.any { text.contains(it, ignoreCase = true) }) {
             Log.d(CF_TAG, "[Provider] Challenge CF sur une ressource ($url) → bypass")
-            getDocumentWithBypass(baseUrl)
+            ressourceBypassMutex.withLock { getDocumentWithBypass(baseUrl) }
             val cookie = try {
                 android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
             } catch (_: Throwable) { "" }
@@ -1050,7 +1092,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                         suspend fun countEpisodes(folder: String): Int {
                             for (lang in listOf("vostfr", "vf")) {
                                 try {
-                                    val epsJs = probeText("${baseUrl}catalogue/$slug/$folder/$lang/episodes.js")
+                                    val epsJs = chargerEpisodesJs("${baseUrl}catalogue/$slug/$folder/$lang/episodes.js", probe = true)
                                     val eps1 = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""").find(epsJs)?.groupValues?.get(1) ?: ""
                                     val count = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1).count()
                                     if (count > 0) return count
@@ -1449,7 +1491,22 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 if (num != null) "Saison $num" else label
             } else label
             folder to cleanLabel
-        }.toList().distinctBy { it.first }
+        }.toList().distinctBy { it.first }.let { dossiers ->
+            // 2026-10-04 (user : « Black Clover, deux saisons, et à la fin il nous propose un
+            //   film avec un numéro de saison bidon » — « les films n'ont rien à faire ici ») :
+            //   AnimeSama range les films de la série dans le même panneau que les saisons
+            //   (panneauAnime("Film", "film/vostfr")). Ce n'est pas une saison → on les retire.
+            //   Exception : une fiche qui ne contient QUE des films (œuvre-film) les garde,
+            //   sinon elle n'aurait plus rien à lire.
+            fun estFilm(dossier: String, libelle: String): Boolean {
+                val l = libelle.lowercase().trim()
+                val d = dossier.lowercase()
+                return l.startsWith("film") || l.startsWith("movie") ||
+                    d.startsWith("film") || d.startsWith("movie")
+            }
+            val sansFilms = dossiers.filterNot { (dossier, libelle) -> estFilm(dossier, libelle) }
+            if (sansFilms.isNotEmpty()) sansFilms else dossiers
+        }
 
         Log.d(TAG, "[Seasons] Parsed ${scrapedFolders.size} panneauAnime entries: ${scrapedFolders.map { "${it.second} -> ${it.first}" }}")
 
@@ -1471,12 +1528,35 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         // Track eps1 content per lang to deduplicate seasons with identical episodes
         val seenEps1PerLang = mutableMapOf<String, MutableSet<String>>()
 
-        for (folder in foldersToProbe) {
+        // 2026-10-04 : avec des dossiers scrapés, la boucle ci-dessous n'a AUCUN arrêt anticipé
+        //   (les break ne concernent que le sondage séquentiel saison1..20) → tous les
+        //   episodes.js sont de toute façon téléchargés. On les récupère donc d'abord à 4 en
+        //   parallèle, puis la boucle d'origine les traite dans le MÊME ordre (dossier puis
+        //   langue) → dédoublonnage eps1 et ordre des saisons identiques. null = échec
+        //   (équivaut à l'exception avalée d'origine). Sondage séquentiel : inchangé.
+        val textesPrecharges: List<String?>? = if (scrapedFolders.isNotEmpty()) {
+            val sem = Semaphore(4)
+            coroutineScope {
+                foldersToProbe.flatMap { f -> languages.map { l -> f to l } }.map { (f, l) ->
+                    async {
+                        sem.withPermit {
+                            try {
+                                chargerEpisodesJs("${baseUrl}catalogue/$slug/${f.path}/$l/episodes.js", probe = true)
+                            } catch (_: Exception) { null }
+                        }
+                    }
+                }.awaitAll()
+            }
+        } else null
+
+        for ((folderIdx, folder) in foldersToProbe.withIndex()) {
             var anyFound = false
-            for (lang in languages) {
+            for ((langIdx, lang) in languages.withIndex()) {
                 try {
                     val probeUrl = "${baseUrl}catalogue/$slug/${folder.path}/$lang/episodes.js"
-                    val text = probeText(probeUrl)
+                    val text = if (textesPrecharges != null) {
+                        textesPrecharges[folderIdx * languages.size + langIdx] ?: continue
+                    } else chargerEpisodesJs(probeUrl, probe = true)
                     if (text.contains("var eps1") && text.contains("http")) {
                         val eps1Content = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""").find(text)?.groupValues?.get(1) ?: ""
                         val urlCount = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content).count()
@@ -1513,7 +1593,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             for (lang in languages) {
                 try {
                     val probeUrl = "${baseUrl}catalogue/$slug/$lang/episodes.js"
-                    val text = probeText(probeUrl)
+                    val text = chargerEpisodesJs(probeUrl, probe = true)
                     if (text.contains("var eps1") && text.contains("http")) {
                         langSeasonFolders.getOrPut(lang) { mutableListOf() }.add(SeasonFolder("", "Épisodes"))
                     }
@@ -1532,7 +1612,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             for (folder in fallbackFolders) {
                 try {
                     val probeUrl = "${baseUrl}catalogue/$slug/${folder.path}/$fallbackLang/episodes.js"
-                    val text = probeText(probeUrl)
+                    val text = chargerEpisodesJs(probeUrl, probe = true)
                     if (text.contains("var eps1") && text.contains("http")) {
                         val eps1Content = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""").find(text)?.groupValues?.get(1) ?: ""
                         val urlCount = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content).count()
@@ -1546,7 +1626,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             if (langSeasonFolders.isEmpty()) {
                 try {
                     val probeUrl = "${baseUrl}catalogue/$slug/$fallbackLang/episodes.js"
-                    val text = probeText(probeUrl)
+                    val text = chargerEpisodesJs(probeUrl, probe = true)
                     if (text.contains("var eps1") && text.contains("http")) {
                         langSeasonFolders.getOrPut(fallbackLang) { mutableListOf() }.add(SeasonFolder("", "Épisodes"))
                     }
@@ -1677,10 +1757,24 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 // Vérifie quelles saisons ont vraiment des épisodes dans CETTE langue
                 val verified = mutableListOf<Pair<String, String>>()
                 val seenEps1 = mutableSetOf<String>()
-                for ((path, label) in scrapedFolders) {
+                // 2026-10-04 : boucle sans arrêt anticipé → téléchargements à 4 en parallèle,
+                //   puis traitement dans l'ordre d'origine (dédoublonnage eps1 inchangé).
+                val sem = Semaphore(4)
+                val textes = coroutineScope {
+                    scrapedFolders.map { (p, _) ->
+                        async {
+                            sem.withPermit {
+                                try {
+                                    chargerEpisodesJs("${baseUrl}catalogue/$slug/$p/$lang/episodes.js", probe = true)
+                                } catch (_: Exception) { null }
+                            }
+                        }
+                    }.awaitAll()
+                }
+                for ((i, pair) in scrapedFolders.withIndex()) {
+                    val (path, label) = pair
                     try {
-                        val probeUrl = "${baseUrl}catalogue/$slug/$path/$lang/episodes.js"
-                        val text = probeText(probeUrl)
+                        val text = textes[i] ?: continue
                         if (text.contains("var eps1") && text.contains("http")) {
                             val eps1Content = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""").find(text)?.groupValues?.get(1) ?: ""
                             val urlCount = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content).count()
@@ -1738,7 +1832,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         Log.d(TAG, "[Episodes] Fetching: $url")
 
         val episodesJs = try {
-            val text = fetchText(url)
+            val text = chargerEpisodesJs(url)
             if (text.contains("var eps1")) text else ""
         } catch (e: Exception) {
             Log.e(TAG, "[Episodes] Error fetching: ${e.message}")
@@ -1791,7 +1885,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                         val fetchUrl = "${baseUrl}catalogue/$movieSlug/$folder/$lang/episodes.js"
                         Log.d(TAG, "[Movie Servers] Fetching: $fetchUrl")
                         val episodesJs = try {
-                            fetchText(fetchUrl)
+                            chargerEpisodesJs(fetchUrl)
                         } catch (e: Exception) {
                             Log.e(TAG, "[Movie Servers] Fetch failed for $lang: ${e.message}")
                             return@async emptyList<Video.Server>()
@@ -1856,7 +1950,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             val fetchUrl = "${baseUrl}catalogue/$jsPath/episodes.js"
             Log.d(TAG, "[TV Servers] Fetching: $fetchUrl")
             val episodesJs = try {
-                fetchText(fetchUrl)
+                chargerEpisodesJs(fetchUrl)
             } catch (e: Exception) {
                 Log.e(TAG, "[TV Servers] Error fetching episodes.js: ${e.message}")
                 return emptyList()

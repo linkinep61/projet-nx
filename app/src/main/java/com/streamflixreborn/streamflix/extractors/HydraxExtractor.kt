@@ -39,6 +39,10 @@ open class HydraxExtractor : Extractor() {
         //   L'extraction directe automatique a été tentée à fond (cf. AbyssResolver, gardé dormant) :
         //   abyss refuse de mint l'URL sans geste humain réel → pas fiable en auto. On garde donc le
         //   seul overlay (pas de 2e WebView headless qui créait un double overlay).
+        //   2026-10-03 — RE-MESURÉ : l'AbyssResolver capte bien l'URL (storage.googleapis.com/
+        //   mediastorage/.../<id>.mp4#mp4/chunk/…maxChunkSize=), mais le bucket renvoie toujours
+        //   « UserProjectAccountProblem / billing account disabled » à tout GET direct → ExoPlayer
+        //   part en IDLE. Seul le JS du player Abyss sait lire ce format par morceaux, d'où l'overlay.
         return Video(
             source = link,
             webViewUrl = link,

@@ -694,6 +694,14 @@
             android:title="@string/settings_github"
             app:iconSpaceReserved="false" />
 
+        <!-- 2026-10-03 : mode léger pour les appareils peu puissants (voir UserPreferences.modeLeger). -->
+        <SwitchPreferenceCompat
+            android:key="pref_mode_leger"
+            android:title="Mode léger"
+            android:summary="Pour les appareils peu puissants : recherche et sources allégées, moins de mémoire utilisée."
+            android:defaultValue="false"
+            app:iconSpaceReserved="false" />
+
         <!-- 2026-07-25 : bascule Android Auto (radio ↔ vidéo, exclusifs). -->
         <SwitchPreferenceCompat
             android:key="pref_car_video_mode"
@@ -708,6 +716,12 @@
             android:key="p_settings_local_videos"
             android:title="Vidéos locales"
             android:summary="Vidéos internes, carte SD ou clé USB (appui long = favori)"
+            app:iconSpaceReserved="false" />
+
+        <!-- 2026-10-04 : choix de l'interface (Automatique / TV / Mobile), voir DetectionTv. -->
+        <Preference
+            android:key="APP_INTERFACE"
+            android:title="Interface"
             app:iconSpaceReserved="false" />
 
         <SwitchPreference

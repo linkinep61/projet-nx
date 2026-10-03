@@ -580,7 +580,14 @@ class AppAdapter(
 
         val adjustedPosition = header?.let { position - 1 } ?: position
         if (adjustedPosition in items.indices) {
-            return items.stableIdAt(adjustedPosition)
+            // 2026-10-04 : identifiants calculés UNE fois pour toute la liste (O(n)) puis lus en
+            //   O(1). Avant, chaque appel parcourait la liste jusqu'à la carte (O(n) par carte,
+            //   à chaque affichage) → défilement de plus en plus lent sur les grilles longues.
+            //   Mêmes valeurs qu'avant (même identité, même empreinte).
+            val ids = idsStables?.takeIf { it.size == items.size }
+                ?: items.buildIdentityMap().let { map -> LongArray(map.size) { empreinteId(map[it]) } }
+                    .also { idsStables = it }
+            return ids[adjustedPosition]
         }
 
         val loadMorePosition = itemCount - 1 - (if (footer != null) 1 else 0)
@@ -673,6 +680,7 @@ class AppAdapter(
             states.clear()
             items.clear()
             items.addAll(list)
+            idsStables = null
             notifyDataSetChanged()
             return
         }
@@ -717,6 +725,7 @@ class AppAdapter(
 
         items.clear()
         items.addAll(list)
+        idsStables = null
         result.dispatchUpdatesTo(this)
     }
 
@@ -728,6 +737,7 @@ class AppAdapter(
         if (newItems.isEmpty()) return
         val start = items.size
         items.addAll(newItems)
+        idsStables = null
         notifyItemRangeInserted(start, newItems.size)
     }
 
@@ -735,6 +745,7 @@ class AppAdapter(
         val n = items.size
         if (n == 0) return
         items.clear()
+        idsStables = null
         notifyItemRangeRemoved(0, n)
     }
 
@@ -799,11 +810,11 @@ class AppAdapter(
         val bind: ((binding: T) -> Unit)? = null,
     )
 
-    private fun List<Item>.stableIdAt(position: Int): Long {
-        return identityAt(position).fold(1125899906842597L) { acc, char ->
-            31L * acc + char.code
-        }
-    }
+    private fun empreinteId(identite: String): Long =
+        identite.fold(1125899906842597L) { acc, char -> 31L * acc + char.code }
+
+    /** Cache des identifiants stables (cf. getItemId) — remis à null à chaque modification de la liste. */
+    private var idsStables: LongArray? = null
 
     // 2026-05-25 FIX ANR : pré-calcul des identités en O(n) total au lieu de O(n²).
     // L'ancien identityAt(position) faisait un subList(0,position).count{} = O(n) par appel.
@@ -818,15 +829,6 @@ class AppAdapter(
             occurrenceCounts[compositeKey] = occ + 1
             "$compositeKey:$occ"
         }
-    }
-
-    private fun List<Item>.identityAt(position: Int): String {
-        val item = this[position]
-        val baseKey = item.baseIdentityKey()
-        val occurrenceIndex = subList(0, position).count {
-            it.itemType == item.itemType && it.baseIdentityKey() == baseKey
-        }
-        return "${item.itemType.ordinal}:$baseKey:$occurrenceIndex"
     }
 
     private fun Item.baseIdentityKey(): String = when (this) {

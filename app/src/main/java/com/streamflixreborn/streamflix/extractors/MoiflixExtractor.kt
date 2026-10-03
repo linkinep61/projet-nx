@@ -235,15 +235,40 @@ open class MoiflixExtractor : Extractor() {
                             // popup ad est bloquée par onCreateWindow=false.
                             view.evaluateJavascript(AUTO_CLICK_PLAY_JS, null)
 
+                            // 2026-10-04 (user : « comment ça se fait que le lecteur bloque aussi
+                            //   longtemps sur un serveur ? ») — lien xtremestream DIRECT dont le
+                            //   fichier a disparu : le serveur renvoie une page VIDE (0 octet,
+                            //   vérifié sur Léon / Movix). Aucun m3u8 ne viendra jamais, mais on
+                            //   attendait le filet de 50 s, puis le plafond de 60 s du lecteur
+                            //   coupait tout : une minute perdue alors que d'autres serveurs
+                            //   étaient prêts. On lit ce que la WebView a VRAIMENT reçu : page
+                            //   vide → abandon immédiat, le lecteur passe au serveur suivant.
+                            val pageLecteurDirect = finishedUrl?.contains("xtremestream") == true &&
+                                finishedUrl.contains("/player/")
+                            if (pageLecteurDirect) {
+                                view.evaluateJavascript(
+                                    "(function(){var h=document.documentElement;" +
+                                        "return h ? h.innerText.trim().length + document.getElementsByTagName('script').length : 0;})()"
+                                ) { taille ->
+                                    if (!resolved && (taille == "0" || taille == "null")) {
+                                        android.util.Log.w("MoiflixExtractor", "Page lecteur VIDE (fichier absent) → abandon immédiat : $finishedUrl")
+                                        resolve(null)
+                                    }
+                                }
+                            }
+
                             // Filet de sécurité — 50s pour laisser le CF challenge
                             // d'emmmmbed.com auto-valider et le player charger ses
                             // assets avant de demander le m3u8.
+                            // 2026-10-04 : 10 s seulement pour un lecteur xtremestream direct —
+                            //   il n'y a pas de challenge CF sur ce chemin, le m3u8 part en ~1 s.
+                            val filetMs = if (pageLecteurDirect) 10_000L else 50_000L
                             view.postDelayed({
                                 if (!resolved) {
                                     android.util.Log.w("MoiflixExtractor", "Timeout — no m3u8 captured")
                                     resolve(null)
                                 }
-                            }, 50_000L)
+                            }, filetMs)
                         }
 
                         override fun onReceivedError(

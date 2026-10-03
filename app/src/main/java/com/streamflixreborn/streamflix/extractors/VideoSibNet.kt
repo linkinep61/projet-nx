@@ -86,6 +86,7 @@ class VideoSibNetExtractor : Extractor() {
     private fun resolveCdnUrl(gatewayUrl: String): String? {
         return try {
             val client = OkHttpClient.Builder()
+                .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
                 .dns(DnsResolver.doh)
                 .followRedirects(false)       // On veut le 302, pas le suivre
                 .followSslRedirects(false)
@@ -199,6 +200,7 @@ class VideoSibNetExtractor : Extractor() {
                 .baseUrl(baseUrl)
                 .client(
                     OkHttpClient.Builder()
+                        .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
                         .dns(DnsResolver.doh)
                         .followRedirects(true)
                         .followSslRedirects(true)

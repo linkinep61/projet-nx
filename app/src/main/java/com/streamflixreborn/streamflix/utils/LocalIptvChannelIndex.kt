@@ -305,6 +305,9 @@ object LocalIptvChannelIndex {
      * Throttle : re-probe max toutes les 10 min par chaîne (évite spam).
      */
     fun probeFastTracks(channelKey: String) {
+        // 2026-10-04 MODE LÉGER : pas de rafale de HEAD (jusqu'à 30, 8 en parallèle) au démarrage
+        //   d'une chaîne ; les URL mortes restent repérées par l'échec de lecture.
+        if (UserPreferences.modeLeger) return
         val now = System.currentTimeMillis()
         val last = probeInflight[channelKey]
         if (last != null && (now - last) < PROBE_REPROBE_THROTTLE_MS) {

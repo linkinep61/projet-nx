@@ -101,7 +101,12 @@ object RechercheUnifiee {
         runCatching { horsEcran.cancel() }
         return kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO).also { horsEcran = it }
     }
+    /** 2026-10-03 — mode léger : providers sautés par la loupe (mesuré sur l'Oppo, pic par
+     *  recherche : OLA TV +262 Mo, World Live +188 Mo, Vegeta TV +163 Mo). */
+    private val SAUTES_MODE_LEGER = setOf("OLA TV", "World Live", "Vegeta TV")
+
     private fun parallele(ctx: Context): Int {
+        if (UserPreferences.modeLeger) return 2
         val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
         val faible = am?.isLowRamDevice == true || (am?.memoryClass ?: 256) <= 128
         return if (faible) 2 else if (estTv(ctx)) 3 else 4
@@ -150,8 +155,10 @@ object RechercheUnifiee {
     /** Providers interrogés pour un mode, dans l'ordre d'affichage de l'accueil. */
     private fun sources(m: Mode): List<Provider> {
         val langue = UserPreferences.currentLanguage
+        val leger = UserPreferences.modeLeger
         return Provider.providers.entries
             .filter { (p, _) -> langue == null || p.language == langue }
+            .filter { (p, _) -> !leger || p.name !in SAUTES_MODE_LEGER }
             .filter { (_, s) ->
                 val iptv = s.group == Provider.Companion.ProviderGroup.IPTV
                 when (m) {
@@ -181,7 +188,7 @@ object RechercheUnifiee {
     /** Résultats d'un provider pour le mode choisi. */
     private suspend fun chercherDans(p: Provider, m: Mode, q: String): List<AppAdapter.Item> {
         val t0 = System.currentTimeMillis()
-        val brutsOuNull = auPlus(DELAI_MS) { p.search(q) }
+        val brutsOuNull = auPlus(DELAI_MS) { MemDiag.mesurer("loupe:${p.name}") { p.search(q) } }
         val bruts = brutsOuNull.orEmpty()
         Log.i(TAG, "${p.name} « $q » : ${bruts.size} bruts en ${System.currentTimeMillis() - t0} ms" +
             if (brutsOuNull == null) " (DÉLAI DÉPASSÉ)" else "")
@@ -207,8 +214,8 @@ object RechercheUnifiee {
         val nq = RechercheFloue.normaliser(q)
         if (nq.length < 2) return emptyList()
         fun ok(t: String) = RechercheFloue.normaliser(t).contains(nq)
-        val vv = auPlus(DELAI_MS) { VegetaVod.index() }
-        val ov = auPlus(DELAI_MS) { OlaVod.index() }
+        val vv = auPlus(DELAI_MS) { MemDiag.mesurer("loupe:index VegetaVod") { VegetaVod.index() } }
+        val ov = auPlus(DELAI_MS) { MemDiag.mesurer("loupe:index OlaVod") { OlaVod.index() } }
         val out = ArrayList<TvShow>()
         if (m == Mode.FILMS) {
             vv?.films?.filter { ok(it.titre) }?.forEach { out += VegetaVod.tuileFilm(it) }
@@ -625,7 +632,8 @@ object RechercheUnifiee {
             val m = mode
             val provs = sources(m)
             val sections = ArrayList<Section>()
-            if (m != Mode.LIVE) sections += Section("Ciné Films", null)
+            // Mode léger : pas de « Ciné Films » (index VOD OLA +68 Mo, Vegeta +26 Mo chargés en entier).
+            if (m != Mode.LIVE && !UserPreferences.modeLeger) sections += Section("Ciné Films", null)
             val hub = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
             provs.forEach { p ->
                 if (m == Mode.LIVE && p === hub) sections += Section(p.name, p, dossier = "*")

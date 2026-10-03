@@ -371,19 +371,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
     override suspend fun getHome(): List<Category> = coroutineScope {
         initializeService()
-        val document = service.getHome()
-        // 2026-06-14 debug — voir si le HTML reçu correspond à fs15.lol
-        //   (= sect/short présents) ou à une page Cloudflare challenge.
-        val htmlPreview = document.outerHtml().take(1800).replace("\n", " ")
-        val sectCount = document.select("div.sect").size
-        val shortCount = document.select("div.short").size
-        val title = document.selectFirst("title")?.text() ?: "?"
-        Log.d("FrenchStream", "getHome HTML: title='$title' sect=$sectCount short=$shortCount " +
-                "totalLen=${document.outerHtml().length}")
-        Log.d("FrenchStream", "getHome HTML preview: $htmlPreview")
-        val categories = mutableListOf<Category>()
-        val allItems = mutableListOf<AppAdapter.Item>()
-
+        // 2026-10-04 : les 9 pages annexes (7 catégories bonus + Nouveautés Films/Séries)
+        //   ne lisent RIEN de la page d'accueil : on les lance AVANT de la télécharger
+        //   au lieu d'attendre qu'elle soit arrivée. L'ordre d'assemblage plus bas est
+        //   inchangé (mêmes rangées, même ordre).
         // 2026-05-04 : catégories bonus chargées en parallèle (timeout 5s par
         // catégorie). Échec silencieux pour ne pas bloquer le home.
         // Genres films + plateformes séries pour donner plus de découverte.
@@ -467,6 +458,23 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 null
             }
         }
+
+        val document = service.getHome()
+        // 2026-06-14 debug — voir si le HTML reçu correspond à fs15.lol
+        //   (= sect/short présents) ou à une page Cloudflare challenge.
+        // 2026-10-04 : outerHtml() resérialise toute la page (deux fois) uniquement
+        //   pour ces logs → réservé aux builds de debug.
+        if (com.streamflixreborn.streamflix.BuildConfig.DEBUG) {
+            val htmlPreview = document.outerHtml().take(1800).replace("\n", " ")
+            val sectCount = document.select("div.sect").size
+            val shortCount = document.select("div.short").size
+            val title = document.selectFirst("title")?.text() ?: "?"
+            Log.d("FrenchStream", "getHome HTML: title='$title' sect=$sectCount short=$shortCount " +
+                    "totalLen=${document.outerHtml().length}")
+            Log.d("FrenchStream", "getHome HTML preview: $htmlPreview")
+        }
+        val categories = mutableListOf<Category>()
+        val allItems = mutableListOf<AppAdapter.Item>()
 
         document.select("div.sect").forEach { section ->
             val capt = section.selectFirst(".sect-t a.st-capt")
@@ -861,6 +869,22 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         val votes = document.selectFirst("div.fr-votes")
         val rating = if (votes != null) getRating(votes) else null
 
+        // 2026-10-04 : la recherche TMDB (affiches des saisons) ne dépend que de
+        //   cleanTitle/releaseYear, connus dès maintenant : on la lance en parallèle
+        //   de la pagination de recherche des saisons au lieu de l'enchaîner après.
+        //   Mêmes paramètres, même résultat ; runCatching → l'async ne peut pas échouer.
+        val tmdbShowDeferred = async {
+            runCatching {
+                val cleanQuery = com.streamflixreborn.streamflix.utils.TitleNormalizer
+                    .cleanForTmdbSearch(cleanTitle).ifBlank { cleanTitle }
+                com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShow(
+                    title = cleanQuery,
+                    year = releaseYear?.toIntOrNull(),
+                    language = "fr-FR",
+                )
+            }.getOrNull()
+        }
+
         // 2026-05-04 : récupère TOUTES les saisons via search GET.
         // Sur FrenchStream chaque saison est un newsid distinct (S1=170941, S6=170938...).
         // L'AJAX search retourne max ~5 items avec format différent — donc on
@@ -963,15 +987,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             } else foundSeasons
 
             // Enrichit juste les posters depuis TMDB (sans ajouter de saisons inexistantes)
-            val tmdbShow = runCatching {
-                val cleanQuery = com.streamflixreborn.streamflix.utils.TitleNormalizer
-                    .cleanForTmdbSearch(cleanTitle).ifBlank { cleanTitle }
-                com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShow(
-                    title = cleanQuery,
-                    year = releaseYear?.toIntOrNull(),
-                    language = "fr-FR",
-                )
-            }.getOrNull()
+            val tmdbShow = tmdbShowDeferred.await()
             if (tmdbShow != null) {
                 val tmdbSeasonsByNumber = tmdbShow.seasons.associateBy { it.number }
                 withCurrent.map { fsSeason ->
@@ -981,6 +997,9 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             } else withCurrent
         } catch (e: Exception) {
             Log.w("FrenchStream", "Multi-season search failed for '$cleanTitle': ${e.message}")
+            // 2026-10-04 : résultat TMDB inutile ici → on l'annule pour que
+            //   coroutineScope n'attende pas sa fin avant de rendre la fiche.
+            tmdbShowDeferred.cancel()
             listOf(Season(id = id, number = seasonNumber, title = "Saison $seasonNumber", poster = poster))
         }
 
@@ -1399,7 +1418,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         // sources (4-8 hosters) ; Movix en agrège 10-18 et Moviebox a sa
         // version VF directe. On résout le titre via TMDB pour faire la
         // jonction (FS ne stocke pas le tmdbId par show).
-        val (tmdbIdResolved, tmdbYear) = runCatching {
+        // 2026-10-04 : comme la version progressive, la recherche TMDB par titre n'est
+        //   faite que si les backups inline sont actifs — sinon son résultat était
+        //   calculé puis jeté (seuls les backups ci-dessous l'utilisent).
+        val (tmdbIdResolved, tmdbYear) = if (!com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) (runCatching {
             val title = when (videoType) {
                 is Video.Type.Movie -> videoType.title
                 is Video.Type.Episode -> videoType.tvShow.title
@@ -1420,7 +1442,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 else -> null
             }
             tid to year
-        }.getOrNull() ?: (null to null)
+        }.getOrNull() ?: (null to null)) else (null to null)
 
         // 2026-05-06 : Cloudstream en backup #2 (priorité après natif, avant Movix/Moviebox)
         // car il démarre vite (TMDB-driven, MovieBox+ playback via /resource bcdn).

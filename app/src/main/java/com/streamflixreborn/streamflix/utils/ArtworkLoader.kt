@@ -197,6 +197,21 @@ private fun isCfProtectedHost(url: String): Boolean {
 /** Délais de retry croissants (ms) pour les jaquettes qui échouent au 1er chargement. */
 private val ARTWORK_RETRY_DELAYS = longArrayOf(3_000, 8_000, 20_000)
 
+/** Copie indépendante de l'image affichée (pour servir de placeholder), ou null.
+ *  Ne JAMAIS réutiliser directement le bitmap d'un Drawable chargé par Glide : il peut être
+ *  recyclé à tout moment par Glide (cf. crash « recycled bitmap »). */
+private fun ImageView.copieSure(d: Drawable?): Drawable? = runCatching {
+    val bmp = when (d) {
+        is android.graphics.drawable.BitmapDrawable -> d.bitmap
+        is android.graphics.drawable.TransitionDrawable ->
+            (d.getDrawable(d.numberOfLayers - 1) as? android.graphics.drawable.BitmapDrawable)?.bitmap
+        else -> null
+    } ?: return@runCatching null
+    if (bmp.isRecycled || bmp.width <= 1 || bmp.height <= 1) return@runCatching null
+    val copie = bmp.copy(bmp.config ?: android.graphics.Bitmap.Config.RGB_565, false) ?: return@runCatching null
+    android.graphics.drawable.BitmapDrawable(resources, copie)
+}.getOrNull()
+
 private fun ImageView.loadRecoverableArtwork(
     initialUrl: String?,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable>,
@@ -249,10 +264,12 @@ private fun ImageView.loadRecoverableArtwork(
         //   En plus, quand la vue a déjà une image chargée (rebind RecyclerView),
         //   on l'utilise comme placeholder → transition douce au lieu du gris.
         if (!isRetry && !optimizedUrl.isNullOrBlank() && isCfProtectedHost(optimizedUrl)) {
-            val existing = this.drawable
-            if (existing != null && existing.intrinsicWidth > 1 && existing.intrinsicHeight > 1) {
-                base = base.placeholder(existing)
-            }
+            // 2026-10-04 FIX CRASH « Canvas: trying to use a recycled bitmap » (reproduit sur TCL en
+            //   faisant défiler vite la grille Films de Wiflix, version publiée comprise) : l'image
+            //   affichée appartient à Glide, qui la LIBÈRE dès qu'on lance le nouveau chargement sur
+            //   cette vue. S'en servir telle quelle comme placeholder → la carte dessinait un bitmap
+            //   déjà recyclé → plantage. On utilise une COPIE, qui n'appartient pas à Glide.
+            copieSure(this.drawable)?.let { base = base.placeholder(it) }
         }
         if (isRetry) {
             base = base.skipMemoryCache(true)

@@ -194,6 +194,17 @@ object UserPreferences {
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :
     //   MASTER switch. Décoché → AUCUN backup (seuls les serveurs natifs du provider s'affichent).
+    // 2026-10-03 — MODE LÉGER (user : « dans les paramètres, sur la page de garde, en dessous de
+    //   GitHub » ; « en mode normal rien ne change »). Pour les petits appareils : recherche allégée,
+    //   backups en file 3 par 3, TV Hub allégé, pas de WebView en arrière-plan. Sources mesurées sur
+    //   l'Oppo avec utils/MemDiag (voir CLAUDE.md, 2026-10-03). Défaut : désactivé.
+    //   Effet IMMÉDIAT, sans redémarrage : chaque usage relit la préférence au moment où il sert
+    //   (recherche, lancement d'un titre, TV Hub, FRAnime). Seuls les préchargements du démarrage
+    //   ne sont concernés qu'au démarrage suivant.
+    private const val KEY_MODE_LEGER = "pref_mode_leger"
+    val modeLeger: Boolean
+        get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_MODE_LEGER, false) else false
+
     private const val KEY_BACKUPS_ENABLED = "pref_backups_enabled"
     val backupsEnabled: Boolean
         get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_BACKUPS_ENABLED, true) else true
@@ -454,7 +465,10 @@ object UserPreferences {
             // TOUS les profils démarrent avec currentProvider=null → app ouvre
             // Home Fournisseur. L'user choisit lui-même à chaque profil.
             val providerName = prefs.getString(perProfileKey, null)
-            if (providerName?.startsWith("TMDb (") == true && providerName.endsWith(")")) {
+                // Aucun choix enregistré : inutile de charger les 26 sources (≈2,7 s sur Chromecast,
+                //   souvent sur le thread de l'écran) pour finir par ne rien trouver.
+                ?: return null
+            if (providerName.startsWith("TMDb (") && providerName.endsWith(")")) {
                 val lang = providerName.substringAfter("TMDb (").substringBefore(")")
                 return TmdbProvider(lang)
             }
@@ -521,7 +535,12 @@ object UserPreferences {
             // tiers qui pourraient encore la lire).
             Key.CURRENT_PROVIDER.setString(value?.name)
             runCatching {
-                ArtworkRepairScheduler.schedule(StreamFlixApp.instance, value)
+                // 2026-10-04 : pas de réparation des jaquettes sur TV, comme au démarrage
+                //   (StreamFlixApp.onCreate la saute déjà : trop coûteux pour la Chromecast).
+                val ctx = StreamFlixApp.instance
+                if (!ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)) {
+                    ArtworkRepairScheduler.schedule(ctx, value)
+                }
             }
             // 2026-05-17 (user "fermeture du provider doit être vidé") : clear
             //   le cache DVR sur changement de provider — segments précédents

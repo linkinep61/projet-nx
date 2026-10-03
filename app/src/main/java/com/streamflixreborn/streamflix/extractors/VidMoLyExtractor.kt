@@ -91,6 +91,7 @@ open class VidMoLyExtractor : Extractor() {
     private suspend fun extractViaOkHttp(url: String): String? = withContext(Dispatchers.IO) {
         val host = Uri.parse(url).host ?: "vidmoly.biz"
         val client = OkHttpClient.Builder()
+            .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
             .dns(DnsResolver.doh)
             .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)

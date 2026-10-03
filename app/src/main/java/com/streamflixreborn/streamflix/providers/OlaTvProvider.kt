@@ -236,6 +236,20 @@ object OlaTvProvider : Provider, IptvProvider {
         }
     }
 
+    // 2026-10-04 : horodatage de la dernière utilisation d'OLA (pref « ola_derniere_ouverture_ms »,
+    //   lue par StreamFlixApp pour ne précharger live-cids au démarrage que si OLA a servi dans
+    //   les 7 derniers jours). Écrit au plus une fois par heure, jamais bloquant, jamais fatal.
+    @Volatile private var derniereOuvertureEcrite = 0L
+    private fun noterOuvertureOla() {
+        val t = System.currentTimeMillis()
+        if (t - derniereOuvertureEcrite < 60 * 60 * 1000L) return
+        derniereOuvertureEcrite = t
+        runCatching {
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(StreamFlixApp.instance)
+                .edit().putLong("ola_derniere_ouverture_ms", t).apply()
+        }
+    }
+
     // ───────── Phase 3: multi-cid background scan ─────────
     // FR cids confirmed to have FR channels. Includes the primary + any discovered via scan.
     private val frCids = java.util.concurrent.CopyOnWriteArrayList<String>()
@@ -2240,6 +2254,7 @@ object OlaTvProvider : Provider, IptvProvider {
     private suspend fun ensureRegistry() {
         vodSuspended = false  // 2026-07-12 : OLA redevient actif → ré-autorise les ingestions
         everLoaded = true
+        noterOuvertureOla()  // 2026-10-04 : cf. préchargement conditionnel dans StreamFlixApp
         if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
         // Load persistent caches on first call
         if (workingChannelUrls.isEmpty()) loadWorkingChannelUrls()

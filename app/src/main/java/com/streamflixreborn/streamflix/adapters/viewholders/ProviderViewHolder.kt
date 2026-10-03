@@ -56,9 +56,7 @@ class ProviderViewHolder(
             // intermédiaire. La gestion des sources est dans Paramètres → Paramètres
             // du fournisseur → Mon IPTV.
             context.toActivity()?.apply {
-                val isTv = com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT == "tv" ||
-                    (com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT != "mobile" &&
-                        packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK))
+                val isTv = com.streamflixreborn.streamflix.utils.DetectionTv.interfaceTv(this)
                 val target = if (isTv) {
                     com.streamflixreborn.streamflix.activities.main.MainTvActivity::class.java
                 } else {

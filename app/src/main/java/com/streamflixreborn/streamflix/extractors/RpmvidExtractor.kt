@@ -31,6 +31,8 @@ class RpmvidExtractor : Extractor() {
      *   façon : quand un extracteur produit une URL à durée de vie limitée, le cache n'apporte
      *   rien et transforme un succès en échec dès que le jeton expire.
      */
+    // Alias = sites distincts (l'identifiant n'existe que sur un seul) → pas de boucle miroirs.
+    override val miroirsInterchangeables = false
     override val cacheTtlMs: Long = 0L
 
     override val mainUrl = "https://rpmvid.com"

@@ -261,6 +261,10 @@ class HomeTvFragment : Fragment() {
         appAdapter.onSaveInstanceState(binding.vgvHome)
         // Don't clear onIptvChannelClick — the new fragment's onViewCreated sets it,
         // but this onDestroyView can fire AFTER, causing a race condition.
+        // Débranche la liste : sinon l'adaptateur (gardé par le fragment) retient l'ancienne vue à chaque aller-retour.
+        // swapAdapter(null, false) et PAS adapter = null : ce dernier recycle les cartes visibles, ce qui
+        // annule leurs jaquettes (cartes noires au retour sur l'accueil).
+        binding.vgvHome.swapAdapter(null, false)
         _binding = null
     }
 

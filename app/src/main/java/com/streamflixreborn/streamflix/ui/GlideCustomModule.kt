@@ -85,7 +85,10 @@ class GlideCustomModule : AppGlideModule() {
         // OpenSSLX509Certificate.toString. Crash visible dans tombstone_00
         // sur thread image.tmdb.org. Sans .cache(...), CacheInterceptor n'écrit
         // plus, donc plus de sérialisation de cert, donc plus de crash.
-        val logging = HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BASIC)
+        // Journal réseau (2 lignes par jaquette) : versions de test seulement.
+        val logging = HttpLoggingInterceptor().setLevel(
+            if (com.streamflixreborn.streamflix.BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC
+            else HttpLoggingInterceptor.Level.NONE)
 
         // Always trust-all for image loading AND use DoH for resolution
         val trustAllCerts = arrayOf<TrustManager>(

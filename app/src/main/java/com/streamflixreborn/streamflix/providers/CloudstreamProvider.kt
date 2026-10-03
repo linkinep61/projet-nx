@@ -1322,8 +1322,12 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         delaiJours: Int = DELAI_SOURCES_JOURS,
     ): List<TMDb3.Movie> {
         val vod = com.streamflixreborn.streamflix.utils.VodCategories
-        val enSalles = runCatching { vod.enSalles() }.getOrDefault(emptySet())
-        val sortiesFr = runCatching { vod.sortiesFrancaises() }.getOrDefault(emptySet())
+        // 2026-10-04 : les deux listes sont indépendantes → calculées en même temps.
+        val (enSalles, sortiesFr) = coroutineScope {
+            val sallesD = async { runCatching { vod.enSalles() }.getOrDefault(emptySet()) }
+            val sortiesFrD = async { runCatching { vod.sortiesFrancaises() }.getOrDefault(emptySet()) }
+            sallesD.await() to sortiesFrD.await()
+        }
         return items.filter { m ->
             val id = m.id.toString()
             sortiDepuis(m.releaseDate, delaiJours) &&
@@ -2597,8 +2601,17 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
         val (tmdbId, se, ep) = parseCsIds(id, videoType)
         val nativeD = async { fetchNativeCloudstreamServers(id, videoType) }
-        val nakiosD = async { fetchNakiosBackup(tmdbId, videoType, se, ep) }
-        val movixD = async { fetchMovixBackupForCs(tmdbId, videoType) }
+        // 2026-10-04 : même règle que la version progressive (cf. getServersProgressive) —
+        //   avec INLINE_BACKUPS_DISABLED, Nakios et Movix passent par le registre central, qui
+        //   les interroge déjà lui-même. Les relancer ici ne faisait que des requêtes en double
+        //   (et ralentissait ce getServers, appelé comme source par la boucle du registre).
+        val backupsInline = !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED
+        val nakiosD = async {
+            if (backupsInline) fetchNakiosBackup(tmdbId, videoType, se, ep) else emptyList()
+        }
+        val movixD = async {
+            if (backupsInline) fetchMovixBackupForCs(tmdbId, videoType) else emptyList()
+        }
         val out = mutableListOf<Video.Server>()
         val nativeCs = nativeD.await()
         out += nativeCs

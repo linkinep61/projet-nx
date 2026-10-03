@@ -42,6 +42,7 @@ class KakaflixExtractor : Extractor() {
         //   ⚠ NE PAS remettre `followRedirects(true)` : c'est ce qui faisait tomber
         //     l'extraction au bout de 21 sauts au lieu d'aboutir au premier.
         val client = OkHttpClient.Builder()
+            .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
             .dns(DnsResolver.doh)
             .followRedirects(false)
             .followSslRedirects(false)

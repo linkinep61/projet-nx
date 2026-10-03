@@ -20,6 +20,12 @@ abstract class Extractor {
     abstract val name: String
     abstract val mainUrl: String
     open val aliasUrls: List<String> = emptyList()
+    // Faut-il, en cas d'erreur réseau, rejouer l'extraction sur chaque domaine de aliasUrls ?
+    //   false quand les alias ne sont PAS des copies du même site (Rpmvid : coflix, flemmix,
+    //   serix… sont des sites distincts, l'identifiant n'existe que sur l'un d'eux) ou quand
+    //   l'extracteur gère déjà ses propres domaines de secours (Filemoon) : la boucle générique
+    //   rejouait alors toute sa chaîne sur chaque alias, pour rien.
+    open val miroirsInterchangeables: Boolean = true
     open val rotatingDomain: List<Regex> = emptyList()
 
     // 2026-05-04 : TTL du cache d'extraction par extracteur. Par défaut 10 min
@@ -42,6 +48,11 @@ abstract class Extractor {
     // sharedClient uses newBuilder() derivatives so they share the connection pool.
 
     companion object {
+        /** Nombre max de domaines miroirs essayés après un échec réseau, et budget total. */
+        private const val MIROIRS_MAX = 6
+        private const val BUDGET_MIROIRS_MS = 30_000L
+        /** Nombre max d'extractions gardées en cache. */
+        private const val CACHE_EXTRACTION_MAX = 40
         const val DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -888,8 +899,26 @@ abstract class Extractor {
                 resultatImmediat.remove(link)
             }
             val video = extraireInterne(link, server)
-            resultatImmediat[link] = System.currentTimeMillis() to video
+            val maintenant = System.currentTimeMillis()
+            // Purge des entrées périmées : sans elle, chaque vidéo extraite restait en mémoire
+            //   pour toute la session (certaines sources `data:` pèsent jusqu'à ~1 Mo).
+            val iter = resultatImmediat.entries.iterator()
+            while (iter.hasNext()) { if (maintenant - iter.next().value.first >= FENETRE_DOUBLON_MS) iter.remove() }
+            resultatImmediat[link] = maintenant to video
             return video
+        }
+
+        /** Retire les extractions expirées et plafonne le cache (les plus proches de l'expiration
+         *  partent d'abord). Avant, une entrée périmée n'était supprimée que si on la redemandait. */
+        private fun purgerCacheExtraction() {
+            val maintenant = System.currentTimeMillis()
+            val iter = extractionCache.entries.iterator()
+            while (iter.hasNext()) { if (maintenant >= iter.next().value.expiresAtMillis) iter.remove() }
+            val enTrop = extractionCache.size - CACHE_EXTRACTION_MAX
+            if (enTrop > 0) {
+                extractionCache.entries.sortedBy { e -> e.value.expiresAtMillis }.take(enTrop)
+                    .forEach { e -> extractionCache.remove(e.key) }
+            }
         }
 
         private suspend fun extraireInterne(link: String, server: Video.Server? = null): Video {
@@ -902,6 +931,7 @@ abstract class Extractor {
             Log.d("Extractor", "extract() called with link=$link server=${server?.name}")
 
             // A: cache hit?
+            purgerCacheExtraction()
             extractionCache[link]?.let { cached ->
                 if (System.currentTimeMillis() < cached.expiresAtMillis) {
                     Log.i("StreamFlixES", "[EXTRACTOR] -> Cache HIT for $link")
@@ -1053,7 +1083,7 @@ abstract class Extractor {
                             Log.w("Extractor", "${foundExtractor.name} : 2e essai KO → miroirs")
                         }
                     }
-                    if (isDomainError(e) && foundExtractor.aliasUrls.isNotEmpty()) {
+                    if (isDomainError(e) && foundExtractor.miroirsInterchangeables && foundExtractor.aliasUrls.isNotEmpty()) {
                         val linkHost = extractHost(finalLink)
                         if (linkHost != null) {
                             // Construire la liste de domaines candidats : mainUrl + aliasUrls
@@ -1065,7 +1095,15 @@ abstract class Extractor {
                                 }
                             }.distinct().filter { it != linkHost }
 
-                            for (altHost in allDomains) {
+                            // Plafond : chaque alias rejoue l'extraction complète (WebView comprise).
+                            //   Sans limite, un hébergeur à 81 alias (StreamWish) pouvait bloquer le
+                            //   lecteur plusieurs minutes. Le domaine principal passe en premier.
+                            val debutMiroirs = System.currentTimeMillis()
+                            for (altHost in allDomains.take(MIROIRS_MAX)) {
+                                if (System.currentTimeMillis() - debutMiroirs > BUDGET_MIROIRS_MS) {
+                                    Log.w("Extractor", "${foundExtractor.name} : budget des miroirs épuisé → serveur suivant")
+                                    break
+                                }
                                 val altLink = finalLink.replace(linkHost, altHost)
                                 Log.w("Extractor", "Domain fallback ${foundExtractor.name}: $linkHost → $altHost")
                                 try {

@@ -91,6 +91,7 @@ class VoeExtractor : Extractor() {
                     //   répond OK avec un Chrome UA, l'app a un souci config.
                     try {
                         val client = okhttp3.OkHttpClient.Builder()
+                            .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
                             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                             .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                             .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
@@ -251,16 +252,6 @@ class VoeExtractor : Extractor() {
             }
         }
 
-        val baseUrl = URL(url).let { "${it.protocol}://${it.host}" }
-        val direct = try {
-            val service = Extractor.createJsoupService<VoeExtractorService>(baseUrl, url)
-            service.getSource(url)
-        } catch (e: Exception) {
-            Log.w("VOE_EXTRACT", "fetch direct KO (${e.message}) → bypass Cloudflare")
-            null
-        }
-        if (direct != null && !isCloudflareWall(direct.html())) return direct
-
         // ── 2026-08-06 : LA BOUCLE DE REDIRECTIONS VENAIT DE L'ABSENCE DE COOKIES ────────
         //   User : « VOE VF HD échoue à chaque fois ». Journal :
         //     VOE_EXTRACT: fetch direct KO (Too many follow-up requests: 21)
@@ -275,8 +266,21 @@ class VoeExtractor : Extractor() {
         //   FIX : un client dédié avec un bocal à cookies en mémoire, redirections suivies
         //   normalement. La chaîne se termine toute seule.
         //   ⚠ NE PAS retirer le CookieJar en croyant simplifier : c'est LUI qui casse la boucle.
+        //   2026-10-04 : passée EN PREMIER. La requête directe sans cookies tombait presque
+        //   toujours dans la boucle de 21 redirections avant d'arriver ici (2 à 6 s perdues).
         val avecCookies = chargerAvecCookies(url)
         if (avecCookies != null && !isCloudflareWall(avecCookies.html())) return avecCookies
+
+        // Requête directe gardée en SECOURS seulement (miroirs qui ne posent pas de cookie).
+        val baseUrl = URL(url).let { "${it.protocol}://${it.host}" }
+        val direct = try {
+            val service = Extractor.createJsoupService<VoeExtractorService>(baseUrl, url)
+            service.getSource(url)
+        } catch (e: Exception) {
+            Log.w("VOE_EXTRACT", "fetch direct KO (${e.message}) → bypass Cloudflare")
+            null
+        }
+        if (direct != null && !isCloudflareWall(direct.html())) return direct
 
         Log.d("VOE_EXTRACT", "mur Cloudflare détecté → WebViewResolver sur $url")
         val html = com.streamflixreborn.streamflix.utils.WebViewResolver(
@@ -307,6 +311,7 @@ class VoeExtractor : Extractor() {
             try {
                 val bocal = java.util.concurrent.ConcurrentHashMap<String, MutableList<okhttp3.Cookie>>()
                 val client = okhttp3.OkHttpClient.Builder()
+                    .connectionPool(com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool)
                     .dns(com.streamflixreborn.streamflix.utils.DnsResolver.doh)
                     .followRedirects(true)
                     .followSslRedirects(true)
