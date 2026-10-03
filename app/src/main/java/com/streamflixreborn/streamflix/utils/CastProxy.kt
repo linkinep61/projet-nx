@@ -52,7 +52,18 @@ object CastProxy {
             .build()
     }
 
-    fun start(videoUrl: String, headers: Map<String, String>?, contentType: String?): String? {
+    /** 2026-10-03 : true quand le relais sert un lecteur externe sur CE même appareil (VLC,
+     *  MX…) → adresses en 127.0.0.1, pas besoin de réseau local. false = Cast (Chromecast). */
+    @Volatile private var hoteLocal = false
+
+    private fun hote(): String? = if (hoteLocal) "127.0.0.1" else getLocalIp()
+
+    /** 2026-10-03 : relais pour un lecteur externe sur l'appareil (cf. LecteurExterne). */
+    fun startLocal(videoUrl: String, headers: Map<String, String>?): String? =
+        start(videoUrl, headers, null, local = true)
+
+    fun start(videoUrl: String, headers: Map<String, String>?, contentType: String?, local: Boolean = false): String? {
+        hoteLocal = local
         currentUrl = videoUrl
         currentHeaders = headers
         currentContentType = contentType
@@ -63,7 +74,7 @@ object CastProxy {
             val srv = ProxyServer(PORT)
             srv.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             server = srv
-            val ip = getLocalIp() ?: return null
+            val ip = hote() ?: return null
             Log.d(TAG, "Started: http://$ip:$PORT/cast.m3u8 → $videoUrl")
             return "http://$ip:$PORT/cast.m3u8"
         } catch (e: Exception) {
@@ -104,7 +115,7 @@ object CastProxy {
         private fun serveCast(): Response {
             val masterUrl = currentUrl ?: return cors(newFixedLengthResponse(Response.Status.OK, "text/plain", "No stream"))
             val base = masterUrl.substringBefore("?").substringBeforeLast("/") + "/"
-            val ip = getLocalIp() ?: return cors(newFixedLengthResponse(Response.Status.OK, "text/plain", "No IP"))
+            val ip = hote() ?: return cors(newFixedLengthResponse(Response.Status.OK, "text/plain", "No IP"))
             val proxyBase = "http://$ip:$PORT"
 
             val masterBytes = fetchBytes(masterUrl) ?: return cors(newFixedLengthResponse(Response.Status.OK, "text/plain", "Fetch failed"))
@@ -145,7 +156,7 @@ object CastProxy {
             val bytes = fetchBytes(realUrl) ?: return cors(newFixedLengthResponse(Response.Status.OK, "text/plain", "Fail"))
             val body = String(bytes, Charsets.UTF_8)
             if (body.trimStart().startsWith("#EXTM3U")) {
-                val ip = getLocalIp() ?: return cors(newFixedLengthResponse(Response.Status.OK, "text/plain", "No IP"))
+                val ip = hote() ?: return cors(newFixedLengthResponse(Response.Status.OK, "text/plain", "No IP"))
                 val segBase = realUrl.substringBefore("?").substringBeforeLast("/") + "/"
                 val rewritten = rewrite(body, "http://$ip:$PORT", segBase)
                 return cors(newFixedLengthResponse(Response.Status.OK, "application/x-mpegurl", rewritten))
@@ -166,12 +177,24 @@ object CastProxy {
                     req.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 val resp = client.newCall(req.build()).execute()
                 val body = resp.body ?: return cors(newFixedLengthResponse(Response.Status.OK, "text/plain", "Empty"))
-                val ct = resp.header("Content-Type") ?: "video/mp2t"
-                val len = resp.header("Content-Length")?.toLongOrNull()
+                var ct = resp.header("Content-Type") ?: "video/mp2t"
+                var len = resp.header("Content-Length")?.toLongOrNull()
+                // 2026-10-03 : segments DÉGUISÉS en image (faux en-tête PNG/JPEG devant le vrai TS,
+                //   ex. Coflix upn.one, EmbedSeek, Rpmvid). Notre lecteur s'en accommode ; VLC et le
+                //   Chromecast non (« Failed to create demuxer »). On saute le faux en-tête ici.
+                val flux = java.io.BufferedInputStream(body.byteStream(), 256 * 1024)
+                val decalage = decalageFauxEntete(flux)
+                if (decalage > 0) {
+                    var aSauter = decalage.toLong()
+                    while (aSauter > 0) { val s = flux.skip(aSauter); if (s <= 0) break; aSauter -= s }
+                    ct = "video/mp2t"
+                    len = len?.let { it - decalage }
+                    if (idx % 50 == 0) Log.d(TAG, "Seg $idx : faux en-tête de $decalage octets retiré")
+                }
                 val r = if (len != null && len > 0)
-                    newFixedLengthResponse(Response.Status.OK, ct, body.byteStream(), len)
+                    newFixedLengthResponse(Response.Status.OK, ct, flux, len)
                 else
-                    newChunkedResponse(Response.Status.OK, ct, body.byteStream())
+                    newChunkedResponse(Response.Status.OK, ct, flux)
                 return cors(r)
             } catch (e: Exception) {
                 Log.w(TAG, "Seg $idx error: ${e.message}")
@@ -196,6 +219,38 @@ object CastProxy {
             r.addHeader("Access-Control-Allow-Headers", "*")
             return r
         }
+    }
+
+    /** 2026-10-03 : position du vrai début TS dans un segment déguisé (0 = segment normal ou
+     *  pas du TS, rien à retirer). Même règle que DownloadManager.debutTs : octet de
+     *  synchro 0x47 répété tous les 188 octets. Le flux est remis à sa position initiale. */
+    private fun decalageFauxEntete(flux: java.io.BufferedInputStream): Int {
+        val tete = ByteArray(256 * 1024)
+        flux.mark(tete.size)
+        var lus = 0
+        try {
+            while (lus < tete.size) {
+                val n = flux.read(tete, lus, tete.size - lus)
+                if (n <= 0) break
+                lus += n
+            }
+        } finally {
+            flux.reset()
+        }
+        if (lus < 400 || tete[0] == 0x47.toByte()) return 0
+        // On ne touche qu'aux segments qui commencent comme une image (PNG, JPEG, GIF, BMP).
+        val image = (tete[0] == 0x89.toByte() && tete[1] == 'P'.code.toByte()) ||
+            (tete[0] == 0xFF.toByte() && tete[1] == 0xD8.toByte()) ||
+            (tete[0] == 'G'.code.toByte() && tete[1] == 'I'.code.toByte()) ||
+            (tete[0] == 'B'.code.toByte() && tete[1] == 'M'.code.toByte())
+        if (!image) return 0
+        val max = lus - 377
+        var o = 1
+        while (o < max) {
+            if (tete[o] == 0x47.toByte() && tete[o + 188] == 0x47.toByte() && tete[o + 376] == 0x47.toByte()) return o
+            o++
+        }
+        return 0
     }
 
     /** Réécrit m3u8 : URLs → /N.ts ou /N.m3u8 (selon extension) */

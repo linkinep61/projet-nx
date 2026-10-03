@@ -717,6 +717,19 @@
             android:defaultValue="true"
             app:iconSpaceReserved="false" />
 
+        <!-- 2026-10-03 : notification d'écrasement (masquée par défaut) + téléchargement de la dernière version -->
+        <Preference
+            android:key="APP_ECRASEMENT"
+            android:title="🔔 Version corrigée disponible"
+            android:selectable="false"
+            app:iconSpaceReserved="false" />
+
+        <Preference
+            android:key="APP_DERNIERE_VERSION"
+            android:title="Télécharger la dernière version"
+            android:summary="Réinstalle la dernière version publiée"
+            app:iconSpaceReserved="false" />
+
         <Preference
             android:icon="@drawable/ic_favorite_enable"
             android:key="p_settings_kofi"

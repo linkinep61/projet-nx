@@ -462,6 +462,29 @@ class PlayerTvFragment : Fragment() {
         }
     }
 
+    // 2026-10-03 (signalement Nvidia Shield) : le lecteur externe est lancé « pour résultat » →
+    //   VLC / MX renvoient où ils se sont arrêtés ; avant, startActivity() perdait cette réponse
+    //   (aucun épisode « vu », aucune reprise). Voir LecteurExterne.
+    private val lanceurLecteurExterne = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { resultat -> traiterRetourLecteurExterne(resultat.data) }
+
+    private fun traiterRetourLecteurExterne(data: Intent?) {
+        val ctx = context ?: return
+        com.streamflixreborn.streamflix.utils.LecteurExterne.fin(ctx)
+        val retour = com.streamflixreborn.streamflix.utils.LecteurExterne.lireRetour(data)
+        Log.i("ExternalPlayer", "TV - retour du lecteur externe : $retour")
+        if (retour == null) return
+        val appCtx = ctx.applicationContext
+        val type = args.videoType
+        lifecycleScope.launch {
+            com.streamflixreborn.streamflix.utils.LecteurExterne.enregistrer(appCtx, database, type, retour)
+        }
+        if (!retour.fini && retour.positionMs > 0) {
+            try { player.seekTo(retour.positionMs) } catch (_: Throwable) {}
+        }
+    }
+
     private val pickLocalSubtitle = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -7138,12 +7161,17 @@ class PlayerTvFragment : Fragment() {
             }
             try {
                 try { player.pause() } catch (_: Throwable) {}
-                val uri = android.net.Uri.parse(source)
+                // 2026-10-03 : flux HLS → relais interne (faux en-têtes retirés, en-têtes d'accès
+                //   ajoutés) ; liens directs inchangés. Cf. LecteurExterne.
+                val lien = com.streamflixreborn.streamflix.utils.LecteurExterne.preparerLien(
+                    requireContext(), source, currentVideo?.headers, currentVideo?.type)
+                val uri = android.net.Uri.parse(lien)
                 val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, "video/*")
                     addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     putExtra("title", resolvePlayerTitle())
                     putExtra("position", player.currentPosition.toInt())
+                    putExtra("return_result", true)  // MX Player : renvoie la position au retour
                     currentVideo?.headers?.let { h ->
                         putExtra("extra_headers", h.map { "${it.key}: ${it.value}" }.toTypedArray())
                         putExtra("headers", h.flatMap { listOf(it.key, it.value) }.toTypedArray())
@@ -7153,7 +7181,7 @@ class PlayerTvFragment : Fragment() {
                 if (!directPackage.isNullOrBlank()) {
                     try {
                         intent.setPackage(directPackage)
-                        startActivity(intent)
+                        lanceurLecteurExterne.launch(intent)
                         return
                     } catch (e: Exception) {
                         Log.w("ExternalPlayer", "TV - Lecteur direct $directPackage indispo (${e.message}) — sélecteur")
@@ -7168,10 +7196,10 @@ class PlayerTvFragment : Fragment() {
                     android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE
                 )
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-                    startActivity(android.content.Intent.createChooser(
+                    lanceurLecteurExterne.launch(android.content.Intent.createChooser(
                         intent, getString(R.string.player_external_player_title), pendingIntent.intentSender))
                 } else {
-                    startActivity(android.content.Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+                    lanceurLecteurExterne.launch(android.content.Intent.createChooser(intent, getString(R.string.player_external_player_title)))
                 }
             } catch (e: Throwable) {
                 Toast.makeText(requireContext(), getString(R.string.player_external_player_error_video), Toast.LENGTH_SHORT).show()

@@ -1507,6 +1507,24 @@ object LiveTvHubProvider : Provider, IptvProvider {
     }
 
     /**
+     * 2026-10-03 (user : « je t'avais dit de pas afficher le serveur si j'étais pas connecté ») :
+     *   faux pour un direct qui exige un compte non connecté — TF1+ (tf1live), M6+ (m6live),
+     *   RMC+/BFM Play (bfmlive). Vérifié à CHAQUE affichage (la connexion peut changer).
+     */
+    fun compteConnectePour(id: String): Boolean {
+        val ctx = appContextRef ?: runCatching { com.streamflixreborn.streamflix.StreamFlixApp.instance }.getOrNull()
+            ?: return false
+        return runCatching {
+            when {
+                id.startsWith("livehub::replay::tf1live::") -> com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(ctx)
+                id.startsWith("livehub::replay::m6live::") -> com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(ctx)
+                id.startsWith("livehub::replay::bfmlive::") -> com.streamflixreborn.streamflix.utils.BfmAuth.isLoggedIn(ctx)
+                else -> true
+            }
+        }.getOrDefault(false)
+    }
+
+    /**
      * 2026-10-03 (user : « mettre en priorité les serveurs qu'on est sûr qu'ils vont bien
      *   fonctionner, de France 2, etc. ») : chaînes LIVE du TV Hub (accueil : France TV & co,
      *   puis le bouquet Multi Live) dont le nom, passé par [normaliser] (celui d'OLA TV),
@@ -1521,14 +1539,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // OTF TV écarté (user : « il peut être instable »). Directs TF1+ / M6+ seulement si le
         //   compte est connecté (user : « si le compte n'est pas connecté, ça ne sert à rien »).
         val ctx = appContextRef
-        val tf1Ok = ctx != null && runCatching { com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(ctx) }.getOrDefault(false)
-        val m6Ok = ctx != null && runCatching { com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(ctx) }.getOrDefault(false)
         fun correspond(tv: TvShow): Boolean {
             val id = tv.id
             if (id.startsWith("livehub::folder::") || id.startsWith("livehub::otf::")) return false
             if (id.startsWith("livehub::login") || id.contains("::login::")) return false
-            if (id.startsWith("livehub::replay::tf1live::") && !tf1Ok) return false
-            if (id.startsWith("livehub::replay::m6live::") && !m6Ok) return false
+            if (!compteConnectePour(id)) return false
             return normaliser(tv.title ?: "") == cle
         }
         // Chargés l'un APRÈS l'autre (appareils faibles) ; chaque source garde son cache mémoire,

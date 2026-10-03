@@ -696,7 +696,15 @@ class PlayerMobileFragment : Fragment() {
             is Video.Type.Movie -> type.title
             is Video.Type.Episode -> "${type.tvShow.title} • S${type.season.number} E${type.number}"
         }
-        val sourceUri = resolveExternalSourceUri(video)
+        // 2026-10-03 : flux HLS → relais interne (faux en-têtes retirés, en-têtes d'accès
+        //   ajoutés) ; liens directs et playlists locales inchangés. Cf. LecteurExterne.
+        val sourceUri = resolveExternalSourceUri(video).let { u ->
+            val s = u.toString()
+            if (s.startsWith("http"))
+                com.streamflixreborn.streamflix.utils.LecteurExterne
+                    .preparerLien(requireContext(), s, video.headers, video.type).toUri()
+            else u
+        }
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(sourceUri, "video/*")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -712,7 +720,7 @@ class PlayerMobileFragment : Fragment() {
             try {
                 intent.setPackage(directPackage)
                 try { player.pause() } catch (_: Exception) {}
-                startActivity(intent)
+                lanceurLecteurExterne.launch(intent)
                 return
             } catch (e: Exception) {
                 Log.w("ExternalPlayer", "Lecteur direct $directPackage indispo (${e.message}) — sélecteur")
@@ -726,13 +734,36 @@ class PlayerMobileFragment : Fragment() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
             )
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-                startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title), pendingIntent.intentSender))
+                lanceurLecteurExterne.launch(Intent.createChooser(intent, getString(R.string.player_external_player_title), pendingIntent.intentSender))
             } else {
-                startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+                lanceurLecteurExterne.launch(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
             }
         } catch (e: Exception) {
             Log.e("ExternalPlayer", "Errore selettore app", e)
-            startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+            lanceurLecteurExterne.launch(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+        }
+    }
+
+    // 2026-10-03 (signalement Nvidia Shield) : lecteur externe lancé « pour résultat » → VLC / MX
+    //   renvoient où ils se sont arrêtés ; avant, startActivity() perdait cette réponse (aucun
+    //   épisode « vu », aucune reprise). Voir LecteurExterne.
+    private val lanceurLecteurExterne = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { resultat -> traiterRetourLecteurExterne(resultat.data) }
+
+    private fun traiterRetourLecteurExterne(data: Intent?) {
+        val ctx = context ?: return
+        com.streamflixreborn.streamflix.utils.LecteurExterne.fin(ctx)
+        val retour = com.streamflixreborn.streamflix.utils.LecteurExterne.lireRetour(data)
+        Log.i("ExternalPlayer", "Mobile - retour du lecteur externe : $retour")
+        if (retour == null) return
+        val appCtx = ctx.applicationContext
+        val type = args.videoType
+        lifecycleScope.launch {
+            com.streamflixreborn.streamflix.utils.LecteurExterne.enregistrer(appCtx, database, type, retour)
+        }
+        if (!retour.fini && retour.positionMs > 0) {
+            try { player.seekTo(retour.positionMs) } catch (_: Throwable) {}
         }
     }
 

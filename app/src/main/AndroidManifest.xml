@@ -344,6 +344,11 @@
             android:name=".services.RadioPlaybackService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="false" />
+        <!-- 2026-10-03 : garde l'app (et son relais vidéo) en vie pendant la lecture dans VLC/MX. -->
+        <service
+            android:name=".services.ServiceLecteurExterne"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

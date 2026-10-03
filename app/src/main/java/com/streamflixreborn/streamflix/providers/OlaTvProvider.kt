@@ -3060,7 +3060,8 @@ object OlaTvProvider : Provider, IptvProvider {
 
     /** Ids TV Hub (« livehub::… ») de la même chaîne que [cle]. Mémorisé par chaîne. */
     private suspend fun sourcesOfficiellesPour(cle: String): List<String> {
-        officielsParCle[cle]?.let { return it }
+        // Filtré à chaque appel : un compte TF1+/M6+/RMC+ déconnecté retire ses directs.
+        officielsParCle[cle]?.let { ids -> return ids.filter { LiveTvHubProvider.compteConnectePour(it) } }
         // Préchauffage en cours (1ʳᵉ chaîne ouverte juste après le chargement) : on l'attend
         //   jusqu'à 6 s plutôt que de démarrer sur des sources OLA sans l'officiel.
         if (officielsEnCours && !officielsPrets) {

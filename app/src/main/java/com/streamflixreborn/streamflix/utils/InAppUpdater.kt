@@ -116,6 +116,84 @@ object InAppUpdater {
         return newReleases
     }
 
+    /**
+     * 2026-10-03 (user : « il y a pas un moyen de signaler qu'il y a eu un écrasement ») :
+     *   l'APK porte le commit compilé (BuildConfig.BUILD_SHA, fourni par GitHub Actions). Un
+     *   écrasement déplace le tag de la release sur un autre commit : même numéro de version,
+     *   commit différent → une version corrigée est en ligne. On attend que les APK de ce nouveau
+     *   commit soient publiés (fichiers plus récents que le commit), sinon on ne signale rien.
+     */
+    data class VersionEnLigne(val release: GitHub.Release, val asset: GitHub.Release.Asset)
+
+    suspend fun ecrasementDisponible(): VersionEnLigne? = withContext(Dispatchers.IO) {
+        val notreSha = BuildConfig.BUILD_SHA
+        if (BuildConfig.DEBUG || notreSha.isBlank()) return@withContext null
+        val release = fetchLatestFromAnySource() ?: return@withContext null
+        if (Version(release.tagName.substringAfter("v")).compareTo(Version(BuildConfig.VERSION_NAME)) != 0) {
+            return@withContext null   // numéro différent : c'est la mise à jour classique qui s'en charge
+        }
+        val (sha, dateCommit) = commitDuTag(release.tagName) ?: return@withContext null
+        if (sha.equals(notreSha, ignoreCase = true)) return@withContext null
+        val asset = choisirApk(release.assets) ?: return@withContext null
+        val dateApk = lireDate(asset.updatedAt) ?: return@withContext null
+        if (dateCommit != null && dateApk < dateCommit) return@withContext null   // compilation en cours
+        android.util.Log.i("InAppUpdater", "écrasement en ligne : ${release.tagName} ${sha.take(8)} (installé ${notreSha.take(8)})")
+        VersionEnLigne(release, asset)
+    }
+
+    /** Dernière release publiée + l'APK adapté à l'appareil (bouton « Télécharger la dernière version »). */
+    suspend fun derniereVersion(): VersionEnLigne? = withContext(Dispatchers.IO) {
+        val release = fetchLatestFromAnySource() ?: return@withContext null
+        val asset = choisirApk(release.assets) ?: return@withContext null
+        VersionEnLigne(release, asset)
+    }
+
+    /** Même choix d'APK que la mise à jour classique (MainViewModel) : x86, TV ou universel. */
+    fun choisirApk(assets: List<GitHub.Release.Asset>): GitHub.Release.Asset? {
+        val apks = assets.filter {
+            it.contentType == "application/vnd.android.package-archive" || it.name.endsWith(".apk", ignoreCase = true)
+        }
+        val x86 = android.os.Build.SUPPORTED_ABIS.firstOrNull()?.let {
+            it.equals("x86", ignoreCase = true) || it.equals("x86_64", ignoreCase = true)
+        } == true
+        return when {
+            x86 -> apks.firstOrNull { it.name.endsWith("-x86.apk", ignoreCase = true) }
+            BuildConfig.APP_LAYOUT == "tv" -> apks.firstOrNull { it.name.endsWith("-tv.apk", ignoreCase = true) }
+            else -> apks.firstOrNull { it.name.endsWith("-universal.apk", ignoreCase = true) }
+        } ?: apks.firstOrNull { !it.name.endsWith("-x86.apk", ignoreCase = true) }
+    }
+
+    /** Commit (sha, date) sur lequel pointe le tag, via l'API GitHub publique. */
+    private fun commitDuTag(tag: String): Pair<String, Long?>? {
+        for (source in UPDATE_SOURCES) {
+            try {
+                val req = Request.Builder()
+                    .url("https://api.github.com/repos/${source.owner}/${source.repo}/commits/$tag")
+                    .header("Accept", "application/vnd.github+json")
+                    .build()
+                downloadClient.newCall(req).execute().use { r ->
+                    if (r.isSuccessful) {
+                        val o = org.json.JSONObject(r.body?.string().orEmpty())
+                        val sha = o.optString("sha")
+                        if (sha.isNotBlank()) {
+                            val date = lireDate(o.optJSONObject("commit")?.optJSONObject("committer")?.optString("date"))
+                            return sha to date
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("InAppUpdater", "commit du tag $tag illisible : ${e.message}")
+            }
+        }
+        return null
+    }
+
+    private fun lireDate(s: String?): Long? = try {
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.parse(s.orEmpty())?.time
+    } catch (_: Exception) { null }
+
     private val downloadClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.MINUTES)

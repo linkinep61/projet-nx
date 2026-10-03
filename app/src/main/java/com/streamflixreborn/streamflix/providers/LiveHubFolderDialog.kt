@@ -74,7 +74,7 @@ private fun android.widget.EditText.filtreDiffere(action: (String) -> Unit) {
         action(text?.toString()?.trim().orEmpty())
     }
     VALIDER_FILTRE[this] = lancer
-    setOnEditorActionListener { _, _, _ -> lancer(); true }
+    setOnEditorActionListener { _, _, _ -> lancer(); if (tv) fermerClavierTv(); true }
     addTextChangedListener(object : android.text.TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -86,6 +86,17 @@ private fun android.widget.EditText.filtreDiffere(action: (String) -> Unit) {
             enAttente = Runnable { enAttente = null; action(q) }.also { h.postDelayed(it, DELAI_FILTRE_MS) }
         }
     })
+}
+
+/** 2026-10-03 (user : sur Fire TV, « si on tape quelque chose dedans on peut même pas quitter ») :
+ *  à la validation sur TV, on referme le clavier plein écran et on rend le focus à la liste
+ *  sous le champ — sinon le clavier Amazon reste affiché et se rouvre sur le champ. */
+private fun android.widget.EditText.fermerClavierTv() {
+    runCatching {
+        (context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager)
+            ?.hideSoftInputFromWindow(windowToken, 0)
+    }
+    post { (focusSearch(android.view.View.FOCUS_DOWN) ?: rootView?.findFocus())?.requestFocus() }
 }
 
 private fun normSearch(s: String): String =
@@ -100,6 +111,30 @@ private fun normSearch(s: String): String =
      *  car le window est null avant. Si l'user change de thème, ouvrir un
      *  nouveau dialog → bg se met à jour automatiquement (lit la pref à chaque
      *  ouverture). */
+    /**
+     * 2026-10-03 (user : « sur Fire TV il y a un grand espace gris… ça se retrouve concentré dans
+     *   le milieu ») : la fenêtre est bien en pleine largeur (le fond gris l'est), mais la mise en
+     *   page AlertDialog de Fire OS limite la largeur de son panneau intérieur. Sur TV, on remplace
+     *   donc ce panneau par notre contenu, posé directement dans la fenêtre en pleine largeur.
+     *   Réservé aux dialogs SANS titre ni bouton système (grille de chaînes) : rien d'autre à perdre.
+     */
+    private fun pleineLargeurTv(dlg: android.app.AlertDialog, contenu: android.view.View) {
+        val w = dlg.window ?: return
+        val parent = contenu.parent as? android.view.ViewGroup ?: return
+        try {
+            parent.removeView(contenu)
+            w.setContentView(contenu, android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            ))
+            w.decorView.setPadding(0, 0, 0, 0)
+            android.util.Log.d("LiveHubDialog", "pleineLargeurTv : contenu posé en pleine largeur")
+        } catch (t: Throwable) {
+            android.util.Log.w("LiveHubDialog", "pleineLargeurTv échoué : ${t.message}")
+            if (contenu.parent == null) runCatching { parent.addView(contenu) }
+        }
+    }
+
     private fun applyThemeBackground(dlg: android.app.AlertDialog) {
         try {
             val theme = com.streamflixreborn.streamflix.utils.UserPreferences.selectedTheme
@@ -1233,7 +1268,7 @@ private fun normSearch(s: String): String =
         }
         showPosterGrid(
             ctx = ctx,
-            category = Category(name = "OTF TV — $currentGroup (${channels.size})", list = channels),
+            category = Category(name = "OTF TV — $currentGroup", list = channels),   // le nombre est ajouté par la grille
             channels = channels,
             onChannelSelected = onChannelSelected,
             boutonSupp = "🌍 $currentGroup" to {
@@ -2854,7 +2889,11 @@ private fun normSearch(s: String): String =
             }
             // 2026-09-28 : ce listener remplace celui de filtreDiffere → on relance le filtre ici.
             VALIDER_FILTRE[champ]?.invoke()
-            false   // on ne consomme pas : le comportement d'origine du champ est préservé
+            // TV (Fire TV…) : on referme le clavier et on consomme, sinon il reste bloqué à l'écran.
+            val tvMode = (ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+                android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+            if (tvMode) { champ.fermerClavierTv(); true }
+            else false   // mobile : on ne consomme pas, le comportement d'origine du champ est préservé
         }
 
         return android.widget.LinearLayout(ctx).apply {
@@ -3640,6 +3679,7 @@ private fun normSearch(s: String): String =
         }
 
         try { dlg.show() } catch (_: android.view.WindowManager.BadTokenException) { return }
+        if (isTV) pleineLargeurTv(dlg, container)
         pushDialog(dlg)
         connectDragPoster(dlg)
         applyThemeBackground(dlg)

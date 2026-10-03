@@ -824,6 +824,20 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                 true
             }
         }
+        // 2026-10-03 (user : « une petite notification au-dessus de télécharger ») : bouton
+        //   « Télécharger la dernière version » + ligne 🔔 visible seulement quand un écrasement
+        //   (version corrigée au même numéro) est en ligne. Voir InAppUpdater.ecrasementDisponible.
+        findPreference<Preference>("APP_ECRASEMENT")?.isVisible = false
+        findPreference<Preference>("APP_DERNIERE_VERSION")?.setOnPreferenceClickListener {
+            telechargerDerniereVersion(); true
+        }
+        lifecycleScope.launch {
+            val e = try { com.streamflixreborn.streamflix.utils.InAppUpdater.ecrasementDisponible() } catch (_: Exception) { null }
+            if (e != null) findPreference<Preference>("APP_ECRASEMENT")?.apply {
+                summary = "La ${e.release.tagName} a été corrigée depuis votre installation. Téléchargez-la juste en dessous."
+                isVisible = true
+            }
+        }
 
         val HasConfigProvider = UserPreferences.currentProvider is ProviderConfigUrl
         findPreference<PreferenceCategory>("pc_provider_settings")?.apply {
@@ -2831,4 +2845,22 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         else url.ifBlank { null }
     }
 
+    /** 2026-10-03 : télécharge et installe la dernière version publiée (même numéro accepté). */
+    private fun telechargerDerniereVersion() {
+        val ctx = context ?: return
+        Toast.makeText(ctx, "Téléchargement de la dernière version…", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            try {
+                val d = com.streamflixreborn.streamflix.utils.InAppUpdater.derniereVersion()
+                    ?: throw Exception("aucune version trouvée")
+                val apk = withContext(Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.utils.InAppUpdater.downloadApk(ctx.applicationContext, d.asset)
+                }
+                com.streamflixreborn.streamflix.utils.InAppUpdater.installApk(ctx, Uri.fromFile(apk))
+            } catch (e: Exception) {
+                android.util.Log.w("Settings", "téléchargement dernière version : ${e.message}")
+                context?.let { Toast.makeText(it, "Téléchargement impossible : ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
 }
