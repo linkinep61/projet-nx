@@ -49,6 +49,8 @@ class VidaraExtractor : Extractor() {
     override val aliasUrls = listOf(
         "https://viewdara.com",
         "https://vidara.so",
+        // 2026-10-03 : nouveaux domaines Vidara (relevés en amont, Streamflix Reborn).
+        "https://ano.cx", "https://bufsao.com",
         // 2026-08-07 : nouveau front relevé sur CoflixWiki — noter le DOUBLE « a ».
         //   Vérifié en direct : `vidaraa.cc/e/<filecode>` répond au MÊME `/api/stream`
         //   (payload filecode+device, réponse streaming_url/subtitles/title). C'est donc

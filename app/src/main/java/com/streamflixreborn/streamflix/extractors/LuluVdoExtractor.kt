@@ -36,6 +36,8 @@ class LuluVdoExtractor : Extractor() {
     override val mainUrl = "https://lulustream.com/"
     override val aliasUrls = listOf(
         "https://luluvdo.com", "https://luluvdoo.com", "https://luluvid.com",
+        // 2026-10-03 : nouveau domaine LuluStream (relevé en amont, Streamflix Reborn).
+        "https://lulust.com",
         // 2026-09-15 (logcat Oppo, film Movix) : « HOTE NON COUVERT: livavid.sbs ».
         //   Ce n'est pas un nouvel hébergeur — la page se présente elle-même comme
         //   LuluStream (`<title>…  - LuluStream</title>`) et sert le même JS packé

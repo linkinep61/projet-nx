@@ -323,11 +323,11 @@ object VavooProvider : Provider, IptvProvider {
             CuratedChannel("france5", "France 5", "Généraliste"),
             CuratedChannel("m6", "M6", "Généraliste"),
             CuratedChannel("arte", "Arte", "Généraliste"),
-            CuratedChannel("c8", "C8", "Généraliste"),
+            // 2026-10-03 : C8 retirée (arrêtée le 28/02/2025).
             CuratedChannel("w9", "W9", "Généraliste"),
             CuratedChannel("tmc", "TMC", "Généraliste"),
             CuratedChannel("tfx", "TFX", "Généraliste"),
-            CuratedChannel("nrj12", "NRJ 12", "Généraliste"),
+            // 2026-10-03 : NRJ 12 retirée (arrêtée le 28/02/2025).
             CuratedChannel("lcp", "LCP", "Généraliste"),
             CuratedChannel("publicsenat", "Public Sénat", "Généraliste"),
             CuratedChannel("gulli", "Gulli", "Généraliste"),

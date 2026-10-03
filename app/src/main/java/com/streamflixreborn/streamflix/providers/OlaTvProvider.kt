@@ -89,6 +89,28 @@ object OlaTvProvider : Provider, IptvProvider {
         .dns(okhttp3.Dns.SYSTEM)
         .build()
 
+    // ───────── 2026-10-03 : registre OLA complet pré-trié sur GitHub (comme Vegeta) ─────────
+    // Un workflow onyxia-data tire plusieurs comptes par cid sur les ~1269 cids, garde les
+    // portails qui ont des chaînes FR, teste une grande chaîne (TF1/France 2/M6/France 3) et
+    // publie tout en .json.gz (release « ola-full »). L'app le télécharge au lieu de sonder
+    // les portails un par un au démarrage (40-50 s sur TV) → toutes les sources d'un coup.
+    private const val OLA_REGISTRE_URL =
+        "https://github.com/rikital/onyxia-data/releases/download/ola-full/registre-fr.json.gz"
+    private const val OLA_REGISTRE_FICHIER = "olatv_registre_complet.json.gz"
+    private const val OLA_REGISTRE_TTL_MS = 3L * 60 * 60 * 1000L
+    private const val OLA_REGISTRE_MAX_PAR_CHAINE = 150
+    @Volatile private var registreCompletCharge = false
+    // cid → hôte du portail sur lequel le registre a relevé les cmd (un cid peut renvoyer un
+    //   autre portail selon le tirage ; les numéros de chaînes ne valent que pour ce portail).
+    private val registreHoteParCid = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private val registreClient = client.newBuilder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
+        .dns(okhttp3.Dns.SYSTEM)
+        .build()
+
     // ───────── Channel registry ─────────
 
     private data class OlaStreamRef(val cid: String, val label: String, val url: String)
@@ -305,35 +327,69 @@ object OlaTvProvider : Provider, IptvProvider {
      *  same base key. Iterates until no changes so that combos like "TF1 +1 HD" reduce to "tf1".
      *  KEEPS the word "France" as part of the channel name (e.g. "France 2" → "france2") because
      *  it's a real part of the channel identity — only strips "FR"/"French" at boundaries. */
+    // 2026-10-03 : expressions compilées UNE fois. Avant, chaque appel de norm()/baseDisplayName()/
+    //   normalizeForLogo() recompilait ~40 Regex → 40 s pour lire le registre complet sur la TV.
+    private val RX_E = Regex("[éèêë]")
+    private val RX_A = Regex("[àâä]")
+    private val RX_U = Regex("[ùûü]")
+    private val RX_I = Regex("[îï]")
+    private val RX_O = Regex("[ôö]")
+    private val RX_CROCHETS = Regex("\\[.*?]")
+    private val RX_PARENTHESES = Regex("\\(.*?\\)")
+    // Étiquette décorée « ┃FR┃ TF1 » (beaucoup de portails) → sinon clé « frtf1 ».
+    private val RX_TAG_FR = Regex("^[^A-Za-z0-9]*(FR|FRA)[\\s|:┃│\\]\\)\\-]+", RegexOption.IGNORE_CASE)
+    // Strip "FR:" / "France:" / "FR -" prefix only (an explicit channel-list prefix).
+    private val RX_PREFIXE_FR = Regex("^\\s*(FR|France)\\s*[:|\\-]\\s*", RegexOption.IGNORE_CASE)
+    // Quality tags and "+1": stripped anywhere. "live" strippé seulement s'il n'est PAS suivi d'un
+    //   chiffre (préserve "Canal+ Live 1", strippe "TF1 LIVE HD").
+    private val RX_NORM_MID = Regex(
+        "\\b(hd|sd|fhd|uhd|4k|raw|hevc|h\\.?265|ppv|ott|test|backup|fhdr|sdr)\\b" +
+            "|\\blive\\b(?!\\s*\\d)" +
+            "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)"
+    )
+    // Country qualifiers: only stripped at end (so "France 2" stays intact, but "TF1 FR" → "TF1").
+    private val RX_NORM_FIN = Regex("\\s+(fr|french|francais|belgique|be|suisse|ch|lux)\\s*$")
+    private val RX_POINT_FR = Regex("\\.fr\\b", RegexOption.IGNORE_CASE)
+    private val RX_ESPACES = Regex("\\s+")
+    private val RX_NON_ALNUM = Regex("[^a-z0-9]")
+    private val RX_VARIANTE_QUALITE = Regex(
+        "\\b(HD|SD|FHD|UHD|4K|RAW|HEVC|H\\.?265|PPV|OTT|LIVE|FHDR|SDR)\\b" +
+            "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)",
+        RegexOption.IGNORE_CASE
+    )
+    private val RX_VARIANTE_PAYS = Regex(
+        "\\b(FRANCE|FR|FRENCH|FRANCAIS|BELGIQUE|BE|SUISSE|CH|LUX)\\b", RegexOption.IGNORE_CASE
+    )
+    private val RX_AFFICHE_MID = Regex(
+        "\\b(HD|SD|FHD|UHD|4K|RAW|HEVC|H\\.?265|PPV|OTT|LIVE|TEST|BACKUP|FHDR|SDR)\\b" +
+            "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)",
+        RegexOption.IGNORE_CASE
+    )
+    private val RX_AFFICHE_FIN = Regex(
+        "\\s+(FR|French|Francais|Belgique|BE|Suisse|CH|LUX)\\s*$", RegexOption.IGNORE_CASE
+    )
+    // Strip leading bullets / dashes / chevrons that some upstream providers prepend.
+    private val RX_PUCES = Regex("^[\\-•●○▪►•‣⮞›»\\u2022]+\\s*")
+    private val RX_LOGO_QUALITE = Regex("\\b(fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv)\\b")
+    private val RX_LOGO_PLUS1 = Regex("\\+\\s?1\\b")
+    private val RX_LOGO_FIN = Regex("\\s+(fr|french|francais)\\s*$")
+    private val RX_INITIALES_BLOCS = Regex("[\\[\\(].*?[\\]\\)]")
+
+    private fun sansAccents(s: String): String =
+        s.replace(RX_E, "e").replace(RX_A, "a").replace(RX_U, "u")
+            .replace(RX_I, "i").replace(RX_O, "o").replace("ç", "c")
+
     private fun norm(raw: String): String {
-        var s = raw.lowercase()
-            .replace(Regex("[éèêë]"), "e")
-            .replace(Regex("[àâä]"), "a")
-            .replace(Regex("[ùûü]"), "u")
-            .replace(Regex("[îï]"), "i")
-            .replace(Regex("[ôö]"), "o")
-            .replace("ç", "c")
-            .replace(Regex("\\[.*?]"), " ")
-            .replace(Regex("\\(.*?\\)"), " ")
-            // Strip "FR:" / "France:" / "FR -" prefix only (an explicit channel-list prefix).
-            .replace(Regex("^\\s*(fr|france)\\s*[:|\\-]\\s*"), "")
-        // Quality tags and "+1": stripped anywhere.
-        // 2026-05-09 : "live" est strippé SEULEMENT s'il n'est PAS suivi d'un
-        // chiffre. Préserve "Canal+ Live 1" tout en strippant "TF1 LIVE HD".
-        val midTag = Regex(
-            "\\b(hd|sd|fhd|uhd|4k|raw|hevc|h\\.?265|ppv|ott|test|backup|fhdr|sdr)\\b" +
-                "|\\blive\\b(?!\\s*\\d)" +
-                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)"
-        )
-        // Country qualifiers: only stripped at end (so "France 2" stays intact, but "TF1 FR" → "TF1").
-        val endQualifier = Regex(
-            "\\s+(fr|french|francais|belgique|be|suisse|ch|lux)\\s*$"
-        )
+        var s = sansAccents(raw.lowercase())
+            .replace(RX_CROCHETS, " ")
+            .replace(RX_PARENTHESES, " ")
+            .replace(RX_TAG_FR, "")
+            .replace(RX_PREFIXE_FR, "")
         while (true) {
-            val next = s.replace(midTag, " ")
-                .replace(endQualifier, "")
-                .replace(Regex("\\.fr\\b"), "")
-                .replace(Regex("\\s+"), " ")
+            val next = s.replace(RX_NORM_MID, " ")
+                .replace(RX_NORM_FIN, "")
+                .replace(RX_POINT_FR, "")
+                .replace(RX_ESPACES, " ")
                 .trim()
             if (next == s) break
             s = next
@@ -342,7 +398,7 @@ object OlaTvProvider : Provider, IptvProvider {
         // normalizeForLogo) match registry keys: "Canal+ Family" → "canalplusfamily".
         // Also "&" → "and" to keep parity.
         return s.replace("+", "plus").replace("&", "and")
-            .replace(Regex("[^a-z0-9]"), "").replace("sports", "sport")
+            .replace(RX_NON_ALNUM, "").replace("sports", "sport")
     }
 
     /** Extract the variant label ("HD", "FHD", "+1", "FR") from a raw channel name so
@@ -350,42 +406,26 @@ object OlaTvProvider : Provider, IptvProvider {
      *  channel name. Returns "" when no qualifier is present. */
     private fun extractVariantLabel(raw: String): String {
         val parts = mutableListOf<String>()
-        Regex(
-            "\\b(HD|SD|FHD|UHD|4K|RAW|HEVC|H\\.?265|PPV|OTT|LIVE|FHDR|SDR)\\b" +
-                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)",
-            RegexOption.IGNORE_CASE
-        ).findAll(raw).forEach { parts.add(it.value.uppercase()) }
+        RX_VARIANTE_QUALITE.findAll(raw).forEach { parts.add(it.value.uppercase()) }
         // Country qualifier kept separately so e.g. "TF1 FR" stays distinguishable from "TF1 BE".
-        Regex(
-            "\\b(FRANCE|FR|FRENCH|FRANCAIS|BELGIQUE|BE|SUISSE|CH|LUX)\\b",
-            RegexOption.IGNORE_CASE
-        ).findAll(raw).forEach { m -> parts.add(m.value.uppercase()) }
+        RX_VARIANTE_PAYS.findAll(raw).forEach { m -> parts.add(m.value.uppercase()) }
         return parts.distinct().joinToString(" ")
     }
 
     /** Pretty display name: keeps the channel identity ("France 2", "France Info") but
      *  strips quality / country / "+1" markers at appropriate positions. */
     private fun baseDisplayName(raw: String): String {
-        val midTag = Regex(
-            "\\b(HD|SD|FHD|UHD|4K|RAW|HEVC|H\\.?265|PPV|OTT|LIVE|TEST|BACKUP|FHDR|SDR)\\b" +
-                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)",
-            RegexOption.IGNORE_CASE
-        )
-        val endQualifier = Regex(
-            "\\s+(FR|French|Francais|Belgique|BE|Suisse|CH|LUX)\\s*$",
-            RegexOption.IGNORE_CASE
-        )
         var s = raw
-            .replace(Regex("\\[.*?]"), " ")
-            .replace(Regex("\\(.*?\\)"), " ")
-            .replace(Regex("^\\s*(FR|France)\\s*[:|\\-]\\s*", RegexOption.IGNORE_CASE), "")
-            // Strip leading bullets / dashes / chevrons that some upstream providers prepend.
-            .replace(Regex("^[\\-•●○▪►•‣⮞›»\\u2022]+\\s*"), "")
+            .replace(RX_CROCHETS, " ")
+            .replace(RX_PARENTHESES, " ")
+            .replace(RX_TAG_FR, "")
+            .replace(RX_PREFIXE_FR, "")
+            .replace(RX_PUCES, "")
         while (true) {
-            val next = s.replace(midTag, " ")
-                .replace(endQualifier, "")
-                .replace(Regex("\\.fr\\b", RegexOption.IGNORE_CASE), "")
-                .replace(Regex("\\s+"), " ")
+            val next = s.replace(RX_AFFICHE_MID, " ")
+                .replace(RX_AFFICHE_FIN, "")
+                .replace(RX_POINT_FR, "")
+                .replace(RX_ESPACES, " ")
                 .trim()
             if (next == s) break
             s = next
@@ -450,11 +490,12 @@ object OlaTvProvider : Provider, IptvProvider {
             CuratedChannel("france5", "France 5", "Généraliste"),
             CuratedChannel("m6", "M6", "Généraliste"),
             CuratedChannel("arte", "Arte", "Généraliste"),
-            CuratedChannel("c8", "C8", "Généraliste"),
+            // 2026-10-03 : C8 retirée (arrêtée le 28/02/2025, plus rien ne passe — testé par le user).
             CuratedChannel("w9", "W9", "Généraliste"),
             CuratedChannel("tmc", "TMC", "Généraliste"),
             CuratedChannel("tfx", "TFX", "Généraliste"),
-            CuratedChannel("nrj12", "NRJ 12", "Généraliste"),
+            // 2026-10-03 : NRJ 12 retirée (arrêtée le 28/02/2025 — les portails la listent
+            //   encore mais n'envoient plus rien ; user : « on devrait la retirer »).
             CuratedChannel("lcp", "LCP", "Généraliste"),
             CuratedChannel("gulli", "Gulli", "Généraliste"),
             CuratedChannel("tf1seriesfilms", "TF1 Séries Films", "Généraliste"),
@@ -813,7 +854,9 @@ object OlaTvProvider : Provider, IptvProvider {
         // Direct external HTTP URLs are playable as-is. Localhost URLs are placeholders
         // that ALWAYS need create_link resolution.
         val isLocalhost = rawCmd.contains("localhost") || rawCmd.contains("127.0.0.1")
-        if (rawCmd.startsWith("http") && !isLocalhost) return rawCmd
+        if (rawCmd.startsWith("http") && !isLocalhost) {
+            return if (macManquant(rawCmd)) avecCompte(rawCmd, mac) else rawCmd
+        }
 
         try {
             val encodedMac = java.net.URLEncoder.encode(mac, "UTF-8")
@@ -912,6 +955,24 @@ object OlaTvProvider : Provider, IptvProvider {
         hostHealth.compute(h) { _, v -> (v ?: HostHealth()).also { it.fail++ } }
     }
 
+    /** 2026-10-03 : hôte réel d'une source. Les cmd des portails MAC pointent sur « localhost » →
+     *  on prend le portail relevé par le registre pour ce cid (sinon comportement d'avant). */
+    private fun hoteSource(s: OlaStreamRef): String {
+        if ('@' in s.cid) return s.cid.substringAfter('@')
+        val raw = s.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+        val h = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+        if (h.isNotBlank() && h != "localhost" && h != "127.0.0.1") return h
+        return registreHoteParCid[s.cid] ?: h
+    }
+
+    /** 2026-10-03 : le registre public ne contient AUCUN compte — ses liens directs ont « mac= »
+     *  vide. On y place le compte tiré sur ce portail au moment de lire. */
+    private val RX_MAC_VIDE = Regex("[?&]mac=(&|$)")
+    private val RX_MAC_PARAM = Regex("([?&]mac=)[^&]*")
+    private fun macManquant(raw: String): Boolean = RX_MAC_VIDE.containsMatchIn(raw)
+    private fun avecCompte(raw: String, mac: String): String =
+        raw.replace(RX_MAC_PARAM) { it.groupValues[1] + mac }
+
     private fun hostScore(url: String): Double {
         val h = hostnameOf(url).ifBlank { return 0.5 }
         return hostHealth[h]?.score() ?: 0.5
@@ -947,13 +1008,16 @@ object OlaTvProvider : Provider, IptvProvider {
             val host = hostnameOf(url)
             if (host.isNotBlank()) {
                 val failCount = (hostHealth[host]?.fail ?: 0)
-                if (failCount >= 2) {
+                // 2026-10-03 : en mode registre, chaque tirage d'un cid donne un AUTRE compte →
+                //   on relâche le compte dès le 1er échec (compte occupé / flux fantôme), et on
+                //   ne blackliste le domaine qu'après 6 échecs (il porte souvent des dizaines de comptes).
+                if (failCount >= 2 || registreCompletCharge) {
                     // Multiple failures from this host — clear cached MAC credentials
                     // so next resolve does a fresh handshake
                     macCredsCache.entries.removeIf { hostnameOf(it.value.baseUrl) == host }
                     Log.d(TAG, "Cleared MAC creds for host $host after $failCount failures")
                     // 3+ failures: blacklist the domain to skip it entirely on future channels
-                    if (failCount >= 3) {
+                    if (failCount >= (if (registreCompletCharge) 6 else 3)) {
                         markDomainDead(host)
                         saveDeadDomains()
                     }
@@ -1371,6 +1435,27 @@ object OlaTvProvider : Provider, IptvProvider {
 
     private fun getMacCredentials(cid: String): MacCredentials? {
         macCredsCache[cid]?.let { return it }
+        // 2026-10-03 : en mode registre, on veut un compte sur LE portail où les cmd ont été
+        //   relevées (le même cid renvoie parfois un autre portail) → quelques tirages au besoin.
+        //   Les sources du registre portent « cid@portail » (un cid peut exposer plusieurs portails).
+        val vraiCid = cid.substringBefore('@')
+        val hoteAttendu = (if ('@' in cid) cid.substringAfter('@') else registreHoteParCid[cid])
+            ?: return tirerMacCredentials(cid, true)
+        var dernier: MacCredentials? = null
+        repeat(4) {
+            val c = tirerMacCredentials(vraiCid, false) ?: return@repeat
+            dernier = c
+            if (hostnameOf(c.baseUrl).equals(hoteAttendu, ignoreCase = true)) {
+                macCredsCache[cid] = c
+                return c
+            }
+        }
+        if (dernier != null) Log.d(TAG, "getMacCredentials($cid) : portail attendu $hoteAttendu jamais tiré, on prend ${hostnameOf(dernier!!.baseUrl)}")
+        dernier?.let { macCredsCache[cid] = it }
+        return dernier
+    }
+
+    private fun tirerMacCredentials(cid: String, enCache: Boolean): MacCredentials? {
         try {
             val b64 = olaBuildPayload("getToken128910", mapOf("cid" to cid))
             val formBody = FormBody.Builder().add("data", b64).build()
@@ -1400,7 +1485,7 @@ object OlaTvProvider : Provider, IptvProvider {
             }
 
             val creds = MacCredentials(baseUrl, mac)
-            macCredsCache[cid] = creds
+            if (enCache) macCredsCache[cid] = creds
             return creds
         } catch (e: Exception) {
             Log.e(TAG, "getMacCredentials($cid) failed: ${e.message}")
@@ -1498,19 +1583,13 @@ object OlaTvProvider : Provider, IptvProvider {
     /** Compact lookup key — strips ALL non-alphanumeric so "C-8", "C8", "C 8" all
      *  collapse to "c8". Quality and country tags removed beforehand. */
     private fun normalizeForLogo(name: String): String {
-        return name.lowercase()
-            .replace(Regex("[éèêë]"), "e")
-            .replace(Regex("[àâä]"), "a")
-            .replace(Regex("[ùûü]"), "u")
-            .replace(Regex("[îï]"), "i")
-            .replace(Regex("[ôö]"), "o")
-            .replace("ç", "c")
-            .replace(Regex("\\b(fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv)\\b"), " ")
-            .replace(Regex("\\+\\s?1\\b"), " ")
+        return sansAccents(name.lowercase())
+            .replace(RX_LOGO_QUALITE, " ")
+            .replace(RX_LOGO_PLUS1, " ")
             .replace("+", "plus")
             .replace("&", "and")
-            .replace(Regex("\\s+(fr|french|francais)\\s*$"), "")
-            .replace(Regex("[^a-z0-9]"), "")
+            .replace(RX_LOGO_FIN, "")
+            .replace(RX_NON_ALNUM, "")
     }
 
     // 2026-07-11 : manualLogoMap (URLs tv-logos GitHub) SUPPRIMÉ — lent sur la Chromecast + URLs
@@ -1551,8 +1630,8 @@ object OlaTvProvider : Provider, IptvProvider {
         }
         // ui-avatars accepts up to 3 letters. Keep first letter of up to first 3 words.
         val initials = name
-            .replace(Regex("[\\[\\(].*?[\\]\\)]"), " ")
-            .split(Regex("\\s+"))
+            .replace(RX_INITIALES_BLOCS, " ")
+            .split(RX_ESPACES)
             .filter { it.isNotBlank() }
             .take(3)
             .joinToString("+")
@@ -1597,6 +1676,223 @@ object OlaTvProvider : Provider, IptvProvider {
             }
         }
         return added
+    }
+
+    // ───────── 2026-10-03 : registre complet GitHub ─────────
+
+    /** Fichier du registre sur disque : re-téléchargé au-delà de 3 h ; si GitHub ne répond pas,
+     *  on garde la copie précédente (même ancienne) plutôt que de retomber sur le scan. */
+    private fun telechargerRegistreComplet(): java.io.File? {
+        val f = java.io.File(StreamFlixApp.instance.filesDir, OLA_REGISTRE_FICHIER)
+        if (f.exists() && f.length() > 1000 &&
+            System.currentTimeMillis() - f.lastModified() < OLA_REGISTRE_TTL_MS) return f
+        try {
+            val req = Request.Builder().url(OLA_REGISTRE_URL).header("User-Agent", USER_AGENT).build()
+            registreClient.newCall(req).execute().use { resp ->
+                val body = resp.body
+                if (resp.isSuccessful && body != null) {
+                    val tmp = java.io.File(f.parentFile, "$OLA_REGISTRE_FICHIER.tmp")
+                    body.byteStream().use { inp -> tmp.outputStream().use { out -> inp.copyTo(out, 65536) } }
+                    if (tmp.length() > 1000) {
+                        if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+                        Log.d(TAG, "registre OLA téléchargé (${f.length() / 1024} Ko)")
+                        return f
+                    }
+                    tmp.delete()
+                } else {
+                    Log.w(TAG, "registre OLA : HTTP ${resp.code}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "registre OLA : téléchargement KO (${e.message})")
+        }
+        return if (f.exists() && f.length() > 1000) f.also {
+            Log.d(TAG, "registre OLA : copie disque précédente utilisée")
+        } else null
+    }
+
+    /** Ajoute les sources d'un nom du registre. Nom normalisé UNE fois par nom (pas par source :
+     *  84 000 passages dans les regex de norm() bloquaient la TV). */
+    private fun ajouterSourcesRegistre(nom: String, paires: List<Pair<String, String>>): Int {
+        if (paires.isEmpty()) return 0
+        var t = System.nanoTime()
+        if (!com.streamflixreborn.streamflix.utils.IptvLangFilter.isFrCompatible(nom)) return 0
+        val key = norm(nom)
+        if (key.isBlank()) return 0
+        val variante = extractVariantLabel(nom)
+        mesureNoms += System.nanoTime() - t; t = System.nanoTime()
+        val nouveau = synchronized(registryLock) { channelRegistry[key] == null }
+        mesureVerrou += System.nanoTime() - t; t = System.nanoTime()
+        val displayName = if (nouveau) baseDisplayName(nom) else ""
+        val categorie = if (nouveau) guessCategory(displayName) else ""
+        mesureAffichage += System.nanoTime() - t; t = System.nanoTime()
+        val logo = ""  // 2026-10-03 : calculé à l'affichage (repli automatique sur logo vide)
+        mesureLogo += System.nanoTime() - t; t = System.nanoTime()
+        var ajoutes = 0
+        synchronized(registryLock) {
+            val info = channelRegistry.getOrPut(key) {
+                ChannelInfo(displayName = displayName.ifBlank { baseDisplayName(nom) },
+                    category = categorie.ifBlank { "Généraliste" }, logo = logo)
+            }
+            for ((cid, cmd) in paires) {
+                if (info.streams.size >= OLA_REGISTRE_MAX_PAR_CHAINE) break
+                if (cmd.isBlank()) continue
+                if (info.streams.any { it.cid == cid && it.url == cmd }) continue
+                info.streams.add(OlaStreamRef(cid, variante.ifBlank { "Source ${info.streams.size + 1}" }, cmd))
+                ajoutes++
+            }
+        }
+        mesureSources += System.nanoTime() - t
+        return ajoutes
+    }
+    /** Registre v3 : la clé et le nom affiché arrivent déjà calculés. Seule la catégorie (simples
+     *  « contains ») est faite ici ; le logo est calculé à l'affichage (logo vide = repli auto). */
+    private fun ajouterCleRegistre(key: String, affiche: String, sources: List<Triple<String, String, String>>): Int {
+        if (key.isBlank() || sources.isEmpty()) return 0
+        var ajoutes = 0
+        synchronized(registryLock) {
+            val info = channelRegistry.getOrPut(key) {
+                ChannelInfo(displayName = affiche, category = guessCategory(affiche), logo = "")
+            }
+            for ((cid, cmd, v) in sources) {
+                if (info.streams.size >= OLA_REGISTRE_MAX_PAR_CHAINE) break
+                if (cmd.isBlank()) continue
+                if (info.streams.any { it.cid == cid && it.url == cmd }) continue
+                info.streams.add(OlaStreamRef(cid, v.ifBlank { "Source ${info.streams.size + 1}" }, cmd))
+                ajoutes++
+            }
+        }
+        return ajoutes
+    }
+
+    // 2026-10-03 : mesure du rangement (ms) — à retirer une fois le goulot trouvé.
+    private var mesureNoms = 0L
+    private var mesureVerrou = 0L
+    private var mesureAffichage = 0L
+    private var mesureLogo = 0L
+    private var mesureSources = 0L
+    private fun detailMesure() = "noms ${mesureNoms / 1_000_000}, verrou ${mesureVerrou / 1_000_000}, " +
+        "affichage ${mesureAffichage / 1_000_000}, logo ${mesureLogo / 1_000_000}, sources ${mesureSources / 1_000_000}"
+
+    /** Charge le registre complet (lecture en flux du .json.gz, pas de gros objet en RAM).
+     *  Format : {"portails":[{cid,hote,statut,...}], "chaines":{nom:[[indexPortail, cmd],...]}}
+     *  Portails triés du meilleur au moins bon → les sources d'une chaîne arrivent dans cet ordre. */
+    private fun chargerRegistreComplet(): Boolean {
+        if (vodSuspended) return false
+        val f = telechargerRegistreComplet() ?: return false
+        val t0 = System.currentTimeMillis()
+        val cids = ArrayList<String>()
+        val cidsOk = ArrayList<String>()
+        var nbSources = 0
+        var nbNoms = 0
+        var nsRangement = 0L
+        Log.d(TAG, "registre OLA : lecture de ${f.name} (${f.length() / 1024} Ko)")
+        try {
+            val flux = java.util.zip.GZIPInputStream(java.io.BufferedInputStream(f.inputStream(), 65536))
+            android.util.JsonReader(java.io.InputStreamReader(flux, Charsets.UTF_8)).use { r ->
+                r.beginObject()
+                while (r.hasNext()) {
+                    when (r.nextName()) {
+                        "portails" -> {
+                            r.beginArray()
+                            while (r.hasNext()) {
+                                var cid = ""; var hote = ""; var statut = ""
+                                r.beginObject()
+                                while (r.hasNext()) {
+                                    when (r.nextName()) {
+                                        "cid" -> cid = r.nextString()
+                                        "hote" -> hote = r.nextString()
+                                        "statut" -> statut = r.nextString()
+                                        else -> r.skipValue()
+                                    }
+                                }
+                                r.endObject()
+                                val h = hote.substringBefore(':')
+                                cids.add(if (cid.isNotBlank() && h.isNotBlank()) "$cid@$h" else cid)
+                                if (cid.isNotBlank() && statut == "ok") cidsOk.add(cid)
+                            }
+                            r.endArray()
+                        }
+                        "chaines" -> {
+                            r.beginObject()
+                            while (r.hasNext()) {
+                                val nom = r.nextName()
+                                // 2026-10-03 — registre v3 : { clé : {"d": nom affiché, "s": [[i, cmd, variante]…]} }
+                                //   noms déjà nettoyés/regroupés côté GitHub (mêmes règles que norm()) →
+                                //   aucune expression à passer ici (30 s → quelques secondes sur TV).
+                                if (r.peek() == android.util.JsonToken.BEGIN_OBJECT) {
+                                    var affiche = nom
+                                    val sources = ArrayList<Triple<String, String, String>>()
+                                    r.beginObject()
+                                    while (r.hasNext()) {
+                                        when (r.nextName()) {
+                                            "d" -> affiche = r.nextString()
+                                            "s" -> {
+                                                r.beginArray()
+                                                while (r.hasNext()) {
+                                                    r.beginArray()
+                                                    val i = r.nextInt()
+                                                    val cmd = r.nextString()
+                                                    val v = if (r.hasNext()) r.nextString() else ""
+                                                    while (r.hasNext()) r.skipValue()
+                                                    r.endArray()
+                                                    val cid = cids.getOrNull(i)
+                                                    if (!cid.isNullOrBlank()) sources.add(Triple(cid, cmd, v))
+                                                }
+                                                r.endArray()
+                                            }
+                                            else -> r.skipValue()
+                                        }
+                                    }
+                                    r.endObject()
+                                    val tA = System.nanoTime()
+                                    nbSources += ajouterCleRegistre(nom, affiche, sources)
+                                    nsRangement += System.nanoTime() - tA
+                                    nbNoms++
+                                    continue
+                                }
+                                val paires = ArrayList<Pair<String, String>>()
+                                r.beginArray()
+                                while (r.hasNext()) {
+                                    r.beginArray()
+                                    val i = r.nextInt()
+                                    val cmd = r.nextString()
+                                    while (r.hasNext()) r.skipValue()
+                                    r.endArray()
+                                    val cid = cids.getOrNull(i)
+                                    if (!cid.isNullOrBlank()) paires.add(cid to cmd)
+                                }
+                                r.endArray()
+                                val tA = System.nanoTime()
+                                nbSources += ajouterSourcesRegistre(nom, paires)
+                                nsRangement += System.nanoTime() - tA
+                                nbNoms++
+                                if (nbNoms % 1000 == 0) Log.d(TAG, "registre OLA : $nbNoms noms lus, $nbSources sources (${System.currentTimeMillis() - t0} ms, dont rangement ${nsRangement / 1_000_000} ms : ${detailMesure()})")
+                            }
+                            r.endObject()
+                        }
+                        else -> r.skipValue()
+                    }
+                }
+                r.endObject()
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "registre OLA illisible (${e.javaClass.simpleName}: ${e.message}) — retour au scan classique")
+            // Fichier abîmé (gzip/JSON) → effacé pour forcer un nouveau téléchargement.
+            if (e is java.util.zip.ZipException || e is java.io.EOFException ||
+                e is android.util.MalformedJsonException || e is IllegalStateException) f.delete()
+            return false
+        }
+        if (nbSources == 0) return false
+        // Les portails testés OK deviennent les cids FR de référence (renouvellement de sources).
+        frCids.addAllAbsent(cidsOk.ifEmpty { cids.filter { it.isNotBlank() }.map { it.substringBefore('@') } }
+            .distinct().take(60))
+        phase3Done = true
+        registreCompletCharge = true
+        val nbChaines = synchronized(registryLock) { channelRegistry.size }
+        Log.d(TAG, "registre OLA chargé : ${cids.size} portails (${cidsOk.size} OK), $nbChaines chaînes, " +
+            "$nbSources sources en ${System.currentTimeMillis() - t0} ms")
+        return true
     }
 
     /** Quick probe: does this cid's MAC portal have at least one FR-tagged genre?
@@ -1962,6 +2258,34 @@ object OlaTvProvider : Provider, IptvProvider {
             registryLoaded = false
 
             val t0 = System.currentTimeMillis()
+
+            // ── 2026-10-03 : registre complet pré-trié sur GitHub (toutes les sources, zéro scan).
+            //   S'il est indisponible (jamais téléchargé + pas de réseau GitHub) → ancien chemin.
+            val registreOk = withContext(Dispatchers.IO + NonCancellable) {
+                try { chargerRegistreComplet() } catch (_: Throwable) { false }
+            }
+            if (registreOk) {
+                registryLoaded = true
+                lastLoadTime = System.currentTimeMillis()
+                // 2026-10-03 : prépare en fond la liste des flux officiels du TV Hub, pour que
+                //   l'ouverture de la 1ʳᵉ chaîne n'attende pas son chargement.
+                if (!officielsEnCours && !officielsPrets) {
+                    officielsEnCours = true
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            val t = System.currentTimeMillis()
+                            LiveTvHubProvider.chainesLivePourCle("tf1", delaiMs = 30_000) { norm(it) }
+                            officielsPrets = true
+                            Log.d(TAG, "sources TV Hub prêtes pour OLA en ${System.currentTimeMillis() - t} ms")
+                        } catch (_: Throwable) {
+                        } finally {
+                            officielsEnCours = false
+                            officielsSignal.complete(Unit)
+                        }
+                    }
+                }
+                return@withLock
+            }
 
             // ── Step 0: try the disk cache first — restores ~800 channels in <100ms vs
             // ~30s for the full Phase 1+2 fetch. Phase 3 still refreshes in background.
@@ -2385,7 +2709,7 @@ object OlaTvProvider : Provider, IptvProvider {
                 ),
             )
         } else {
-            val logo = info.logo.ifBlank { null }
+            val logo = info.logo.ifBlank { logoUrlFor(info.displayName) }
             toTvShow(key, info).copy(
                 seasons = listOf(
                     Season(id = id, number = 1, title = "En Direct",
@@ -2431,8 +2755,7 @@ object OlaTvProvider : Provider, IptvProvider {
             // Filter out streams whose host is blacklisted (dead domain) — no point
             // handing them to the player only to waste 5-10s per dead host.
             val aliveStreams = info.streams.filter { stream ->
-                val raw = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
-                val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+                val host = hoteSource(stream)
                 val dead = host.isNotBlank() && isDomainDead(host)
                 if (dead) Log.d(TAG, "  filtered dead-domain stream: ${stream.label} ($host)")
                 !dead
@@ -2470,7 +2793,7 @@ object OlaTvProvider : Provider, IptvProvider {
                         val raw = it.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
                         raw.startsWith("http") && !raw.contains("localhost") && !raw.contains("127.0.0.1")
                     }
-                    .thenByDescending { hostScore(it.url) }                   // best host score
+                    .thenByDescending { hostHealth[hoteSource(it)]?.score() ?: 0.5 } // best host score
             )
             // Host diversity: limit to MAX_PER_HOST streams per MAC portal host.
             // Without this, 96 streams from wowtv.cc = cycling through 96 dead variants
@@ -2478,8 +2801,7 @@ object OlaTvProvider : Provider, IptvProvider {
             val MAX_PER_HOST = 2
             val hostCounts = mutableMapOf<String, Int>()
             val streamsSnapshot = sorted.filter { stream ->
-                val raw = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
-                val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+                val host = hoteSource(stream)
                 if (host.isBlank()) return@filter true  // can't determine host, keep it
                 val count = hostCounts.getOrDefault(host, 0)
                 if (count >= MAX_PER_HOST) {
@@ -2518,6 +2840,18 @@ object OlaTvProvider : Provider, IptvProvider {
             //   Les progressive natifs (HD, FHD, SD…) seront émis ensuite via le flow.
             //   Avant : fast-tracks en tête → l'user voyait 80x "OLA TV - Cached (cid XXX)"
             //   et devait scroller pour trouver les variantes natives "TF1 HD FRANCE".
+            // 2026-10-03 (user : « mettre en priorité les serveurs qu'on est sûr qu'ils vont bien
+            //   fonctionner, de France 2, etc. ») : flux OFFICIELS du TV Hub (France TV & co,
+            //   Multi Live) pour la même chaîne, placés EN TÊTE. Recherche bornée à 3 s et mise
+            //   en cache par chaîne ; si rien ne correspond, la liste OLA est inchangée.
+            val officiels = sourcesOfficiellesPour(key)
+            for ((rang, tv) in officiels.withIndex()) {
+                initialServers.add(rang, Video.Server(
+                    id = "$PREFIXE_OFFICIEL$tv",
+                    name = "${officielsTitre[tv] ?: info.displayName} · officiel",
+                ))
+            }
+            if (officiels.isNotEmpty()) Log.d(TAG, "  ${officiels.size} flux officiel(s) TV Hub en tête pour '$key'")
             val first = streamsSnapshot.firstOrNull()
             if (first != null) {
                 Log.d(TAG, "  primary[0] cid=${first.cid} label='${first.label}' cmd=${first.url.take(80)}")
@@ -2528,8 +2862,11 @@ object OlaTvProvider : Provider, IptvProvider {
             }
             // 2026-06-03 : index local persistant — injecte les URLs pré-résolues
             //   APRÈS le primary natif. Cap UI = 30 (au-delà : pollue le picker).
+            // 2026-10-03 : les URLs mémorisées passent par la santé de leur hôte (un hôte qui
+            //   vient d'échouer ne repasse plus en tête juste parce qu'il a marché un jour).
             val cachedFastTracks = com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex
                 .getCachedStreamUrls(key)
+                .sortedByDescending { (_, u) -> if (u in demotedUrls) -1.0 else hostScore(u) }
             val FAST_TRACK_UI_CAP = 30
             var ftAdded = 0
             for ((cid, url) in cachedFastTracks) {
@@ -2596,7 +2933,8 @@ object OlaTvProvider : Provider, IptvProvider {
                             val rawCmd = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
                             val cacheKey = "${stream.cid}::${stream.url}"
                             val isDirect = rawCmd.startsWith("http") &&
-                                !rawCmd.contains("localhost") && !rawCmd.contains("127.0.0.1")
+                                !rawCmd.contains("localhost") && !rawCmd.contains("127.0.0.1") &&
+                                !macManquant(rawCmd)
                             val resolved: String? = when {
                                 isDirect -> rawCmd
                                 resolvedUrlCache.containsKey(cacheKey) &&
@@ -2709,7 +3047,57 @@ object OlaTvProvider : Provider, IptvProvider {
         }
     }
 
+    // ───────── 2026-10-03 : flux officiels du TV Hub servis comme serveurs OLA ─────────
+    private const val PREFIXE_OFFICIEL = "olahub::"
+    private val officielsParCle = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
+    private val officielsTitre = java.util.concurrent.ConcurrentHashMap<String, String>()
+    /** true quand le préchauffage (accueil TV Hub + Mix FR + IPTV du web) est terminé : avant,
+     *  un résultat peut être partiel → on ne le mémorise pas. */
+    @Volatile private var officielsPrets = false
+    @Volatile private var officielsEnCours = false
+    private val officielsSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
+    private const val MAX_OFFICIELS = 5
+
+    /** Ids TV Hub (« livehub::… ») de la même chaîne que [cle]. Mémorisé par chaîne. */
+    private suspend fun sourcesOfficiellesPour(cle: String): List<String> {
+        officielsParCle[cle]?.let { return it }
+        // Préchauffage en cours (1ʳᵉ chaîne ouverte juste après le chargement) : on l'attend
+        //   jusqu'à 6 s plutôt que de démarrer sur des sources OLA sans l'officiel.
+        if (officielsEnCours && !officielsPrets) {
+            withTimeoutOrNull(6_000) { officielsSignal.await() }
+        }
+        val trouves = try {
+            withTimeoutOrNull(3_000) { LiveTvHubProvider.chainesLivePourCle(cle) { norm(it) } }
+        } catch (_: Throwable) { null } ?: return emptyList()   // délai dépassé : on réessaiera
+        trouves.forEach { tv -> officielsTitre[tv.id] = tv.title ?: "" }
+        val ids = trouves.map { it.id }.take(MAX_OFFICIELS)
+        if (officielsPrets) officielsParCle[cle] = ids
+        return ids
+    }
+
+    /** Lit un flux officiel via le TV Hub (même chemin que si on l'ouvrait depuis le TV Hub). */
+    private suspend fun videoOfficielle(server: Video.Server): Video {
+        val hubId = server.id.removePrefix(PREFIXE_OFFICIEL)
+        val titre = officielsTitre[hubId] ?: server.name
+        val type = Video.Type.Episode(
+            id = hubId, number = 1, title = titre, poster = null, overview = null,
+            tvShow = Video.Type.Episode.TvShow(
+                id = hubId, title = titre, poster = null, banner = null, releaseDate = null, imdbId = null,
+            ),
+            season = Video.Type.Episode.Season(number = 1, title = null),
+        )
+        val serveurs = LiveTvHubProvider.getServers(hubId, type)
+        var derniere: Exception? = null
+        for (s in serveurs) {
+            try {
+                return LiveTvHubProvider.getVideo(s).also { Log.d(TAG, "flux officiel OK : $titre via ${s.name}") }
+            } catch (e: Exception) { derniere = e }
+        }
+        throw derniere ?: Exception("aucun flux officiel pour $titre")
+    }
+
     override suspend fun getVideo(server: Video.Server): Video = withContext(Dispatchers.IO) {
+        if (server.id.startsWith(PREFIXE_OFFICIEL)) return@withContext videoOfficielle(server)
         try {
             // Fast-track: direct URL from working cache — skip all MAC portal resolution.
             if (server.id.startsWith("ola_fasttrack::")) {
@@ -2737,7 +3125,7 @@ object OlaTvProvider : Provider, IptvProvider {
 
             val streamUrl = when {
                 // Direct upstream URL (no resolution needed) — instant play.
-                rawCmd.startsWith("http") && !isLocalhost -> rawCmd
+                rawCmd.startsWith("http") && !isLocalhost && !macManquant(rawCmd) -> rawCmd
                 // 2026-05-09 : check le pre-warmed cache (rempli en background dans
                 // getServers). Si l'URL est en cache ET fraîche (<60s), on l'utilise
                 // direct → instant play sans handshake.
@@ -2869,8 +3257,8 @@ object OlaTvProvider : Provider, IptvProvider {
     private fun toTvShow(key: String, info: ChannelInfo): TvShow = TvShow(
         id = "ola::$key",
         title = info.displayName,
-        poster = info.logo.ifBlank { null },
-        banner = info.logo.ifBlank { null },
+        poster = info.logo.ifBlank { logoUrlFor(info.displayName) },
+        banner = info.logo.ifBlank { logoUrlFor(info.displayName) },
         providerName = name,
     )
 }

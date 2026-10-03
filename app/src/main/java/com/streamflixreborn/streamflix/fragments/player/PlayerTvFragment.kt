@@ -321,6 +321,8 @@ class PlayerTvFragment : Fragment() {
 
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
+    // 2026-10-03 : serveur déjà traité comme « flux fantôme » (une seule fois par serveur).
+    private var serveurFantomeSignale: String? = null
     // 2026-05-05 : watchdog buffering — déclenche le fallback au serveur suivant
     // si le player reste bloqué en STATE_BUFFERING > N secondes sans atteindre
     // STATE_READY. Indispensable pour les hosters genre Darkibox qui renvoient
@@ -1146,7 +1148,9 @@ class PlayerTvFragment : Fragment() {
                                     activeOnly.add(
                                         PlayerSettingsView.Settings.Server(
                                             id = replacement.id,
-                                            name = replacement.name,
+                                            name = if (replacement.name.startsWith("OLA["))
+                                                PlayerSettingsView.Settings.Server.nomSourceOla(replacement.id, replacement.name.substringAfter("] "))
+                                            else replacement.name,
                                             src = replacement.src,
                                         )
                                     )
@@ -1263,11 +1267,32 @@ class PlayerTvFragment : Fragment() {
                         //   Les vagues suivantes ne font que MAJ le picker (plus haut), pas de
                         //   re-getVideo → fini la rafale ré-entrante sur le main thread.
                         if (!initialServerPicked) {
-                            if (attachedFromMiniPlayer && !miniIsOnWrongServer) {
+                            // 2026-10-03 (user : « le passage du petit lecteur au grand fait bugger la
+                            //   vidéo juste après ») : le mini cherchait encore (pas d'image) et la
+                            //   liste du grand commence par un flux officiel → on le lance directement
+                            //   au lieu de garder le flux en panne du mini.
+                            val miniSansImage = attachedFromMiniPlayer && ::player.isInitialized &&
+                                player.playbackState != androidx.media3.common.Player.STATE_READY
+                            val officielEnTete = state.servers.firstOrNull()?.id?.startsWith("olahub::") == true
+                            if (attachedFromMiniPlayer && !miniIsOnWrongServer && !(miniSansImage && officielEnTete)) {
                                 initialServerPicked = true
-                                val initialServer = computeInitialServer()
+                                // 2026-10-03 : le serveur ACTIF est celui que jouait le mini, pas le
+                                //   1er de la liste du grand (qui peut avoir changé entre-temps :
+                                //   flux officiels ajoutés en tête). Sinon la reprise auto croyait le
+                                //   « mauvais » serveur en panne et coupait la vidéo.
+                                val serveurDuMini = miniPlayingId?.let { mid ->
+                                    state.servers.firstOrNull { canonicalServerId(it.id) == canonicalServerId(mid) }
+                                        ?: Video.Server(id = mid, name = currentServer?.name ?: "Serveur en cours")
+                                }
+                                val initialServer = serveurDuMini ?: computeInitialServer()
                                 currentServer = initialServer
                                 Log.d("PlayerTvFragment", "Skip viewModel.getVideo() — player already running (transferred from mini), currentServer=${initialServer.name}")
+                            } else if (attachedFromMiniPlayer && miniSansImage && officielEnTete) {
+                                initialServerPicked = true
+                                val officiel = state.servers.first()
+                                Log.i("PlayerTvFragment", "Mini sans image au transfert → flux officiel '${officiel.name}'")
+                                currentServer = officiel
+                                viewModel.getVideo(officiel)
                             } else if (state.autoPlay) {
                                 initialServerPicked = true
                                 val initialServer = computeInitialServer()
@@ -1515,6 +1540,18 @@ class PlayerTvFragment : Fragment() {
                             }
                             scheduleChannelRefresh()
                         }
+                        // 2026-10-03 (user « l'onglet Chaîne ne sert à rien, tout afficher dans
+                        //   Serveurs ») : chaque source OLA est aussi listée dans « Serveurs »
+                        //   (l'onglet « Chaîne » est masqué). La liste Chaîne reste en coulisse
+                        //   pour la bascule automatique entre sources.
+                        PlayerSettingsView.Settings.Server.addUnique(
+                            PlayerSettingsView.Settings.Server(
+                                id = server.id,
+                                name = PlayerSettingsView.Settings.Server.nomSourceOla(server.id, label),
+                                src = server.src,
+                            )
+                        )
+                        scheduleServerRefresh()
 
                         binding.settings.setOnChannelVariantSelectedListener { variant ->
                             viewModel.getVideo(Video.Server(variant.id, variant.name))
@@ -1597,6 +1634,8 @@ class PlayerTvFragment : Fragment() {
                 viewModel.serversReordered.collect { reordered ->
                     servers = reordered
                     val nonOla = reordered.filter { !it.name.startsWith("OLA[") }
+                    // 2026-10-03 : les sources OLA déjà listées dans « Serveurs » sont conservées.
+                    val sourcesOla = PlayerSettingsView.Settings.Server.list.filter { it.id.startsWith("ola_stream::") && reordered.none { r -> r.id == it.id } }
                     val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
                     val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
                     // Préserver la qualité déjà détectée par le probe
@@ -1611,6 +1650,14 @@ class PlayerTvFragment : Fragment() {
                             quality = it.quality ?: prevQualities[it.id]
                             language = it.language ?: prevLanguages[it.id]
                         }
+                    })
+                    PlayerSettingsView.Settings.Server.addAllUnique(sourcesOla)
+                    PlayerSettingsView.Settings.Server.addAllUnique(reordered.filter { it.name.startsWith("OLA[") }.map {
+                        PlayerSettingsView.Settings.Server(
+                            id = it.id,
+                            name = PlayerSettingsView.Settings.Server.nomSourceOla(it.id, it.name.substringAfter("] ", it.name)),
+                            src = it.src,
+                        ).apply { isSelected = (it.id == prevSelectedId) }
                     })
                     if (::player.isInitialized) {
                         player.playlistMetadata = MediaMetadata.Builder()
@@ -7424,6 +7471,27 @@ class PlayerTvFragment : Fragment() {
                         if (liveCheckCounter >= 5) {
                             liveCheckCounter = 0
                             Log.d("PlayerTvFragment", "Live buffer: pos=${pos/1000}s buf=${buf/1000}s ahead=${aheadSec}s")
+                        }
+                        // 2026-10-03 — FLUX FANTÔME (parité mini-lecteur) : certains panels OLA
+                        //   servent une vidéo de remplissage noire et muette (compte refusé) au
+                        //   lieu du direct. Un vrai direct n'a jamais 60 s d'avance dans ses 30
+                        //   premières secondes → serveur retenu comme défaillant, suivant.
+                        val srvFantome = currentServer
+                        val estOla = args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
+                        if (estOla && player.isPlaying && pos < 30_000L && aheadSec >= 60 &&
+                            srvFantome != null && srvFantome.id != serveurFantomeSignale
+                        ) {
+                            serveurFantomeSignale = srvFantome.id
+                            Log.w("PlayerTvFragment", "Flux fantôme sur ${srvFantome.name} : ${aheadSec}s d'avance dès ${pos / 1000}s → serveur suivant")
+                            try {
+                                player.currentMediaItem?.localConfiguration?.uri?.toString()?.let {
+                                    com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.markUrlDead(it)
+                                }
+                            } catch (_: Throwable) {}
+                            pruneBrokenVariant(srvFantome)
+                            val suivant = nextNonDeadServer(srvFantome)
+                            if (suivant != null) viewModel.getVideo(suivant)
+                            else tryNextChannelVariant(srvFantome)
                         }
                         // 2026-05-31 : détection flux corrompu — si la position de lecture
                         // ne progresse pas pendant 8s alors que le buffer est plein (>10s),

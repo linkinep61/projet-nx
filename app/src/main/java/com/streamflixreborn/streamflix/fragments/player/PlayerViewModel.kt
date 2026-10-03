@@ -1108,12 +1108,14 @@ class PlayerViewModel(
             // la dernière fois pour ce contenu, on le met en premier (auto-play dessus).
             val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
             val lastServerId = com.streamflixreborn.streamflix.utils.LastWorkingServer.get(ctx, id)
-            val finalServers = if (lastServerId != null && sortedServers.any { it.id == lastServerId }) {
+            val finalServers = (if (lastServerId != null && sortedServers.any { it.id == lastServerId }) {
                 val last = sortedServers.first { it.id == lastServerId }
                 listOf(last) + sortedServers.filter { it.id != lastServerId }
             } else {
                 sortedServers
-            }
+            }).sortedByDescending { it.id.startsWith("olahub::") }
+            // 2026-10-03 : les flux officiels du TV Hub proposés par OLA (« olahub:: ») restent
+            //   en tête, même devant le dernier serveur OLA qui a marché.
             if (lastServerId != null && finalServers.firstOrNull()?.id == lastServerId) {
                 Log.d("PlayerViewModel", "Reprise: serveur '${finalServers.first().name}' remis en 1er (dernier qui a marché)")
             }

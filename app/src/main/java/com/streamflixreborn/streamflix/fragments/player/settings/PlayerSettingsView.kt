@@ -559,6 +559,10 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
              *  Vegeta is also IPTV but exposes its variants directly under "Serveurs"
              *  (each m3u variant is its own Server entry), so "Chaîne" is redundant. */
             private fun shouldShowChannelVariant(): Boolean {
+                // 2026-10-03 (user « l'onglet Chaîne ne sert à rien, il suffit de tout afficher
+                //   dans Serveurs ») : onglet masqué pour tous les providers. Les sources OLA
+                //   sont listées dans « Serveurs » (comme Vegeta).
+                if (true) return false
                 val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
                 if (provider !is com.streamflixreborn.streamflix.providers.IptvProvider) return false
                 if (provider is com.streamflixreborn.streamflix.providers.VegetaTvProvider) return false
@@ -1535,6 +1539,16 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                     if (list.any { it.id == server.id }) return false
                     list.add(server)
                     return true
+                }
+
+                /** 2026-10-03 : libellé d'une source OLA dans « Serveurs » — « HD · portail »
+                 *  quand l'id porte le portail (« ola_stream::cid@portail::… »), sinon le libellé seul.
+                 *  Sans ça, 50 lignes « HD » identiques. */
+                fun nomSourceOla(id: String, label: String): String {
+                    val cid = id.removePrefix("ola_stream::").substringBefore("::")
+                    val portail = if ('@' in cid) cid.substringAfter('@') else ""
+                    val propre = label.trim().ifBlank { "Source" }
+                    return if (portail.isNotBlank()) "$propre · $portail" else propre
                 }
 
                 fun addAllUnique(servers: Iterable<Server>): Int {

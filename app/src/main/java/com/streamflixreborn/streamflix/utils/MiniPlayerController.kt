@@ -306,6 +306,14 @@ object MiniPlayerController {
     private const val LIVE_BUFFERING_RECOVERY_MS = 12_000L
     private const val RELOAD_FLAP_THRESHOLD = 3
     private const val RELOAD_FLAP_WINDOW_MS = 15_000L
+    // 2026-10-03 (mesuré sur la TCL, OLA France 2) : un serveur qui échoue toutes les ~16,5 s
+    //   n'atteignait JAMAIS 3 échecs dans la fenêtre de 15 s → compteur bloqué à « 1/3 » et
+    //   « sticky retry » sur le même serveur à l'infini (35 serveurs en attente derrière).
+    //   On compte donc AUSSI les réessais par serveur : un serveur qui n'a encore jamais
+    //   joué (jamais STATE_READY) est abandonné après 2 réessais, quel que soit l'espacement.
+    private var stickyServeurIndex = -1
+    private var stickyServeurEssais = 0
+    private var indexServeurAyantJoue = -1
 
     // 2026-06-15 (user "il faut tout porter") : Server Scout HEAD 10s +
     //   addBackupPreventively. Porté de PlayerTvFragment ligne 5252-5326.
@@ -839,7 +847,18 @@ object MiniPlayerController {
                 //   tombe presque toujours sur un serveur dead car la
                 //   topologie a beaucoup de serveurs morts.
                 val effectiveThreshold = if (isVegetaCh) 10 else RELOAD_FLAP_THRESHOLD
-                if (recentReloadTimestamps.size < effectiveThreshold) {
+                // 2026-10-03 : compteur par serveur (voir stickyServeurEssais). Vegeta garde
+                //   son comportement d'origine (10 réessais demandés exprès par l'user).
+                if (stickyServeurIndex != currentServerIndex) {
+                    stickyServeurIndex = currentServerIndex
+                    stickyServeurEssais = 0
+                }
+                val serveurJamaisJoue = indexServeurAyantJoue != currentServerIndex
+                if (!isVegetaCh && serveurJamaisJoue && stickyServeurEssais >= 2) {
+                    Log.w(TAG, "Serveur [$currentServerIndex] n'a jamais joué : $stickyServeurEssais réessais " +
+                        "sans succès → serveur suivant (au lieu de réessayer à l'infini)")
+                } else if (recentReloadTimestamps.size < effectiveThreshold) {
+                    stickyServeurEssais++
                     recentReloadTimestamps.add(nowFlap)
                     Log.w(TAG, "Live IPTV error — sticky retry (prepare seul, mirror grand) ${recentReloadTimestamps.size}/$effectiveThreshold")
                     preemptiveReloadInFlight = true
@@ -868,6 +887,7 @@ object MiniPlayerController {
                     val chId = currentChannelId ?: return
                     val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: ""
                     Log.d(TAG, "Playback ready on server [$currentServerIndex] $serverName")
+                    indexServeurAyantJoue = currentServerIndex   // 2026-10-03 : voir stickyServeurEssais
                     // 2026-08-09 : on MÉMORISE le serveur qui a réellement joué, pour le
                     //   remonter en tête à la prochaine ouverture de cette chaîne. C'est le
                     //   pendant de la relecture faite dans loadServers — sans cette ligne,
@@ -1794,6 +1814,9 @@ object MiniPlayerController {
         bufferLoggerJob = scope.launch {
             var counter = 0
             var lastReseekMs = 0L
+            // 2026-10-03 : index du serveur déjà signalé comme « flux fantôme » (voir plus bas),
+            //   pour ne le traiter qu'une fois.
+            var fantomeSignaleIndex = -1
             while (kotlinx.coroutines.currentCoroutineContext().isActive) {
                 kotlinx.coroutines.delay(1000L)
                 counter++
@@ -1835,6 +1858,39 @@ object MiniPlayerController {
                     val pos = p.currentPosition
                     val buf = p.bufferedPosition
                     val ahead = ((buf - pos) / 1000).toInt()
+                    // ── 2026-10-03 (user : « écran noir sans son, avec un flux qui monte alors
+                    //   qu'il n'y a rien ») — FLUX FANTÔME ────────────────────────────────────
+                    //   Certains panels OLA répondent avec une vidéo de remplissage noire et
+                    //   muette (compte bloqué, chaîne coupée) au lieu du direct. Mesuré sur la
+                    //   TCL : `buf=304s` dès pos=5s, 1080p avc1.420028, aucune image utile. Le
+                    //   lecteur n'est jamais en attente → le watchdog 6 s ne se déclenche pas et
+                    //   on restait dessus indéfiniment.
+                    //   Un vrai direct ne peut pas avoir 60 s d'avance en mémoire dans ses 30
+                    //   premières secondes : c'est donc un faux flux. On RETIENT le serveur
+                    //   comme défaillant (même traitement qu'un HTTP 456 : hôte pénalisé, URL
+                    //   rétrogradée en bas de liste 24 h) puis on passe au suivant.
+                    //   Limité aux chaînes OLA : un VOD/replay a légitimement beaucoup d'avance.
+                    if (isCurrentChannelOla() && pos < 30_000L && ahead >= 60 &&
+                        fantomeSignaleIndex != currentServerIndex
+                    ) {
+                        fantomeSignaleIndex = currentServerIndex
+                        val uriFantome = p.currentMediaItem?.localConfiguration?.uri?.toString()
+                        val nomServeur = availableServers.getOrNull(currentServerIndex)?.name ?: "?"
+                        Log.w(TAG, "Flux fantôme sur [$currentServerIndex/${availableServers.size}] $nomServeur : " +
+                            "${ahead}s d'avance dès ${pos / 1000}s (vidéo de remplissage) → serveur retenu " +
+                            "comme défaillant, suivant : ${uriFantome?.take(100)}")
+                        if (!uriFantome.isNullOrBlank()) {
+                            recordHostFail(uriFantome)
+                            try {
+                                com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(uriFantome)
+                            } catch (_: Throwable) {}
+                            try {
+                                com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.markUrlDead(uriFantome)
+                            } catch (_: Throwable) {}
+                        }
+                        tryNextServer()
+                        continue
+                    }
                     if (counter % 5 == 0) {
                         Log.d(TAG, "Live buffer mini: pos=${pos/1000}s buf=${buf/1000}s ahead=${ahead}s")
                         // 2026-09-05 DIAG hachure : compteurs decodeur video ExoPlayer
@@ -3024,6 +3080,9 @@ object MiniPlayerController {
         // Reset recentReloadTimestamps (= sinon l'anti-flap de la chaîne
         //   précédente bloque le mécanisme sur la nouvelle chaîne).
         recentReloadTimestamps.clear()
+        stickyServeurIndex = -1
+        stickyServeurEssais = 0
+        indexServeurAyantJoue = -1
         _state.value = State.Loading(channelId, channelName)
 
         loadJob?.cancel()
@@ -3086,7 +3145,7 @@ object MiniPlayerController {
                 //   Conséquence mesurée sur CNN Portugal : lien mort en tête du M3U → 404 et
                 //   quelques secondes de noir À CHAQUE ouverture, alors que l'app savait déjà
                 //   lequel marchait. On remonte donc le dernier bon en première position.
-                val servers = try {
+                val servers = (try {
                     // 2026-08-09 (user « les liens qui sont géobloqués, soit tu les mets en
                     //   2e, soit on les vire ») — DÉCLASSEMENT PAR HÔTE.
                     //   Mesuré sur les RTP : cinq flux différents, tous sur
@@ -3103,7 +3162,10 @@ object MiniPlayerController {
                         Log.i(TAG, "serveur mémorisé remis en tête pour $channelName")
                         penalise.sortedByDescending { it.id == dernierBon }
                     } else penalise
-                } catch (_: Throwable) { classes }
+                } catch (_: Throwable) { classes }).sortedByDescending { it.id.startsWith("olahub::") }
+                // 2026-10-03 (user : « France 2 aurait dû partir instantanément ») : les flux
+                //   officiels du TV Hub proposés par OLA (« olahub:: ») restent TOUJOURS en tête,
+                //   devant le dernier serveur OLA qui a marché et le classement de fiabilité.
 
                 // Start collecting progressive OLA TV servers (variants) — works for any
                 // IPTV provider since IptvProvider declares additionalServersFlow.

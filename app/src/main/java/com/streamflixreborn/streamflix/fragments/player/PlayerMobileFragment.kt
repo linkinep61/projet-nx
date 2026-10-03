@@ -517,6 +517,8 @@ class PlayerMobileFragment : Fragment() {
 
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
+    // 2026-10-03 : serveur déjà traité comme « flux fantôme » (une seule fois par serveur).
+    private var serveurFantomeSignale: String? = null
     // 2026-05-05 : watchdog buffering — fallback automatique au serveur suivant
     // si le player reste bloqué en STATE_BUFFERING > N secondes (Darkibox & co
     // qui renvoient une URL valide mais ne délivrent pas de données).
@@ -1686,6 +1688,17 @@ class PlayerMobileFragment : Fragment() {
                         }
                         scheduleChannelRefresh()
                     }
+                    // 2026-10-03 (user « l'onglet Chaîne ne sert à rien, tout afficher dans
+                    //   Serveurs ») : chaque source OLA est aussi listée dans « Serveurs »
+                    //   (onglet « Chaîne » masqué ; sa liste reste pour la bascule automatique).
+                    PlayerSettingsView.Settings.Server.addUnique(
+                        PlayerSettingsView.Settings.Server(
+                            id = server.id,
+                            name = PlayerSettingsView.Settings.Server.nomSourceOla(server.id, label),
+                            src = server.src,
+                        )
+                    )
+                    scheduleServerRefresh()
 
                     // Set up variant click handler (idempotent — same listener every time)
                     binding.settings.setOnChannelVariantSelectedListener { variant ->
@@ -1750,9 +1763,10 @@ class PlayerMobileFragment : Fragment() {
                     }
                 }
 
-                // Update server selection listener (regular servers only)
+                // Update server selection listener (sources OLA comprises depuis 2026-10-03)
                 binding.settings.setOnServerSelectedListener { sel ->
-                    servers.find { sel.id == it.id }?.let { viewModel.getVideo(it) }
+                    (servers.find { sel.id == it.id } ?: Video.Server(id = sel.id, name = sel.name))
+                        .let { viewModel.getVideo(it) }
                 }
             }
         }
@@ -1765,6 +1779,8 @@ class PlayerMobileFragment : Fragment() {
             viewModel.serversReordered.collect { reordered ->
                 servers = reordered
                 val nonOla = reordered.filter { !it.name.startsWith("OLA[") }
+                // 2026-10-03 : les sources OLA déjà listées dans « Serveurs » sont conservées.
+                val sourcesOla = PlayerSettingsView.Settings.Server.list.filter { it.id.startsWith("ola_stream::") }
                 val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
                 val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
                 val prevQualities = PlayerSettingsView.Settings.Server.list.associate { it.id to it.quality }
@@ -1778,6 +1794,14 @@ class PlayerMobileFragment : Fragment() {
                         quality = it.quality ?: prevQualities[it.id]
                         language = it.language ?: prevLanguages[it.id]
                     }
+                })
+                PlayerSettingsView.Settings.Server.addAllUnique(sourcesOla)
+                PlayerSettingsView.Settings.Server.addAllUnique(reordered.filter { it.name.startsWith("OLA[") }.map {
+                    PlayerSettingsView.Settings.Server(
+                        id = it.id,
+                        name = PlayerSettingsView.Settings.Server.nomSourceOla(it.id, it.name.substringAfter("] ", it.name)),
+                        src = it.src,
+                    ).apply { isSelected = (it.id == prevSelectedId) }
                 })
                 if (::player.isInitialized) {
                     player.playlistMetadata = MediaMetadata.Builder()
@@ -6682,6 +6706,25 @@ class PlayerMobileFragment : Fragment() {
                     if (liveCheckCounter >= 5) {
                         liveCheckCounter = 0
                         Log.d("PlayerMobileFragment", "Live buffer: pos=${pos/1000}s buf=${buf/1000}s ahead=${aheadSec}s")
+                    }
+                    // 2026-10-03 — FLUX FANTÔME (parité mini-lecteur) : vidéo de remplissage
+                    //   noire et muette servie par certains panels OLA → serveur suivant.
+                    val srvFantome = currentServer
+                    val estOla = args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
+                    if (estOla && pos < 30_000L && aheadSec >= 60 &&
+                        srvFantome != null && srvFantome.id != serveurFantomeSignale
+                    ) {
+                        serveurFantomeSignale = srvFantome.id
+                        Log.w("PlayerMobileFragment", "Flux fantôme sur ${srvFantome.name} : ${aheadSec}s d'avance dès ${pos / 1000}s → serveur suivant")
+                        try {
+                            player.currentMediaItem?.localConfiguration?.uri?.toString()?.let {
+                                com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.markUrlDead(it)
+                            }
+                        } catch (_: Throwable) {}
+                        pruneBrokenVariant(srvFantome)
+                        val suivant = nextNonDeadServer(srvFantome)
+                        if (suivant != null) viewModel.getVideo(suivant)
+                        else tryNextChannelVariant(srvFantome)
                     }
                     // Mobile port v51 : dual-bar visuel — barre 1 (lecture) + barre 2 (pré-chargé).
                     //   Cycle wall-clock 60s. visualBoost +60s quand backup en queue (bars pleines).

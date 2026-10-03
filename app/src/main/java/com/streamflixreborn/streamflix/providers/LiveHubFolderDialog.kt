@@ -2569,8 +2569,14 @@ private fun normSearch(s: String): String =
                     val measuredH = getMiniPlayerHeight()
                     val density = ctx.resources.displayMetrics.density
                     val miniH = if (isTV) {
-                        // TV : ancien comportement, fallback 80dp
-                        measuredH.coerceAtLeast((80 * density).toInt())
+                        // 2026-10-03 : si le cadre du mini n'est pas encore mis en page
+                        //   (hauteur 0, fréquent sur appareil lent type Fire Stick), on prend
+                        //   sa hauteur THÉORIQUE (55 % de la largeur en 16:9, cf.
+                        //   fragment_home_tv.xml) au lieu de 80 dp, qui faisait passer le
+                        //   dialog par-dessus le mini. La vraie hauteur est reprise dès la
+                        //   mise en page du cadre (écouteur plus bas).
+                        if (measuredH > 0) measuredH
+                        else (ctx.resources.displayMetrics.widthPixels * 0.55 * 9.0 / 16.0).toInt()
                     } else {
                         // Mobile : +70dp pour passer sous la barre des contrôles
                         val extraDp = 70
@@ -2677,22 +2683,60 @@ private fun normSearch(s: String): String =
         //   zone du mini-player jusqu'à sa fermeture par l'user.
         val miniWasVisibleOnce = java.util.concurrent.atomic.AtomicBoolean(initialActive)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+        // 2026-10-03 (user : « quand le mini-lecteur arrive, la redimension se fait mal ») :
+        //   la hauteur du mini n'était lue qu'au changement d'état du lecteur. Si son cadre
+        //   n'était pas encore mis en page à cet instant (appareil lent), le dialog restait
+        //   calé sur une mauvaise hauteur. On réajuste donc à chaque fois que le cadre
+        //   change réellement de taille.
+        val cadreMini = (ctx as? android.app.Activity)?.findViewById<android.view.View>(
+            com.streamflixreborn.streamflix.R.id.mini_player_container
+        )
+        var derniereHauteurMini = getMiniPlayerHeight()
+        val ecouteurTailleMini = android.view.View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val h = getMiniPlayerHeight()
+            if (h > 0 && h != derniereHauteurMini) {
+                derniereHauteurMini = h
+                if (miniWasVisibleOnce.get()) adjust(true)
+            }
+        }
+        cadreMini?.addOnLayoutChangeListener(ecouteurTailleMini)
+
+        // 2026-10-03 : si le mini est FERMÉ pendant que le dialog est ouvert, le dialog
+        //   restait tassé en bas avec une zone vide au-dessus. On laisse passer un éventuel
+        //   retry du lecteur live (~2 s, cf. anti-flicker ci-dessus), puis si le cadre du
+        //   mini est vraiment caché, on rend toute la place au dialog.
+        var retourSansMini: Job? = null
         scope.launch {
             MPC.state.collect { state ->
                 val active = state is MiniPlayerController.State.Playing ||
                         state is MiniPlayerController.State.Loading
+                retourSansMini?.cancel()
                 if (active) {
                     miniWasVisibleOnce.set(true)
                     adjust(true)
-                } else if (!miniWasVisibleOnce.get()) {
+                } else if (miniWasVisibleOnce.get()) {
+                    retourSansMini = scope.launch {
+                        kotlinx.coroutines.delay(3000)
+                        val s = MPC.state.value
+                        val encoreActif = s is MiniPlayerController.State.Playing ||
+                                s is MiniPlayerController.State.Loading
+                        if (!encoreActif && getMiniPlayerHeight() == 0) {
+                            miniWasVisibleOnce.set(false)
+                            adjust(false)
+                        }
+                    }
+                } else {
                     // Le mini n'a jamais été visible — OK de repasser en plein écran
                     adjust(false)
                 }
-                // Sinon (mini brièvement perdu après avoir été visible) : on ne touche pas
             }
         }
 
-        return { scope.coroutineContext[Job]?.cancel() }
+        return {
+            cadreMini?.removeOnLayoutChangeListener(ecouteurTailleMini)
+            scope.coroutineContext[Job]?.cancel()
+        }
     }
 
     /**
@@ -2869,8 +2913,12 @@ private fun normSearch(s: String): String =
         // 2026-06-22 v2 (user "logos trop gros et pas beaux, 2 barres noires
         //   inutiles") : logos réduits, plus de colonnes, layout compact.
         val numColumns = if (isTV) 6 else 4
-        val posterW = if (isTV) (80 * dp).toInt() else (72 * dp).toInt()
-        val posterH = if (isTV) (80 * dp).toInt() else (72 * dp).toInt()
+        // 2026-10-03 : `var` en TV — la taille est réduite si la grille manque de hauteur
+        //   (mini-lecteur affiché), voir l'écouteur de mise en page sous `gridView.adapter`.
+        val posterNormalTv = (80 * dp).toInt()
+        var posterW = if (isTV) posterNormalTv else (72 * dp).toInt()
+        var posterH = if (isTV) posterNormalTv else (72 * dp).toInt()
+        var titreLignesTv = 3
 
         // 2026-06-20 v13 : cellules NON focusables — le GridView gère le focus
         //   D-pad nativement via son sélecteur + onItemClickListener.
@@ -2950,6 +2998,18 @@ private fun normSearch(s: String): String =
                 }
                 val imgView = cell.findViewWithTag<android.widget.ImageView>("poster")
                 val tvTitle = cell.findViewWithTag<android.widget.TextView>("title")
+                // 2026-10-03 : applique la taille courante (elle peut changer quand le
+                //   mini-lecteur réduit la hauteur du dialog) — cellules recyclées comprises.
+                if (isTV) {
+                    imgView.layoutParams?.let { lp ->
+                        if (lp.width != posterW || lp.height != posterH) {
+                            lp.width = posterW
+                            lp.height = posterH
+                            imgView.layoutParams = lp
+                        }
+                    }
+                    tvTitle.maxLines = titreLignesTv
+                }
                 // 2026-06-20 (user "L&apos;Étudiante") : décoder les entités
                 //   HTML qui traînent dans certains M3U (L&apos;, &amp;, etc.).
                 val decodedTitle = try {
@@ -3001,6 +3061,42 @@ private fun normSearch(s: String): String =
             }
         }
         gridView.adapter = gridAdapter
+        // 2026-10-03 (user : « l'affichage d'avant en liste ne faisait pas ce bug-là ») :
+        //   sur TV, quand le mini-lecteur est affiché, le dialog n'a plus qu'environ 45 % de
+        //   la hauteur ; une fois titre, 🌍 et recherche retirés, il restait à peine UNE
+        //   rangée de vignettes (80 dp + titre sur 3 lignes) → grille coupée, « déformée ».
+        //   On vise au moins DEUX rangées entières : d'abord titres sur 1 ligne, puis logos
+        //   réduits (48 dp minimum). Quand la place revient, retour à la taille normale.
+        //   Si deux rangées tiennent déjà (TV sans mini-lecteur), rien ne change.
+        if (isTV) {
+            val ligneTitrePx = android.util.TypedValue.applyDimension(
+                android.util.TypedValue.COMPLEX_UNIT_SP, 14f, ctx.resources.displayMetrics
+            ) * 1.35f
+            val posterMinTv = (48 * dp).toInt()
+            fun hauteurRangee(poster: Int, lignes: Int): Float =
+                poster + lignes * ligneTitrePx + 12 * dp + gridView.verticalSpacing
+            gridView.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                val dispo = v.height - v.paddingTop - v.paddingBottom
+                if (dispo <= 0) return@addOnLayoutChangeListener
+                var poster = posterNormalTv
+                var lignes = 3
+                // 2026-10-03 (user : « avant il affichait sur deux lignes, maintenant c'est à
+                //   moitié effacé ») : jamais moins de 2 lignes de titre — c'est le logo qui réduit.
+                if (2 * hauteurRangee(poster, lignes) > dispo) lignes = 2
+                if (2 * hauteurRangee(poster, lignes) > dispo) {
+                    poster = (dispo / 2f - (lignes * ligneTitrePx + 12 * dp + gridView.verticalSpacing))
+                        .toInt().coerceIn(posterMinTv, posterNormalTv)
+                }
+                if (poster != posterW || lignes != titreLignesTv) {
+                    android.util.Log.d("LiveHubDialog", "grille TV adaptée : hauteur dispo=$dispo px " +
+                        "→ logo ${posterW}→$poster px, titre $titreLignesTv→$lignes ligne(s)")
+                    posterW = poster
+                    posterH = poster
+                    titreLignesTv = lignes
+                    v.post { gridView.invalidateViews() }
+                }
+            }
+        }
         // 2026-09-05 : le temps restant avance et la chaîne en cours change → on rafraîchit
         //   les calques déjà à l'écran (30 s + à chaque changement d'état du mini lecteur),
         //   sans relier la grille. Voir EpgJaquette.rafraichirTout.

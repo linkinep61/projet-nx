@@ -1507,6 +1507,54 @@ object LiveTvHubProvider : Provider, IptvProvider {
     }
 
     /**
+     * 2026-10-03 (user : « mettre en priorité les serveurs qu'on est sûr qu'ils vont bien
+     *   fonctionner, de France 2, etc. ») : chaînes LIVE du TV Hub (accueil : France TV & co,
+     *   puis le bouquet Multi Live) dont le nom, passé par [normaliser] (celui d'OLA TV),
+     *   vaut [cle]. OLA les place EN TÊTE de ses serveurs. Lecture seule, rien n'est modifié.
+     */
+    suspend fun chainesLivePourCle(
+        cle: String,
+        delaiMs: Long = 4_000,
+        normaliser: (String) -> String,
+    ): List<TvShow> {
+        if (cle.isBlank()) return emptyList()
+        // OTF TV écarté (user : « il peut être instable »). Directs TF1+ / M6+ seulement si le
+        //   compte est connecté (user : « si le compte n'est pas connecté, ça ne sert à rien »).
+        val ctx = appContextRef
+        val tf1Ok = ctx != null && runCatching { com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(ctx) }.getOrDefault(false)
+        val m6Ok = ctx != null && runCatching { com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(ctx) }.getOrDefault(false)
+        fun correspond(tv: TvShow): Boolean {
+            val id = tv.id
+            if (id.startsWith("livehub::folder::") || id.startsWith("livehub::otf::")) return false
+            if (id.startsWith("livehub::login") || id.contains("::login::")) return false
+            if (id.startsWith("livehub::replay::tf1live::") && !tf1Ok) return false
+            if (id.startsWith("livehub::replay::m6live::") && !m6Ok) return false
+            return normaliser(tv.title ?: "") == cle
+        }
+        // Chargés l'un APRÈS l'autre (appareils faibles) ; chaque source garde son cache mémoire,
+        //   donc seul le 1ᵉʳ appel (préchauffage en fond à l'ouverture d'OLA) paie le réseau.
+        val accueil = runCatching { withTimeoutOrNull(delaiMs) { allHomeChannels() } }.getOrNull().orEmpty()
+            .filter(::correspond)
+        // 2026-10-03 (user : « on a Mix FR, la catégorie Multi Live… TF1 fonctionne parfaitement ») :
+        //   tout Mix FR, Multi Live d'abord.
+        val mixFr = runCatching { withTimeoutOrNull(delaiMs) { fetchMixFrCategoriesPublic() } }.getOrNull().orEmpty()
+            .sortedByDescending { it.name.startsWith("Multi Live", ignoreCase = true) }
+            .flatMap { it.list }
+            .filterIsInstance<TvShow>()
+            .filter(::correspond)
+        // 2026-10-03 (user : « IPTV du web pourrait être ajouté en tant que serveur ») .
+        val iptvWeb = runCatching {
+            withTimeoutOrNull(delaiMs) {
+                com.streamflixreborn.streamflix.providers.WorldLiveTvProvider.categoriesIptvDuWebFr()
+            }
+        }.getOrNull().orEmpty()
+            .flatMap { it.list }
+            .filterIsInstance<TvShow>()
+            .filter(::correspond)
+        return (accueil + mixFr + iptvWeb).distinctBy { it.id }
+    }
+
+    /**
      * 2026-09-26 (user : « le dossier TV Hub, il faudrait l'organiser correctement par rapport à
      *   tout ce qu'il y a dedans ») : la recherche du TV Hub rendue PAR DOSSIER d'origine, pour
      *   que la nouvelle recherche (RechercheUnifiee) affiche une rangée par dossier. [search]

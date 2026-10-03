@@ -23,6 +23,8 @@ class VoeExtractor : Extractor() {
     override val mainUrl = "https://jessicachoosemake.com"
     override val aliasUrls = listOf(
         "https://voe.sx",
+        // 2026-10-03 : nouveau miroir VOE (relevé en amont, Streamflix Reborn).
+        "https://jamesbornmain.com",
         // 2026-07-31 : miroir actif signalé par le user (capture du menu du player)
         "https://jessicachoosemake.com",
         "https://jilliandescribecompany.com", "https://mikaylaarealike.com",
