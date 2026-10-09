@@ -763,6 +763,37 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         categories
     }
 
+    /**
+     * URL d'un lecteur de la page (bouton de `div.tabs-sel`).
+     *
+     * 2026-10-09 — NOUVEAU FORMAT flemmix. Les boutons ne portent plus
+     *   `onclick="loadVideo('https://…')"` mais `data-v="<base64>" onclick="playSafe(this)"`.
+     *   La page décode avec `window.decodeStream` : base64 → texte, puis ROT13 sur les lettres.
+     *   Ex. `dWdnY2Y6Ly9pdnFuZW4uZ2Ivci9WSTZvUzdZNUQxUG4=` → `uggcf://ivqnen.gb/r/…`
+     *   → `https://vidara.to/e/…`. Les 12 lecteurs d'« Obsession » étaient tous ignorés
+     *   (« 12 après ignoreSource » puis « servers parsés (0) ») → Wiflix rendait 0.
+     *   L'ancien format reste lu au cas où le site reviendrait en arrière.
+     */
+    private fun srcLecteur(a: org.jsoup.nodes.Element, onclick: String): String? {
+        if (onclick.contains("loadVideo('")) {
+            return onclick.substringAfter("loadVideo('").substringBefore("'")
+        }
+        val brut = a.attr("data-v").trim().ifEmpty { return null }
+        if (brut.startsWith("http") || brut.startsWith("//")) return brut
+        val texte = try {
+            String(android.util.Base64.decode(brut, android.util.Base64.DEFAULT), Charsets.UTF_8)
+        } catch (e: Exception) { return null }
+        return buildString(texte.length) {
+            for (c in texte) append(
+                when (c) {
+                    in 'a'..'z' -> 'a' + (c - 'a' + 13) % 26
+                    in 'A'..'Z' -> 'A' + (c - 'A' + 13) % 26
+                    else -> c
+                }
+            )
+        }
+    }
+
     suspend fun ignoreSource(source: String): Boolean {
         if (arrayOf("netu", "vudeo").any { it.equals(source, true)})
             return true
@@ -1690,13 +1721,19 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
 
         // 2. Recherche NATIVE flemmix (POST search). CF → fallback getDocument.
         val searchDoc = try {
-            val doc = service.search(title)
+            // 2026-10-09 — RECHERCHE PAR TITRE SEULEMENT. La recherche par défaut de flemmix est
+            //   en texte intégral (synopsis, acteurs…) et triée par date : « Léon » rendait
+            //   100 résultats (Leonardo DiCaprio, Eleonora Duse…) sans le film, et « Obsession »
+            //   ne remontait que des films dont le synopsis contient le mot → « 0 résultat natif ».
+            //   En titre seul (full_search=1 + titleonly=3) : « Léon » → 8187-leon.html et
+            //   « Obsession » → 36017-obsession-2026.html, dès la première page.
+            val doc = service.search(title, fullSearch = 1, titleOnly = 3)
             if (isCloudflareChallenge(doc)) {
-                getDocument("${baseUrl}index.php?do=search&subaction=search&story=${java.net.URLEncoder.encode(title, "UTF-8")}")
+                getDocument("${baseUrl}index.php?do=search&subaction=search&full_search=1&titleonly=3&story=${java.net.URLEncoder.encode(title, "UTF-8")}")
             } else doc
         } catch (e: Exception) {
             try {
-                getDocument("${baseUrl}index.php?do=search&subaction=search&story=${java.net.URLEncoder.encode(title, "UTF-8")}")
+                getDocument("${baseUrl}index.php?do=search&subaction=search&full_search=1&titleonly=3&story=${java.net.URLEncoder.encode(title, "UTF-8")}")
             } catch (e2: Exception) {
                 Log.w("Wiflix", "searchServersByTitle search failed: ${e2.message?.take(100)}")
                 return emptyList()
@@ -2070,8 +2107,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         //   les <a> qui sont en réalité des boutons "Sauvegarder
                         //   en favoris" ou autres liens parasites du HTML Wiflix.
                         //   Résultat : faux serveur "Save" qui n'existe pas.
-                        if (!onclick.contains("loadVideo('")) return@mapIndexedNotNull null
-                        val src = onclick.substringAfter("loadVideo('").substringBefore("'")
+                        val src = srcLecteur(it, onclick) ?: return@mapIndexedNotNull null
                         // Filtre robuste : le src doit être une vraie URL HTTP(S),
                         //   sinon c'est un fragment JS qui s'est faufilé.
                         if (src.isBlank() || !src.startsWith("http", ignoreCase = true)) {
@@ -2135,8 +2171,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         //   les <a> qui sont en réalité des boutons "Sauvegarder
                         //   en favoris" ou autres liens parasites du HTML Wiflix.
                         //   Résultat : faux serveur "Save" qui n'existe pas.
-                        if (!onclick.contains("loadVideo('")) return@mapIndexedNotNull null
-                        val src = onclick.substringAfter("loadVideo('").substringBefore("'")
+                        val src = srcLecteur(it, onclick) ?: return@mapIndexedNotNull null
                         // Filtre robuste : le src doit être une vraie URL HTTP(S),
                         //   sinon c'est un fragment JS qui s'est faufilé.
                         if (src.isBlank() || !src.startsWith("http", ignoreCase = true)) {
@@ -2459,6 +2494,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             @Field("search_start") searchStart: Int = 0,
             @Field("full_search") fullSearch: Int = 0,
             @Field("result_from") resultFrom: Int = 1,
+            // 2026-10-09 : 3 = chercher dans les TITRES seulement (0 = texte intégral, défaut).
+            @Field("titleonly") titleOnly: Int = 0,
         ): Document
 
         @GET("film-en-streaming/page/{page}")

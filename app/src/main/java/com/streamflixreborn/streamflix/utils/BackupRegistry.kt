@@ -107,7 +107,6 @@ object BackupRegistry {
         "DessinAnimeNet" to "DessinAnime.net",
         "AniCloud" to "AniCloud (animes)",
         "Papadustream V2" to "Papadustream V2",
-        "Embed" to "Embed (Videasy VOSTFR)",
         "Wiflix" to "Wiflix",
         "FrenchStream" to "FrenchStream",
         "1Jour1Film" to "1Jour1Film",
@@ -196,7 +195,7 @@ object BackupRegistry {
     private val SOURCES_VAGUE_1 = setOf(
         // 2026-08-17 : mes propres fichiers passent devant tout le reste.
         "ONYX", "Partage", "Ciné Films", "Cinélux", "Tokyvideo",
-        "NetMirror", "Vidzy", "Frembed", "Movix", "Embed", "Yablom",
+        "NetMirror", "Vidzy", "Frembed", "Movix", "Yablom",
         "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios", "Rutube",
     )
     private val SOURCES_VAGUE_3 = setOf(
@@ -1558,76 +1557,10 @@ object BackupRegistry {
                 }
             }
 
-            // ── SERVEUR EMBED TMDB — Videasy VOSTFR uniquement ──────────────
-            // 2026-07-03 (user "serveurs quasiment illimités" → "que du VF/VOSTFR,
-            //   le reste ça sert à rien") : seul Videasy "fr" sert du VOSTFR.
-            launch { emit("Embed") {
-                // 2026-07-10 (user « Videasy Embed n'est QU'en VOSTFR mais arrive tout le temps en
-                //   premier ») : Videasy est 100% API → il gagne la course sur les serveurs VF natifs
-                //   (scrapés, plus lents). On lui donne une longueur de retard pour que les VF sortent
-                //   d'abord ; il reste dispo, juste plus en tête.
-                // 2026-08-02 : 5 s → 1 s. Videasy est en VOSTFR et arrivait trop tôt ; on le
-                //   retardait pour qu'il ne prenne pas la tête. C'est désormais le tri par langue
-                //   qui s'en charge (les VOSTFR passent derrière les VF), donc plus besoin de
-                //   pénaliser son arrivée — et donc de faire patienter l'utilisateur.
-                kotlinx.coroutines.delay(1_000L)
-                val tmdbVt: Video.Type = if (key.isMovie) {
-                    Video.Type.Movie(
-                        id = resolvedTmdbId,
-                        title = key.title,
-                        releaseDate = key.year?.toString() ?: "",
-                        poster = "",
-                        imdbId = null,
-                    )
-                } else {
-                    Video.Type.Episode(
-                        id = resolvedTmdbId,
-                        number = key.episode,
-                        title = null,
-                        poster = null,
-                        overview = null,
-                        tvShow = Video.Type.Episode.TvShow(
-                            id = resolvedTmdbId,
-                            title = key.title,
-                            poster = null,
-                            banner = null,
-                            releaseDate = key.year?.toString(),
-                            imdbId = null,
-                        ),
-                        season = Video.Type.Episode.Season(
-                            number = key.season,
-                            title = null,
-                        ),
-                    )
-                }
-                val servers = mutableListOf<Video.Server>()
-                // Videasy "fr" → taggé "VOSTFR" par l'extracteur.
-                runCatching { VideasyExtractor().server(tmdbVt, "fr") }.getOrNull()?.let { servers.add(it) }
-
-                // ⚠ 2026-08-11 — NE PAS RAJOUTER VixSrc / Vidsrc.net / VidLink / Vidsrc.Ru /
-                //   2Embed ICI. Fait ce jour-là, puis défait le jour même, deux fois.
-                //
-                //   Ils vivaient dans TmdbProvider. Quand le user a demandé que TMDb cesse
-                //   d'émettre des serveurs (« il peut recevoir, mais il n'émet pas »), je les
-                //   ai déplacés ici pour ne rien lui faire perdre. Erreur : ce sont des
-                //   services d'embed INTERNATIONAUX, leur défaut est l'anglais.
-                //
-                //   Sans marqueur de langue dans leur nom, le tri les prenait pour du VF et
-                //   les mettait EN TÊTE, devant les vrais serveurs français. Le user l'a vu en
-                //   une ouverture : « ils me proposent des serveurs qui ne sont pas dans la
-                //   bonne langue ». J'ai alors proposé de les étiqueter « VO » pour qu'ils
-                //   descendent au fond — il a tranché, et il a raison : « si tu penses que ces
-                //   serveurs ne diffuseront jamais du VF ou du VOSTFR, ça sert à rien de les
-                //   garder là ». C'est le cas. Ils ne servent pas de français.
-                //
-                //   C'était déjà la décision du 2026-07-03 (« que du VF/VOSTFR, le reste ça
-                //   sert à rien »). Règle de l'app : VF ou VOSTFR, rien d'autre.
-                //
-                //   Seul Videasy « fr » reste, parce qu'il sert bien du VOSTFR et que son
-                //   extracteur l'étiquette comme tel — donc trié correctement.
-                if (servers.isNotEmpty()) Log.i(TAG, "Embed TMDB → Videasy VOSTFR pour tmdbId=$resolvedTmdbId")
-                servers
-            } }
+            // 2026-10-09 : source « Embed » (Videasy) SUPPRIMÉE à la demande du user. Elle ne
+            //   rendait plus rien depuis le 12/07 (neutralisée), et l'API Videasy est morte :
+            //   api.wingsdatabase.com et vidking.net ne résolvent plus (Videasy a migré sur
+            //   videasy.to, nouvelle API inconnue). VideasyExtractor reste pour le routage d'URL.
 
             // ── FREMBED (natif, par tmdbId) ──────────────────────────────────
             // 2026-07-09 (user « Frembed ne remonte rien ») : Frembed interroge son API

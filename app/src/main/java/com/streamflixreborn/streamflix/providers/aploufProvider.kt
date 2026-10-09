@@ -39,7 +39,7 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override val name = "aplouf"
 
-    override val defaultPortalUrl: String = "https://www.aplouf.com/zaxd03o2n0gfpub/home/aplouf"
+    override val defaultPortalUrl: String = "https://fakrov.com/aab2ae3/home/fakrov"
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
@@ -49,7 +49,7 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     // Fallback portal : kidraz.com (même backend, fusionné 2026-05-21)
     private const val FALLBACK_PORTAL_URL = "http://chezlesducs.free.fr/films.php"
 
-    override val defaultBaseUrl: String = "https://www.aplouf.com/zaxd03o2n0gfpub/home/aplouf"
+    override val defaultBaseUrl: String = "https://fakrov.com/aab2ae3/home/fakrov"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -472,7 +472,15 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
      * La cascade de portails reste EN SECOURS, inchangée : si aucun miroir ne répond (tous
      *   renommés d'un coup), on repart d'elle et on réapprend l'adresse.
      */
+    // 2026-10-09 : les anciennes façades ont toutes déménagé (aplouf → fakrov.com, yablom →
+    //   pirvab.com, obrigoz → vozgov.com ; yakmov.com signalé par le user). Les nouvelles
+    //   passent EN TÊTE ; les anciennes restent pour leur avis « maintenant sur X », suivi
+    //   automatiquement par [essayerMiroir].
     private val MIROIRS_CONNUS = listOf(
+        "https://fakrov.com/",   // le plus rapide mesuré (~0,13 s), successeur direct d'aplouf
+        "https://pirvab.com/",
+        "https://yakmov.com/",
+        "https://vozgov.com/",
         "https://www.aplouf.com/",
         "https://yablom.com/",
         "https://obrigoz.com/",
@@ -484,7 +492,10 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
      * Suit la racine d'un miroir et renvoie l'URL d'accueil réelle (`/<dossier>/home/<nom>`),
      * ou null si le miroir ne répond pas ou n'est plus une vraie page du site.
      */
-    private suspend fun essayerMiroir(racine: String): String? = runCatching {
+    /** « … le site est maintenant sur fakrov.com » (texte ou lien de partage encodé). */
+    private val RX_DEMENAGEMENT = Regex("""maintenant(?:\s|%20|&nbsp;)+sur(?:\s|%20|&nbsp;)+([a-z0-9-]+(?:\.[a-z0-9-]+)+)""", RegexOption.IGNORE_CASE)
+
+    private suspend fun essayerMiroir(racine: String, sautsRestants: Int = 2): String? = runCatching {
         // ⚠ 2026-08-07 — La racine NE redirige PAS (vérifié : 200, `redirected=false`, aucun
         //   `/home/` dans le HTML). C'est du JavaScript qui compose l'adresse dans le navigateur.
         //   Le dossier est cependant présent en clair dans un `<a href="…">` en tête de <body> :
@@ -502,7 +513,15 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val dossier = doc.select("body a[href]")
             .map { it.attr("href").trim() }
             .firstOrNull { it.matches(Regex("^[a-z0-9]{5,20}$")) }
-            ?: return@runCatching null
+            ?: run {
+                // 2026-10-09 : façade déménagée → la page annonce la nouvelle adresse ; on la suit.
+                val neuf = RX_DEMENAGEMENT.find(doc.html())?.groupValues?.get(1)?.lowercase()
+                if (neuf != null && sautsRestants > 0 && neuf != url.host) {
+                    android.util.Log.i("aploufProvider", "${url.host} a déménagé → $neuf")
+                    return@runCatching essayerMiroir("https://$neuf/", sautsRestants - 1)
+                }
+                return@runCatching null
+            }
 
         // « www.aplouf.com » → « aplouf » : le segment final de l'accueil porte le nom du site.
         val nom = url.host.removePrefix("www.").substringBefore('.')
@@ -527,6 +546,19 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     android.util.Log.i("aploufProvider", "miroir retenu : $accueil")
                     miroirTrouve = true
                     break
+                }
+                // 2026-10-09 : dernier recours AVANT la cascade — découverte par YablomProvider
+                //   (même plateforme) : façades connues + annuaire chezlesducs, chaque candidat
+                //   validé par l'API de recherche.
+                if (!miroirTrouve) {
+                    val accueil = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        YablomProvider.accueilActif()
+                    }
+                    if (accueil != null) {
+                        UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, accueil)
+                        android.util.Log.i("aploufProvider", "façade découverte : $accueil")
+                        miroirTrouve = true
+                    }
                 }
                 if (!miroirTrouve) android.util.Log.w(
                     "aploufProvider", "aucun miroir connu ne répond → cascade de portails")

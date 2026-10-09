@@ -28,6 +28,11 @@ class SendvidExtractor : Extractor() {
     override val name = "SendVid"
     override val mainUrl = "https://sendvid.com"
 
+    private companion object {
+        /** Sous ce poids, le MP4 servi est le bouche-trou de Sendvid (~36 Ko), pas un épisode. */
+        const val TAILLE_MIN_OCTETS = 2L * 1024 * 1024
+    }
+
     /** Client dédié à timeout COURT (dérive du global : garde le pool + DoH). */
     private val fastClient: OkHttpClient by lazy {
         sharedClient.newBuilder()
@@ -64,6 +69,32 @@ class SendvidExtractor : Extractor() {
             ?: Regex("""<source[^>]+src="([^"]+\.mp4[^"]*)"""").find(html)?.groupValues?.get(1)
             ?: Regex("""(https?://[^"'\s]+sendvid\.com/[^"'\s]+\.mp4[^"'\s]*)""").find(html)?.value
             ?: throw Exception("SendVid: aucune source MP4 trouvée dans la page embed")
+
+        // 2026-10-09 — FAUSSE VIDÉO. Quand le fichier est HS côté Sendvid, la page embed répond
+        //   quand même 200 (status.json bloqué en "encoding", progress 0) et le CDN sert un MP4
+        //   bouche-trou de ~36 Ko (quelques secondes). Le lecteur le lisait jusqu'au bout, croyait
+        //   l'épisode terminé et passait à l'ÉPISODE SUIVANT au lieu de changer de serveur.
+        //   → on sonde la taille du MP4 (HEAD) : un vrai épisode pèse des dizaines de Mo ; sous
+        //   2 Mo c'est le bouche-trou → échec, l'auto-switch bascule sur un autre serveur.
+        //   Si la sonde elle-même échoue (réseau), on ne bloque pas : on laisse le lecteur essayer.
+        val taille: Long? = try {
+            val head = Request.Builder()
+                .url(sourceUrl)
+                .head()
+                .header("Referer", "$mainUrl/")
+                .header("User-Agent", DEFAULT_USER_AGENT)
+                .build()
+            fastClient.newCall(head).execute().use { resp ->
+                if (resp.isSuccessful) resp.header("Content-Length")?.toLongOrNull() else null
+            }
+        } catch (e: Exception) {
+            Log.d("SendvidExtractor", "sonde taille impossible: ${e.message}")
+            null
+        }
+        if (taille != null && taille in 1 until TAILLE_MIN_OCTETS) {
+            Log.d("SendvidExtractor", "MP4 bouche-trou ($taille octets) → serveur HS")
+            throw Exception("SendVid: vidéo indisponible (fichier de remplacement)")
+        }
 
         Video(
             source = sourceUrl,
