@@ -90,6 +90,41 @@
             android:background="@drawable/bg_tv_button_focus"
             android:focusable="true" />
 
+        <!-- 2026-10-15 : sauvegarde dans un fichier (Google Drive du compte de l'utilisateur,
+             clé USB…) via le sélecteur d'Android — sans code à saisir. -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:layout_marginBottom="12dp"
+            android:gravity="center"
+            android:text="Ou garde une sauvegarde sur ton Google Drive :"
+            android:textColor="#AAAAAA"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btn_drive_save"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:padding="16dp"
+            android:text="☁  Sauvegarder sur Google Drive"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:background="@drawable/bg_tv_button_focus"
+            android:focusable="true" />
+
+        <Button
+            android:id="@+id/btn_drive_load"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="16dp"
+            android:text="☁  Charger depuis Google Drive"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:background="@drawable/bg_tv_button_focus"
+            android:focusable="true" />
+
     </LinearLayout>
 
     <!-- ══ Écran 2a : envoi — affichage du code ══ -->

@@ -114,12 +114,46 @@ object VidzyTmdbProvider {
         //   serveur passait derrière de vrais VOSTFR alors qu'il a bien une piste française.
         //   Décision user : « tu mets qu'il est VF, un point c'est tout ».
         //   (Le classement interne est aligné dans PlayerViewModel.isVfServer.)
-        val languesAffichees = if (languages.contains("VF", ignoreCase = true)) "VF" else languages
+        // 2026-10-12 : la page indique la version réellement servie (« "version":"vf" »).
+        //   Si elle sert de la VOSTFR (titre sans VF), on l'affiche comme telle.
+        val versionPage = VERSION_RX.find(page)?.groupValues?.get(1)?.lowercase().orEmpty()
+        val languesAffichees = when {
+            versionPage.startsWith("vost") -> "VOSTFR"
+            languages.contains("VF", ignoreCase = true) -> "VF"
+            else -> languages
+        }
         val label = buildString {
             append("Vidzy")
             if (languesAffichees.isNotBlank()) append(" · ").append(languesAffichees)
         }
-        Log.i(TAG, "tmdb=$tmdbId ${if (isMovie) "film" else "S${season}E$episode"} → serveur Vidzy ($languages)")
-        return listOf(Video.Server(id = "vidzy::$tmdbId::$season::$episode", name = label, src = src))
+        Log.i(TAG, "tmdb=$tmdbId ${if (isMovie) "film" else "S${season}E$episode"} → serveur Vidzy ($languages, page=$versionPage)")
+        val serveurs = mutableListOf(Video.Server(id = "vidzy::$tmdbId::$season::$episode", name = label, src = src))
+
+        // ── 2026-10-12 : VOSTFR = ADRESSE SÉPARÉE chez Vidzy ─────────────────────────────
+        //   (user : « on répare aussi pour le VOSTFR »). La page de base ne sert que la VF ;
+        //   la VOSTFR est une autre vidéo, à « …/movie/{id}/vostfr » ou
+        //   « …/serie/{id}/{s}/{e}/vostfr ». On ne l'appelle que si l'API l'annonce, et on
+        //   ignore le résultat s'il retombe sur le même lecteur que la VF.
+        //   Constat (Arcane S1E1) : pas de fichier de sous-titres séparé → sous-titres
+        //   incrustés dans l'image.
+        if (!versionPage.startsWith("vost") && languages.contains("VOST", ignoreCase = true)) {
+            val pageVost = httpGet("$BASE_URL$path/vostfr")
+            val iframeVost = pageVost?.let { IFRAME_RX.find(it)?.groupValues?.get(1)?.trim() }.orEmpty()
+            val srcVost = when {
+                iframeVost.startsWith("http", true) -> iframeVost
+                iframeVost.startsWith("//") -> "https:$iframeVost"
+                iframeVost.startsWith("/") -> "$BASE_URL$iframeVost"
+                else -> ""
+            }
+            if (srcVost.isNotBlank() && srcVost != src) {
+                Log.i(TAG, "tmdb=$tmdbId → serveur Vidzy VOSTFR ajouté")
+                serveurs += Video.Server(id = "vidzy-vostfr::$tmdbId::$season::$episode", name = "Vidzy · VOSTFR", src = srcVost)
+            } else {
+                Log.i(TAG, "tmdb=$tmdbId VOSTFR annoncée mais aucun lecteur distinct")
+            }
+        }
+        return serveurs
     }
+
+    private val VERSION_RX = Regex(""""version"\s*:\s*"([a-zA-Z]+)"""")
 }

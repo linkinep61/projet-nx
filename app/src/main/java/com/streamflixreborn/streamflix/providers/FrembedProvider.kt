@@ -609,6 +609,11 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
     }
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-10-12 (user : « Frembed, c'est automatique chez nous, on est connecté à l'API ») :
+        //   la source automatique (BackupRegistry) appelle getServers DIRECTEMENT, sans jamais
+        //   passer par onChangeUrl → le domaine n'était jamais mis à jour par ce chemin.
+        //   On initialise donc une fois par session (/api/domain), comme le catalogue.
+        runCatching { initializeService() }
         return FrembedExtractor(baseUrl).servers(videoType)
     }
 
@@ -711,7 +716,21 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
      */
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
+            // 2026-10-12 (repris de l'équipe d'origine, v1.7.236) : Frembed publie son domaine
+            //   actuel sur « /api/domain » → {"domain":"frembed.bar","status":"active"}.
+            //   L'ancien portail ne marche plus : le 1er lien de l'accueil est juste « / »,
+            //   donc on n'apprenait rien et on ne tenait que grâce à la redirection
+            //   frembed.casa → frembed.bar. On interroge l'API d'abord ; le portail reste en secours.
+            var domaineApi: String? = null
             if (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
+                domaineApi = domaineViaApi()
+                if (domaineApi != null) {
+                    Log.i("FrembedProvider", "Domaine via /api/domain : $domaineApi")
+                    UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, domaineApi)
+                    UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_LOGO, domaineApi + "favicon-32x32.png")
+                }
+            }
+            if (domaineApi == null && (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false")) {
                 val addressService = Service.buildAddressFetcher()
                 try {
                     val document = addressService.getPortalHome()
@@ -728,6 +747,8 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
                         } catch (_: Exception) {}
 
                         newUrl = if (newUrl!!.endsWith("/")) newUrl else "$newUrl/"
+                        // 2026-10-12 : on n'enregistre qu'une vraie adresse (le portail renvoyait « / »).
+                        if (!newUrl.startsWith("http")) throw Exception("Lien de portail invalide : $newUrl")
                         UserPreferences.setProviderCache(this,UserPreferences.PROVIDER_URL, newUrl)
                         UserPreferences.setProviderCache(
                             this,
@@ -745,6 +766,43 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             serviceInitialized = true
         }
         return baseUrl
+    }
+
+    /**
+     * 2026-10-12 : demande le domaine actuel à « /api/domain », sur le domaine en cours puis
+     * sur les anciens domaines connus (ils redirigent encore vers le bon). Renvoie
+     * « https://domaine/ », ou null si aucun ne répond.
+     */
+    private suspend fun domaineViaApi(): String? = withContext(Dispatchers.IO) {
+        val client = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(20, TimeUnit.SECONDS)
+            .dns(DnsResolver.doh)
+            .build()
+        val candidats = listOf(baseUrl, defaultBaseUrl, "https://frembed.casa/", "https://frembed.surf/")
+            .filter { it.startsWith("http") }
+            .map { it.trimEnd('/') }
+            .distinct()
+        for (c in candidats) {
+            try {
+                val req = Request.Builder().url("$c/api/domain")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                    .header("Accept", "application/json")
+                    .build()
+                client.newCall(req).execute().use { r ->
+                    if (r.isSuccessful) {
+                        val d = org.json.JSONObject(r.body?.string().orEmpty()).optString("domain").trim().lowercase()
+                        if (d.matches(Regex("""[a-z0-9.-]+\.[a-z]{2,}""")) && DEAD_DOMAINS.none { d.contains(it) }) {
+                            return@withContext "https://$d/"
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d("FrembedProvider", "/api/domain injoignable sur $c : ${e.message}")
+            }
+        }
+        null
     }
 
     /**

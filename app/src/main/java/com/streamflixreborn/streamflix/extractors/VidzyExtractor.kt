@@ -121,6 +121,43 @@ class VidzyExtractor : Extractor() {
         return result
     }
 
+    // 2026-10-12 (repris de l'équipe d'origine, v1.7.236) : Vidzy n'utilise plus de Packed JS.
+    //   La page contient : sources: [{src: (function(s){ … })("<base64>")}]
+    //   Déchiffrement côté navigateur : clé = somme des codes du hostname (&255)
+    //   + BC (largeur en px d'un div à 50% de « calc(1in + Npx) », soit (96+N)/2),
+    //   puis base64 → inversé → XOR (0x3d + i*89 + clé) & 255.
+    //   Une mauvaise clé donne le leurre « …/troll/master.m3u8 » : on n'accepte qu'une
+    //   URL http(s) sans « /troll/ ». On essaie l'arrondi bas ET haut de BC (N impair).
+    private fun dechiffrerNouveauFormat(html: String, link: String): String? {
+        val payload = Regex("""src:\s*\(function\([a-zA-Z]+\).*?\}\)\(["']([^"']+)["']\)""", RegexOption.DOT_MATCHES_ALL)
+            .find(html)?.groupValues?.get(1) ?: return null
+        val px = Regex("""width:calc\(1in\s*\+\s*(\d+)px\)""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 156
+        val octets = try {
+            android.util.Base64.decode(payload, android.util.Base64.DEFAULT).reversedArray()
+        } catch (e: Exception) { return null }
+        val hotes = listOfNotNull(
+            try { URL(link).host } catch (_: Exception) { null }, "vidzy.cc", "vidzy.live", "vidzy.to"
+        ).distinct()
+        for (hote in hotes) {
+            var h = 0
+            for (c in hote) h = (h + c.code) and 255
+            for (bc in listOf((96 + px) / 2, (96 + px + 1) / 2).distinct()) {
+                val sb = StringBuilder(octets.size)
+                for (i in octets.indices) {
+                    val kk = (0x3d + i * 89 + h + bc) and 255
+                    sb.append(((octets[i].toInt() and 0xFF) xor kk).toChar())
+                }
+                val url = sb.toString()
+                if (url.startsWith("http") && !url.contains("/troll/", true) && url.all { it.code in 33..126 }) {
+                    Log.i(TAG, "Nouveau format déchiffré (hôte=$hote, BC=$bc)")
+                    return url
+                }
+            }
+        }
+        Log.w(TAG, "Nouveau format présent mais déchiffrement impossible")
+        return null
+    }
+
     override suspend fun extract(link: String): Video {
         // If already a direct HLS URL from a vidzy subdomain, use it directly
         if (link.contains(".m3u8") || link.contains("/hls")) {
@@ -145,7 +182,7 @@ class VidzyExtractor : Extractor() {
             Log.d(TAG, "Request 1 - code: ${response1.code}, length: ${body1.length}, cookies: ${cookieStore.size}")
 
             // Check if we got the real page (has packed JS)
-            val hasPacked = body1.contains("function(p,a,c,k,e,d)") || body1.contains("eval(")
+            val hasPacked = body1.contains("function(p,a,c,k,e,d)") || body1.contains("eval(") || body1.contains("atob(s)")
             if (hasPacked) {
                 Log.d(TAG, "Got full page on first request!")
                 body1
@@ -158,7 +195,7 @@ class VidzyExtractor : Extractor() {
                 Log.d(TAG, "Request 2 - code: ${response2.code}, length: ${body2.length}")
 
                 // If still no packed JS, try with different referer
-                val hasPacked2 = body2.contains("function(p,a,c,k,e,d)") || body2.contains("eval(")
+                val hasPacked2 = body2.contains("function(p,a,c,k,e,d)") || body2.contains("eval(") || body2.contains("atob(s)")
                 if (hasPacked2) {
                     body2
                 } else {
@@ -246,7 +283,8 @@ class VidzyExtractor : Extractor() {
         Log.d(TAG, "Searching for stream URL in content (length: ${searchText.length})")
 
         // Try multiple patterns to find the stream URL
-        val streamUrl = listOf(
+        // 2026-10-12 : nouveau format Vidzy déchiffré d'abord (voir dechiffrerNouveauFormat).
+        val streamUrl = dechiffrerNouveauFormat(html, link) ?: listOf(
             Regex("""src\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']"""),
             Regex("""file\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']"""),
             Regex("""source\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']"""),

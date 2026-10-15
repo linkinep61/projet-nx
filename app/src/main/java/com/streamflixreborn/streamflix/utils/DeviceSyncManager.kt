@@ -127,6 +127,77 @@ object DeviceSyncManager {
         }
         Log.i(TAG, "comptes restaurés : $n service(s)")
     }
+    // ── 2026-10-15 — TEST « EFFACER LES DONNÉES PUIS RECHARGER » : CE QUI NE REVENAIT PAS ──
+    //   Mesuré sur l'Oppo (pm clear puis restauration d'un fichier) :
+    //   1. Les réglages vivent dans « <applicationId>.preferences » (UserPreferences), alors que
+    //      collectUserPreferences ne lit que le fichier par défaut (6 clés) → thème, mode léger,
+    //      lecteur, sous-titres… n'étaient jamais transportés.
+    //   2. Ces fichiers de favoris n'étaient pas dans la liste : chaînes favorites (iptv_favorites —
+    //      le nom réel, collectIptvFavorites cherchait iptv_favorites_<provider>), favoris FAST,
+    //      replays, cœur, radios, musique, dossiers locaux, verrous parentaux…
+    //   On les transporte désormais EN ENTIER (types conservés), en fusion côté récepteur.
+    private val FICHIERS_PREFS_COMPLETS = listOf(
+        "iptv_favorites", "livehub_fast_fav", "replay_favorites", "coeur_favoris",
+        "radio_favorites", "music_favorites", "onyx_local_media_folders",
+        "onyx_local_video_favorites", "iptv_group_prefs", "iptv_banned_channels",
+        "iptv_banned_servers", "provider_lock", "zoom_prefs", "world_live_language",
+        "rutube_folder",
+    )
+    /** Clés de UserPreferences propres à l'appareil ou déjà gérées par le bloc « profils ». */
+    private val CLES_REGLAGES_EXCLUES = setOf(
+        "last_app_update_time", "_v188_currentprovider_wipe_done", "profiles_bootstrapped",
+        "profile_last_active_ts", "profiles_json", "current_profile_id",
+    )
+    private fun nomFichierReglages() =
+        "${com.streamflixreborn.streamflix.BuildConfig.APPLICATION_ID}.preferences"
+
+    private fun prefsVersJson(p: android.content.SharedPreferences, exclure: Set<String> = emptySet()): JSONObject {
+        val o = JSONObject()
+        p.all.forEach { (k, v) ->
+            if (k in exclure) return@forEach
+            val (t, val_) = when (v) {
+                is String -> "s" to v
+                is Boolean -> "b" to v
+                is Int -> "i" to v
+                is Long -> "l" to v
+                is Float -> "f" to v.toDouble()
+                is Set<*> -> "S" to JSONArray(v.map { it.toString() })
+                else -> return@forEach
+            }
+            o.put(k, JSONObject().put("t", t).put("v", val_))
+        }
+        return o
+    }
+
+    private fun jsonVersPrefs(o: JSONObject, p: android.content.SharedPreferences, exclure: Set<String> = emptySet()) {
+        val e = p.edit()
+        for (k in o.keys()) {
+            if (k in exclure) continue
+            val c = o.optJSONObject(k) ?: continue
+            when (c.optString("t")) {
+                "s" -> e.putString(k, c.optString("v"))
+                "b" -> e.putBoolean(k, c.optBoolean("v"))
+                "i" -> e.putInt(k, c.optInt("v"))
+                "l" -> e.putLong(k, c.optLong("v"))
+                "f" -> e.putFloat(k, c.optDouble("v").toFloat())
+                "S" -> {
+                    val a = c.optJSONArray("v") ?: continue
+                    e.putStringSet(k, (0 until a.length()).map { a.optString(it) }.toSet())
+                }
+            }
+        }
+        e.apply()
+    }
+
+    private fun collectFichiersComplets(context: Context): JSONObject {
+        val tout = JSONObject()
+        for (nom in FICHIERS_PREFS_COMPLETS) {
+            val p = context.getSharedPreferences(nom, Context.MODE_PRIVATE)
+            if (p.all.isNotEmpty()) tout.put(nom, prefsVersJson(p))
+        }
+        return tout
+    }
+
     private const val API_URL = "https://streamflix-api.logami61250.workers.dev"
     private val JSON_MEDIA = "application/json".toMediaType()
 
@@ -224,6 +295,83 @@ object DeviceSyncManager {
             Result.failure(e)
         }
     }
+
+    // ── SAUVEGARDE DANS UN FICHIER (Google Drive, clé USB…) ────────────
+    // 2026-10-15 (user : « un bouton pour sauvegarder et un autre pour charger les données
+    //   directement, pas de code, ça se passe avec son propre compte ») : même contenu que le
+    //   transfert par code, mais écrit dans un fichier que l'utilisateur range où il veut via
+    //   le sélecteur d'Android (Google Drive y apparaît avec SON compte). Aucun projet Google,
+    //   aucune autorisation OAuth : c'est Android qui fait le lien avec Drive.
+    //   Le fichier contient les comptes (TF1+, M6+, RMC+) → chiffré AES-GCM pour qu'il ne soit
+    //   pas lisible en clair si on l'ouvre. La clé est la même dans ONYX et Onyxia : une
+    //   sauvegarde faite avec l'une se recharge dans l'autre (passage ONYX → Onyxia possible).
+    private val MAGIC = "ONYXSAV1".toByteArray(Charsets.US_ASCII)
+    private val CLE_FICHIER by lazy {
+        javax.crypto.spec.SecretKeySpec(
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest("onyx-sauvegarde-fichier-v1:7d41c0e2a95b".toByteArray()),
+            "AES",
+        )
+    }
+
+    /** Nom proposé dans le sélecteur : ONYX-sauvegarde-2026-10-15.onyx */
+    fun nomFichierSauvegarde(): String {
+        val d = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.FRANCE).format(java.util.Date())
+        return "ONYX-sauvegarde-$d.onyx"
+    }
+
+    suspend fun exporterVersFichier(context: Context, uri: android.net.Uri): Result<Int> =
+        withContext(Dispatchers.IO) {
+            try {
+                val brut = collectAllData(context).toString().toByteArray(Charsets.UTF_8)
+                val zip = java.io.ByteArrayOutputStream().also { bos ->
+                    java.util.zip.GZIPOutputStream(bos).use { it.write(brut) }
+                }.toByteArray()
+                val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+                val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, CLE_FICHIER,
+                    javax.crypto.spec.GCMParameterSpec(128, iv))
+                val chiffre = cipher.doFinal(zip)
+                val out = context.contentResolver.openOutputStream(uri)
+                    ?: return@withContext Result.failure(Exception("Impossible d'écrire le fichier"))
+                out.use { it.write(MAGIC); it.write(iv); it.write(chiffre) }
+                val taille = MAGIC.size + iv.size + chiffre.size
+                Log.i(TAG, "sauvegarde fichier écrite : $taille octets (json ${brut.size})")
+                Result.success(taille)
+            } catch (e: Exception) {
+                Log.e(TAG, "Echec sauvegarde fichier", e)
+                Result.failure(e)
+            }
+        }
+
+    suspend fun importerDepuisFichier(context: Context, uri: android.net.Uri): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            try {
+                val tout = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: return@withContext Result.failure(Exception("Impossible de lire le fichier"))
+                if (tout.size < MAGIC.size + 12 + 16 ||
+                    !tout.copyOfRange(0, MAGIC.size).contentEquals(MAGIC)) {
+                    return@withContext Result.failure(Exception("Ce fichier n'est pas une sauvegarde ONYX"))
+                }
+                val iv = tout.copyOfRange(MAGIC.size, MAGIC.size + 12)
+                val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(javax.crypto.Cipher.DECRYPT_MODE, CLE_FICHIER,
+                    javax.crypto.spec.GCMParameterSpec(128, iv))
+                val zip = try {
+                    cipher.doFinal(tout, MAGIC.size + 12, tout.size - MAGIC.size - 12)
+                } catch (e: javax.crypto.AEADBadTagException) {
+                    return@withContext Result.failure(Exception("Sauvegarde abîmée ou incomplète"))
+                }
+                val json = java.util.zip.GZIPInputStream(zip.inputStream()).use { it.readBytes() }
+                    .toString(Charsets.UTF_8)
+                applyAllData(context, JSONObject(json))
+                Log.i(TAG, "sauvegarde fichier restaurée (${json.length} caractères)")
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Log.e(TAG, "Echec restauration fichier", e)
+                Result.failure(e)
+            }
+        }
 
     // ── SÉRIALISATION ──────────────────────────────────────────────────
 
@@ -351,6 +499,11 @@ object DeviceSyncManager {
         //     L'ecran d'envoi avertit l'utilisateur de ne le donner qu'a ses appareils.
         collectComptes(context)?.let { root.put("comptes", it) }
 
+        // 14. (2026-10-15) Réglages réels (UserPreferences) + fichiers de favoris complets.
+        root.put("reglages", prefsVersJson(
+            context.getSharedPreferences(nomFichierReglages(), Context.MODE_PRIVATE),
+            CLES_REGLAGES_EXCLUES))
+        root.put("fichiersPrefs", collectFichiersComplets(context))
 
         return root
     }
@@ -487,6 +640,25 @@ object DeviceSyncManager {
             }
         }
 
+        // 0. (2026-10-15) Réglages réels + fichiers de favoris complets. AVANT les profils et
+        //    les anciens blocs : ceux-ci restent prioritaires s'ils écrivent la même chose.
+        payload.optJSONObject("reglages")?.let {
+            runCatching {
+                jsonVersPrefs(it, context.getSharedPreferences(nomFichierReglages(), Context.MODE_PRIVATE),
+                    CLES_REGLAGES_EXCLUES)
+                Log.i(TAG, "réglages restaurés : ${it.length()} clés")
+            }
+        }
+        payload.optJSONObject("fichiersPrefs")?.let { tout ->
+            var n = 0
+            for (nom in tout.keys()) {
+                if (nom !in FICHIERS_PREFS_COMPLETS) continue
+                val o = tout.optJSONObject(nom) ?: continue
+                runCatching { jsonVersPrefs(o, context.getSharedPreferences(nom, Context.MODE_PRIVATE)); n++ }
+            }
+            Log.i(TAG, "fichiers de favoris restaurés : $n")
+        }
+
         // 1. Profils
         payload.optJSONArray("profiles")?.let { arr ->
             val importedProfiles = mutableListOf<Profile>()
@@ -528,7 +700,16 @@ object DeviceSyncManager {
         payload.optJSONObject("roomBackups")?.let { backups ->
             backups.keys().forEach { profileId ->
                 val roomJson = backups.optJSONObject(profileId) ?: return@forEach
-                val backupManager = buildBackupManagerForProfile(profileId, context)
+                // 2026-10-15 : sur un appareil neuf (ou après « effacer les données »), les bases
+                //   des providers n'existent pas encore → buildBackupManagerForProfile les sautait
+                //   et TOUS les favoris/historiques films-séries étaient perdus en silence.
+                //   On crée donc les bases des providers présents dans la sauvegarde.
+                val aCreer = mutableSetOf<String>()
+                roomJson.optJSONArray("providers")?.let { arr ->
+                    for (i in 0 until arr.length()) arr.optJSONObject(i)?.optString("name")
+                        ?.takeIf { it.isNotBlank() }?.let { aCreer.add(it) }
+                }
+                val backupManager = buildBackupManagerForProfile(profileId, context, aCreer)
                 backupManager.importUserData(roomJson.toString())
                 Log.d(TAG, "Room backup imported for profile $profileId")
             }
@@ -739,13 +920,19 @@ object DeviceSyncManager {
      * Ouvre la DB de chaque provider pour ce profileId (pas le profil actif).
      * Ne crée de DB que si elle existe déjà sur disque (évite les vides).
      */
-    private fun buildBackupManagerForProfile(profileId: String, context: Context): BackupRestoreManager {
+    private fun buildBackupManagerForProfile(
+        profileId: String,
+        context: Context,
+        creerPour: Set<String> = emptySet(),
+    ): BackupRestoreManager {
         val providerContexts = Provider.providers.keys
             .filter { it.name != "Mon IPTV" }
             .mapNotNull { provider ->
                 try {
-                    // N'ouvrir que si la DB existe déjà (évite de créer 30 fichiers vides)
-                    if (!AppDatabase.providerDbExistsForProfile(profileId, provider.name, context)) {
+                    // N'ouvrir que si la DB existe déjà (évite de créer 30 fichiers vides),
+                    //   sauf pour les providers présents dans la sauvegarde à restaurer.
+                    if (provider.name !in creerPour &&
+                        !AppDatabase.providerDbExistsForProfile(profileId, provider.name, context)) {
                         return@mapNotNull null
                     }
                     val db = AppDatabase.getInstanceForProfileAndProvider(profileId, provider.name, context)

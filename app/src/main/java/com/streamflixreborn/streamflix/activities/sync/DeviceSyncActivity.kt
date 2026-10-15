@@ -103,12 +103,123 @@ class DeviceSyncActivity : AppCompatActivity() {
         btnReceive.setOnClickListener { showReceiveScreen() }
         btnReceiveConfirm.setOnClickListener { startReceive() }
 
+        findViewById<Button>(R.id.btn_drive_save).setOnClickListener {
+            ouvrirSelecteur { choisirFichierSauvegarde.launch(DeviceSyncManager.nomFichierSauvegarde()) }
+        }
+        findViewById<Button>(R.id.btn_drive_load).setOnClickListener {
+            ouvrirSelecteur { choisirFichierChargement.launch(arrayOf("*/*")) }
+        }
+
         etReceiveCode.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_DONE) {
                 startReceive()
                 true
             } else false
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  SAUVEGARDE / CHARGEMENT PAR FICHIER (Google Drive…)
+    // ══════════════════════════════════════════════════════════════════
+    // 2026-10-15 : le sélecteur d'Android propose Google Drive (compte de l'utilisateur),
+    //   la mémoire du téléphone, une clé USB… Rien à configurer côté Google.
+
+    private val choisirFichierSauvegarde = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri -> if (uri != null) sauvegarderDans(uri) }
+
+    private val choisirFichierChargement = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) confirmerChargement(uri) }
+
+    /** Beaucoup de box TV n'ont pas le sélecteur de fichiers (DocumentsUI absent,
+     *  constaté pour les vidéos locales) : on le dit au lieu de ne rien faire. */
+    private fun ouvrirSelecteur(lancer: () -> Unit) {
+        try {
+            lancer()
+        } catch (e: android.content.ActivityNotFoundException) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Indisponible sur cet appareil")
+                .setMessage("Cet appareil n'a pas de sélecteur de fichiers. " +
+                    "Utilise plutôt « Envoyer / Recevoir des données » avec un code.")
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
+    private fun afficherAttente(message: String) {
+        layoutChoice.visibility = View.GONE
+        layoutReceive.visibility = View.GONE
+        layoutSend.visibility = View.VISIBLE
+        pbSend.visibility = View.VISIBLE
+        tvSendLabel.visibility = View.GONE
+        tvSendCode.visibility = View.GONE
+        tvSendExpires.visibility = View.GONE
+        tvSendStatus.visibility = View.GONE
+        tvSubtitle.text = message
+    }
+
+    private fun afficherResultat(ok: Boolean, titre: String, detail: String) {
+        pbSend.visibility = View.GONE
+        tvSubtitle.text = titre
+        tvSendStatus.visibility = View.VISIBLE
+        tvSendStatus.text = detail
+        tvSendStatus.setTextColor(if (ok) 0xFF4CAF50.toInt() else 0xFFFF4444.toInt())
+    }
+
+    private fun sauvegarderDans(uri: android.net.Uri) {
+        afficherAttente("Sauvegarde en cours…")
+        lifecycleScope.launch {
+            DeviceSyncManager.exporterVersFichier(this@DeviceSyncActivity, uri).fold(
+                onSuccess = {
+                    afficherResultat(true, "Sauvegarde terminée.",
+                        "✓ Données sauvegardées.\n\nSur un autre appareil : Synchroniser → " +
+                        "« Charger depuis Google Drive », puis choisis ce fichier.\n\n" +
+                        "⚠ Le fichier contient aussi tes connexions (TF1+, M6+, RMC+) : " +
+                        "ne le partage pas.")
+                },
+                onFailure = { e ->
+                    afficherResultat(false, "La sauvegarde a échoué.", "✗ ${e.message}")
+                },
+            )
+        }
+    }
+
+    private fun confirmerChargement(uri: android.net.Uri) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Charger cette sauvegarde ?")
+            .setMessage("Les favoris, profils, sources et connexions de la sauvegarde " +
+                "seront ajoutés à cet appareil.")
+            .setPositiveButton("Charger") { _, _ -> chargerDepuis(uri) }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun chargerDepuis(uri: android.net.Uri) {
+        afficherAttente("Chargement de la sauvegarde…")
+        lifecycleScope.launch {
+            DeviceSyncManager.importerDepuisFichier(this@DeviceSyncActivity, uri).fold(
+                onSuccess = {
+                    // Plusieurs magasins (favoris, réglages) gardent une copie en mémoire : on
+                    //   relance l'appli pour que tout soit visible, sans demander à l'utilisateur
+                    //   de le faire lui-même.
+                    afficherResultat(true, "Chargement terminé.",
+                        "✓ Données restaurées avec succès !\n\nONYX redémarre…")
+                    tvSendStatus.postDelayed({ redemarrerAppli() }, 2500)
+                },
+                onFailure = { e ->
+                    afficherResultat(false, "Le chargement a échoué.", "✗ ${e.message}")
+                },
+            )
+        }
+    }
+
+    private fun redemarrerAppli() {
+        val i = packageManager.getLaunchIntentForPackage(packageName) ?: return
+        i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        startActivity(i)
+        finishAffinity()
+        Runtime.getRuntime().exit(0)
     }
 
     // ══════════════════════════════════════════════════════════════════
