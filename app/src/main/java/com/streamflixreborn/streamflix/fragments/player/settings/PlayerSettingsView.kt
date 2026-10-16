@@ -527,10 +527,12 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
     sealed class Settings : Item {
 
         companion object {
+            // 2026-10-16 (user : « on va trop loin pour chercher les sous-titres ») :
+            //   Sous-titres en PREMIER dans le menu Paramètres, mobile et TV.
             val listMobile = listOf(
+                Subtitle,
                 Quality,
                 Audio,
-                Subtitle,
                 Speed,
                 ChannelVariant,
                 Server,
@@ -541,10 +543,10 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 ManualZoom,
             )
             val listTv = listOf(
+                Subtitle,
                 Quality,
                 Brightness,
                 Audio,
-                Subtitle,
                 Speed,
                 ChannelVariant,
                 Server,
@@ -897,15 +899,19 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                             }
                             .sortedBy { it.language ?: it.label }
                     )
-                    list.add(LocalSubtitles)
-                    // 2026-06-09 : item "Sous-titres serveur (VOSTFR)" — ré-active
-                    //   l'overlay externe Vidzy s'il existe.
-                    if (ExternalServerSubtitles.isAvailable) list.add(ExternalServerSubtitles)
+                    // 2026-10-16 (user : « faire comme VLC ») : le téléchargement de sous-titres
+                    //   (OpenSubtitles, + SubDL si clé) vient JUSTE APRÈS les pistes de la vidéo,
+                    //   avant « Charger depuis fichier », avec un libellé explicite
+                    //   « ⬇ Télécharger des sous-titres » au lieu du nom du service.
                     list.add(OpenSubtitles)
                     // Add SubDL only if an API key is configured
                     if (UserPreferences.subdlApiKey.isNotEmpty()) {
                         list.add(SubDLSubtitles)
                     }
+                    list.add(LocalSubtitles)
+                    // 2026-06-09 : item "Sous-titres serveur (VOSTFR)" — ré-active
+                    //   l'overlay externe Vidzy s'il existe.
+                    if (ExternalServerSubtitles.isAvailable) list.add(ExternalServerSubtitles)
                 }
             }
 

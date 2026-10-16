@@ -62,6 +62,7 @@ class ExternalSubtitleOverlay(
 
     fun start(vttUrl: String, referer: String = "https://vidzy.live/") {
         stop()
+        lastLocalPath = null
         lastVttUrl = vttUrl
         lastReferer = referer
         globalInstance = this
@@ -93,6 +94,46 @@ class ExternalSubtitleOverlay(
         }
     }
 
+    /**
+     * 2026-10-16 (user : « quand on télécharge le sous-titre, le serveur devient rouge ») :
+     * un sous-titre téléchargé (OpenSubtitles/SubDL, fichier .srt/.vtt local) était appliqué
+     * en RE-PRÉPARANT ExoPlayer (setMediaItem) → nouvelle requête du manifeste → 403 sur les
+     * serveurs à URL signée/usage unique (megaplay & co) → serveur marqué en échec. On passe
+     * désormais par cet overlay, 100 % isolé du lecteur : la vidéo ne bouge pas.
+     * Lit le fichier (UTF-8, repli latin-1 si illisible), accepte SRT (virgules dans les
+     * timestamps) et VTT.
+     */
+    fun startLocal(path: String) {
+        stop()
+        lastVttUrl = null
+        lastLocalPath = path
+        globalInstance = this
+        ensureAttached()
+        applyPrefs()
+        subtitleView.setCues(emptyList())
+        fetchJob = scope.launch {
+            val texte = try {
+                withContext(Dispatchers.IO) {
+                    val f = java.io.File(path.removePrefix("file://").let { java.net.URLDecoder.decode(it, "UTF-8") })
+                    val bytes = f.readBytes()
+                    val utf8 = String(bytes, Charsets.UTF_8)
+                    if (utf8.count { it == '�' } > 3) String(bytes, Charsets.ISO_8859_1) else utf8
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Local subtitle read error: ${t.message}")
+                null
+            } ?: return@launch
+            // SRT → VTT : « 00:01:02,345 --> 00:01:04,000 » devient « 00:01:02.345 --> 00:01:04.000 ».
+            val normalise = texte.lines().joinToString("\n") { l ->
+                if (l.contains("-->")) l.replace(',', '.') else l
+            }
+            cues = parseVtt(normalise)
+            Log.d(TAG, "Parsed ${cues.size} cues from local $path")
+            startTicking()
+        }
+    }
+    private var lastLocalPath: String? = null
+
     fun stop() {
         tickJob?.cancel(); tickJob = null
         fetchJob?.cancel(); fetchJob = null
@@ -113,6 +154,7 @@ class ExternalSubtitleOverlay(
     /** Re-démarre l'overlay avec la dernière URL connue (= utilisé par
      *  startGlobalIfPossible quand l'user re-sélectionne les subs externes). */
     fun restartLast() {
+        lastLocalPath?.let { startLocal(it); return }
         val url = lastVttUrl ?: return
         start(url, lastReferer)
     }

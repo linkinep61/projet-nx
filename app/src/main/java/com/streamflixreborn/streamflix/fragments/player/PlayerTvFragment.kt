@@ -1894,38 +1894,11 @@ class PlayerTvFragment : Fragment() {
 
                             PlayerViewModel.SubtitleState.DownloadingOpenSubtitle -> {}
                             is PlayerViewModel.SubtitleState.SuccessDownloadingOpenSubtitle -> {
-                                val fileName =
-                                    state.uri.getFileName(requireContext()) ?: state.uri.toString()
-                                val currentPosition = player.currentPosition
-                                val currentSubtitleConfigurations =
-                                    player.currentMediaItem?.localConfiguration?.subtitleConfigurations?.map {
-                                        MediaItem.SubtitleConfiguration.Builder(it.uri)
-                                            .setMimeType(it.mimeType)
-                                            .setLabel(it.label)
-                                            .setLanguage(it.language)
-                                            .setSelectionFlags(0)
-                                            .build()
-                                    } ?: listOf()
-                                player.setMediaItem(
-                                    MediaItem.Builder()
-                                        .setUri(player.currentMediaItem?.localConfiguration?.uri)
-                                        .setMimeType(player.currentMediaItem?.localConfiguration?.mimeType)
-                                        .setSubtitleConfigurations(
-                                            currentSubtitleConfigurations
-                                                    + MediaItem.SubtitleConfiguration.Builder(state.uri)
-                                                .setMimeType(fileName.toSubtitleMimeType())
-                                                .setLabel(fileName)
-                                                .setLanguage(state.subtitle.languageName)
-                                                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                                                .build()
-                                        )
-                                        .setMediaMetadata(player.mediaMetadata)
-                                        .build()
-                                )
-                                UserPreferences.subtitleName =
-                                    (state.subtitle.languageName ?: fileName).substringBefore(" ")
-                                player.seekTo(currentPosition)
-                                player.play()
+                                // 2026-10-16 : via l'overlay isolé (plus de setMediaItem → plus de
+                                //   re-préparation → plus de 403 « serveur rouge » sur les URL signées).
+                                val fileName = state.uri.getFileName(requireContext()) ?: state.uri.toString()
+                                appliquerSousTitreTelecharge(state.uri, state.subtitle.subFileName ?: fileName)
+                                UserPreferences.subtitleName = (state.subtitle.languageName ?: fileName).substringBefore(" ")
                             }
 
                             is PlayerViewModel.SubtitleState.FailedDownloadingOpenSubtitle -> {
@@ -1944,45 +1917,10 @@ class PlayerTvFragment : Fragment() {
 
                             PlayerViewModel.SubtitleState.DownloadingSubDLSubtitle -> {}
                             is PlayerViewModel.SubtitleState.SuccessDownloadingSubDLSubtitle -> {
-                                val fileName =
-                                    state.uri.getFileName(requireContext()) ?: state.uri.toString()
-                                val currentPosition = player.currentPosition
-                                val currentSubtitleConfigurations =
-                                    player.currentMediaItem?.localConfiguration?.subtitleConfigurations?.map {
-                                        MediaItem.SubtitleConfiguration.Builder(it.uri)
-                                            .setMimeType(it.mimeType)
-                                            .setLabel(it.label)
-                                            .setLanguage(it.language)
-                                            .setSelectionFlags(0)
-                                            .build()
-                                    } ?: listOf()
-                                player.setMediaItem(
-                                    MediaItem.Builder()
-                                        .setUri(player.currentMediaItem?.localConfiguration?.uri)
-                                        .setMimeType(player.currentMediaItem?.localConfiguration?.mimeType)
-                                        .setSubtitleConfigurations(
-                                            currentSubtitleConfigurations
-                                                    + MediaItem.SubtitleConfiguration.Builder(state.uri)
-                                                .setMimeType(fileName.toSubtitleMimeType())
-                                                .setLabel(
-                                                    state.subtitle.releaseName
-                                                        ?: state.subtitle.name ?: fileName
-                                                )
-                                                .setLanguage(
-                                                    state.subtitle.lang ?: state.subtitle.language
-                                                    ?: "Unknown"
-                                                )
-                                                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                                                .build()
-                                        )
-                                        .setMediaMetadata(player.mediaMetadata)
-                                        .build()
-                                )
-                                UserPreferences.subtitleName =
-                                    (state.subtitle.releaseName ?: state.subtitle.name
-                                    ?: fileName).substringBefore(" ")
-                                player.seekTo(currentPosition)
-                                player.play()
+                                // 2026-10-16 : via l'overlay isolé (voir OpenSubtitles ci-dessus).
+                                val fileName = state.uri.getFileName(requireContext()) ?: state.uri.toString()
+                                appliquerSousTitreTelecharge(state.uri, state.subtitle.releaseName ?: state.subtitle.name ?: fileName)
+                                UserPreferences.subtitleName = (state.subtitle.releaseName ?: state.subtitle.name ?: fileName).substringBefore(" ")
                             }
 
                             is PlayerViewModel.SubtitleState.FailedDownloadingSubDLSubtitle -> {
@@ -4967,6 +4905,56 @@ class PlayerTvFragment : Fragment() {
             }
         }
 
+        /** 2026-10-16 (« comme VLC ») : message « Pas de sous-titres » montré UNE fois par vidéo. */
+        private var sansSousTitresSignale = false
+
+        /**
+         * 2026-10-16 (user : « quand on clique sur télécharger, le serveur devient rouge ») :
+         * un sous-titre téléchargé (OpenSubtitles/SubDL) était ajouté par `player.setMediaItem`
+         * → re-préparation → nouvelle requête du manifeste → 403 sur les URL signées (megaplay…)
+         * → serveur marqué en échec. On l'affiche désormais via l'overlay isolé (le même que
+         * pour Vidzy VOSTFR) : la vidéo continue sans aucune requête. « Désactivé » l'arrête.
+         */
+        private fun appliquerSousTitreTelecharge(uri: android.net.Uri, nom: String) {
+            try {
+                if (externalSubOverlay == null) {
+                    externalSubOverlay = com.streamflixreborn.streamflix.utils
+                        .ExternalSubtitleOverlay(requireContext(), binding.pvPlayer, player)
+                }
+                externalSubOverlay?.startLocal(uri.toString())
+                Toast.makeText(requireContext(), "Sous-titres : $nom", Toast.LENGTH_SHORT).show()
+            } catch (t: Throwable) {
+                Log.w("PlayerTvFragment", "overlay sous-titre téléchargé : ${t.message}")
+            }
+        }
+
+        /**
+         * Si la vidéo n'a aucune piste de sous-titres (film/série uniquement, pas les directs),
+         * le signale une fois et indique où les télécharger (menu Sous-titres →
+         * « ⬇ Télécharger des sous-titres », juste après les pistes).
+         */
+        private fun proposerSousTitres(tracks: androidx.media3.common.Tracks) {
+            if (sansSousTitresSignale) return
+            if (args.videoType !is Video.Type.Movie && args.videoType !is Video.Type.Episode) return
+            if (args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")) return
+            val aDesSousTitres = tracks.groups.any { it.type == C.TRACK_TYPE_TEXT } ||
+                PlayerSettingsView.Settings.Subtitle.ExternalServerSubtitles.isAvailable
+            if (aDesSousTitres) return
+            sansSousTitresSignale = true
+            // Les pistes texte d'un HLS peuvent arriver un peu après la vidéo : on revérifie dans 2 s.
+            binding.root.postDelayed({
+                if (!isAdded || _binding == null) return@postDelayed
+                if (player.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT }) return@postDelayed
+                try {
+                    Toast.makeText(requireContext(),
+                        "Pas de sous-titres dans cette vidéo — Réglages › Sous-titres › ⬇ Télécharger des sous-titres",
+                        Toast.LENGTH_LONG).show()
+                } catch (_: Exception) {}
+            }, 2_000)
+        }
+
         private fun displayVideo(
             video: Video,
             server: Video.Server,
@@ -4974,6 +4962,7 @@ class PlayerTvFragment : Fragment() {
             shouldPlay: Boolean = true,
         ) {
             currentVideo = video
+            sansSousTitresSignale = false
 
             // 2026-07-11 : si le mode « toujours lecteur externe » est actif,
             //   on lance directement le lecteur externe mémorisé sans passer par ExoPlayer.
@@ -6172,6 +6161,8 @@ class PlayerTvFragment : Fragment() {
                     super.onTracksChanged(tracks)
                     val videoGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
                     val videoTracks = videoGroups.sumOf { it.length }
+                    // 2026-10-16 : « Pas de sous-titres → où les télécharger » (comme VLC).
+                    if (videoGroups.isNotEmpty()) try { proposerSousTitres(tracks) } catch (_: Exception) {}
                     val selectedHeights = buildList {
                         videoGroups.forEach { group ->
                             for (i in 0 until group.length) {
@@ -7262,8 +7253,11 @@ class PlayerTvFragment : Fragment() {
             // 2026-07-08 (user) : « Ratio d'affichage » entre Paramètres et
             //   Lecteur externe. Le menu NE se ferme PAS au clic Ratio (user
             //   peut cycler les modes sans rouvrir). Ferme sur les autres items.
+            // 2026-10-16 (user : « on va trop loin pour chercher les sous-titres », « pareil
+            //   pour la version TV ») : « Sous-titres » juste sous « Paramètres ».
             val labels = arrayOf(
                 "Paramètres",
+                "Sous-titres",
                 "Ratio d'affichage",
                 "Lecteur externe"
             )
@@ -7274,7 +7268,8 @@ class PlayerTvFragment : Fragment() {
             dialog.listView.setOnItemClickListener { _, _, position, _ ->
                 when (position) {
                     0 -> { dialog.dismiss(); binding.settings.show() }
-                    1 -> {
+                    1 -> { dialog.dismiss(); binding.settings.showSubtitles() }
+                    2 -> {
                         // Cycle ratio SANS fermer le menu
                         val newResize = UserPreferences.playerResize.next()
                         zoomToast?.cancel()
@@ -7283,7 +7278,7 @@ class PlayerTvFragment : Fragment() {
                         UserPreferences.playerResize = newResize
                         updatePlayerScale()
                     }
-                    2 -> {
+                    3 -> {
                         dialog.dismiss()
                         val pkg = UserPreferences.externalPlayerPackage
                         if (UserPreferences.alwaysUseExternalPlayer && !pkg.isNullOrBlank()) {

@@ -343,10 +343,10 @@
     <string name="player_settings_caption_style_window_opacity_0_5">50%</string>
     <string name="player_settings_caption_style_window_opacity_0_75">75%</string>
     <string name="player_settings_caption_style_window_opacity_1">100%</string>
-    <string name="player_settings_open_subtitles_title">OpenSubtitles</string>
-    <string name="player_settings_open_subtitles_label">OpenSubtitles</string>
-    <string name="player_settings_subdl_title">SubDL</string>
-    <string name="player_settings_subdl_label">SubDL</string>
+    <string name="player_settings_open_subtitles_title">تنزيل الترجمة</string>
+    <string name="player_settings_open_subtitles_label">⬇ تنزيل الترجمة</string>
+    <string name="player_settings_subdl_title">تنزيل الترجمة (SubDL)</string>
+    <string name="player_settings_subdl_label">⬇ تنزيل الترجمة (SubDL)</string>
     <string name="player_settings_local_subtitles_label">تحميل من ملف</string>
     <string name="player_settings_speed_title">سرعة الفيديو</string>
     <string name="player_settings_speed_label">السرعة</string>

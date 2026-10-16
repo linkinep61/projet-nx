@@ -2052,34 +2052,11 @@ class PlayerMobileFragment : Fragment() {
 
                     PlayerViewModel.SubtitleState.DownloadingOpenSubtitle -> {}
                     is PlayerViewModel.SubtitleState.SuccessDownloadingOpenSubtitle -> {
+                        // 2026-10-16 : via l'overlay isolé (plus de setMediaItem → plus de
+                        //   re-préparation → plus de 403 « serveur rouge » sur les URL signées).
                         val fileName = state.uri.getFileName(requireContext()) ?: state.uri.toString()
-                        val currentPosition = player.currentPosition
-                        val currentSubtitleConfigurations = player.currentMediaItem?.localConfiguration?.subtitleConfigurations?.map {
-                            MediaItem.SubtitleConfiguration.Builder(it.uri)
-                                .setMimeType(it.mimeType)
-                                .setLabel(it.label)
-                                .setLanguage(it.language)
-                                .setSelectionFlags(0)
-                                .build()
-                        } ?: listOf()
-                        player.setMediaItem(
-                            MediaItem.Builder()
-                                .setUri(player.currentMediaItem?.localConfiguration?.uri)
-                                .setMimeType(player.currentMediaItem?.localConfiguration?.mimeType)
-                                .setSubtitleConfigurations(
-                                    currentSubtitleConfigurations + MediaItem.SubtitleConfiguration.Builder(state.uri)
-                                        .setMimeType(fileName.toSubtitleMimeType())
-                                        .setLabel(fileName)
-                                        .setLanguage(state.subtitle.languageName)
-                                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                                        .build()
-                                )
-                                .setMediaMetadata(player.mediaMetadata)
-                                .build()
-                        )
+                        appliquerSousTitreTelecharge(state.uri, state.subtitle.subFileName ?: fileName)
                         UserPreferences.subtitleName = (state.subtitle.languageName ?: fileName).substringBefore(" ")
-                        player.seekTo(currentPosition)
-                        player.play()
                     }
                     is PlayerViewModel.SubtitleState.FailedDownloadingOpenSubtitle -> {
                         Toast.makeText(requireContext(), "${state.subtitle.subFileName}: ${state.error.message}", Toast.LENGTH_LONG).show()
@@ -2092,34 +2069,10 @@ class PlayerMobileFragment : Fragment() {
 
                     PlayerViewModel.SubtitleState.DownloadingSubDLSubtitle -> {}
                     is PlayerViewModel.SubtitleState.SuccessDownloadingSubDLSubtitle -> {
+                        // 2026-10-16 : via l'overlay isolé (voir OpenSubtitles ci-dessus).
                         val fileName = state.uri.getFileName(requireContext()) ?: state.uri.toString()
-                        val currentPosition = player.currentPosition
-                        val currentSubtitleConfigurations = player.currentMediaItem?.localConfiguration?.subtitleConfigurations?.map {
-                            MediaItem.SubtitleConfiguration.Builder(it.uri)
-                                .setMimeType(it.mimeType)
-                                .setLabel(it.label)
-                                .setLanguage(it.language)
-                                .setSelectionFlags(0)
-                                .build()
-                        } ?: listOf()
-                        player.setMediaItem(
-                            MediaItem.Builder()
-                                .setUri(player.currentMediaItem?.localConfiguration?.uri)
-                                .setMimeType(player.currentMediaItem?.localConfiguration?.mimeType)
-                                .setSubtitleConfigurations(
-                                    currentSubtitleConfigurations + MediaItem.SubtitleConfiguration.Builder(state.uri)
-                                        .setMimeType(fileName.toSubtitleMimeType())
-                                        .setLabel(state.subtitle.releaseName ?: state.subtitle.name ?: fileName)
-                                        .setLanguage(state.subtitle.lang ?: state.subtitle.language ?: "Unknown")
-                                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                                        .build()
-                                )
-                                .setMediaMetadata(player.mediaMetadata)
-                                .build()
-                        )
+                        appliquerSousTitreTelecharge(state.uri, state.subtitle.releaseName ?: state.subtitle.name ?: fileName)
                         UserPreferences.subtitleName = (state.subtitle.releaseName ?: state.subtitle.name ?: fileName).substringBefore(" ")
-                        player.seekTo(currentPosition)
-                        player.play()
                     }
                     is PlayerViewModel.SubtitleState.FailedDownloadingSubDLSubtitle -> {
                         Toast.makeText(requireContext(), "${state.subtitle.name}: ${state.error.message}", Toast.LENGTH_LONG).show()
@@ -3076,6 +3029,11 @@ class PlayerMobileFragment : Fragment() {
         val entrees = listOf<Triple<Int, String, () -> Unit>>(
             Triple(R.drawable.exo_styled_controls_settings, "Paramètres") {
                 binding.settings.show()
+            },
+            // 2026-10-16 (user : « on va trop loin pour chercher les sous-titres ») :
+            //   accès direct au menu Sous-titres, juste sous Paramètres.
+            Triple(R.drawable.ic_player_settings_subtitle_on, "Sous-titres") {
+                binding.settings.showSubtitles()
             },
             Triple(R.drawable.exo_styled_controls_lock, "Verrouiller l'écran") {
                 engageScreenLock()
@@ -4887,8 +4845,65 @@ class PlayerMobileFragment : Fragment() {
         }
     }
 
+    /** 2026-10-16 (« comme VLC ») : bandeau « Pas de sous-titres » montré UNE fois par vidéo. */
+    private var sansSousTitresSignale = false
+
+    /** Overlay des sous-titres téléchargés (OpenSubtitles/SubDL) — isolé d'ExoPlayer. */
+    private var overlaySousTitresTelecharges: com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay? = null
+
+    /**
+     * 2026-10-16 (user : « quand on clique sur télécharger, le serveur devient rouge ») :
+     * un sous-titre téléchargé était ajouté par `player.setMediaItem(...)` → ExoPlayer se
+     * re-préparait et redemandait le manifeste → 403 sur les serveurs à URL signée/usage
+     * unique (megaplay…) → lecture coupée, serveur marqué en échec. On affiche maintenant le
+     * fichier via [ExternalSubtitleOverlay] : la vidéo continue sans aucune requête.
+     * « Désactivé » dans le menu Sous-titres arrête l'overlay (stopGlobal), comme pour Vidzy.
+     */
+    private fun appliquerSousTitreTelecharge(uri: android.net.Uri, nom: String) {
+        try {
+            if (overlaySousTitresTelecharges == null) {
+                overlaySousTitresTelecharges = com.streamflixreborn.streamflix.utils
+                    .ExternalSubtitleOverlay(requireContext(), binding.pvPlayer, player)
+            }
+            overlaySousTitresTelecharges?.startLocal(uri.toString())
+            Toast.makeText(requireContext(), "Sous-titres : $nom", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Log.w("PlayerMobileFragment", "overlay sous-titre téléchargé : ${t.message}")
+        }
+    }
+
+    /**
+     * Si la vidéo n'a aucune piste de sous-titres (film/série uniquement, pas les directs),
+     * propose une fois de les télécharger — comme VLC. Le bouton ouvre directement la liste
+     * OpenSubtitles/SubDL du menu Sous-titres.
+     */
+    private fun proposerSousTitres(tracks: androidx.media3.common.Tracks) {
+        if (sansSousTitresSignale) return
+        if (args.videoType !is Video.Type.Movie && args.videoType !is Video.Type.Episode) return
+        if (args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")) return
+        val aDesSousTitres = tracks.groups.any { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT } ||
+            PlayerSettingsView.Settings.Subtitle.ExternalServerSubtitles.isAvailable
+        if (aDesSousTitres) return
+        sansSousTitresSignale = true
+        // Les pistes texte d'un HLS peuvent arriver un peu après la vidéo : on revérifie dans 2 s.
+        binding.root.postDelayed({
+            if (!isAdded || _binding == null) return@postDelayed
+            val encoreSans = player.currentTracks.groups.none { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
+            if (!encoreSans) return@postDelayed
+            try {
+                com.google.android.material.snackbar.Snackbar
+                    .make(binding.root, "Pas de sous-titres dans cette vidéo", 8_000)
+                    .setAction("Télécharger") { binding.settings.showSubtitlesDownload() }
+                    .show()
+            } catch (_: Exception) {}
+        }, 2_000)
+    }
+
     private fun displayVideo(video: Video, server: Video.Server) {
         currentVideo = video
+        sansSousTitresSignale = false
 
         // 2026-07-11 : si le mode « toujours lecteur externe » est actif,
         //   on lance directement le lecteur externe sans passer par ExoPlayer.
@@ -5423,6 +5438,8 @@ class PlayerMobileFragment : Fragment() {
                     it.type == androidx.media3.common.C.TRACK_TYPE_VIDEO
                 }
                 if (videoGroups.isEmpty()) return  // audio-only legit
+                // 2026-10-16 : « Pas de sous-titres → Télécharger » (comme VLC).
+                try { proposerSousTitres(tracks) } catch (_: Exception) {}
                 // Y a-t-il AU MOINS un track vidéo supporté par les décodeurs ?
                 val anyVideoSupported = videoGroups.any { group ->
                     (0 until group.length).any { i -> group.isTrackSupported(i) }

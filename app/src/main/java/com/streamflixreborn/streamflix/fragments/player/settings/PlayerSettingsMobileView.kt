@@ -148,6 +148,20 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
         displaySettings(Setting.SERVERS)
     }
 
+    /** 2026-10-16 (« comme VLC ») : ouvre DIRECTEMENT la liste des sous-titres à télécharger
+     *  (recherche OpenSubtitles/SubDL lancée au passage), depuis le bandeau « Pas de sous-titres ». */
+    fun showSubtitlesDownload() {
+        this.visibility = View.VISIBLE
+        onSubtitlesClicked?.invoke()
+        displaySettings(Setting.OPEN_SUBTITLES)
+    }
+
+    /** 2026-10-16 : ouvre directement le menu Sous-titres (entrée « Sous-titres » du menu ⋮). */
+    fun showSubtitles() {
+        this.visibility = View.VISIBLE
+        displaySettings(Setting.SUBTITLES)
+    }
+
     private fun displaySettings(setting: Setting) {
         currentSettings = setting
 

@@ -201,10 +201,10 @@
     <string name="player_settings_caption_style_window_opacity_1">100%</string>
     <string name="player_settings_caption_style_margin_title">Unterer Rand</string>
     <string name="player_settings_caption_style_margin_label">Unterer Rand</string>
-    <string name="player_settings_open_subtitles_title">OpenSubtitles</string>
-    <string name="player_settings_open_subtitles_label">OpenSubtitles</string>
-    <string name="player_settings_subdl_title">SubDL</string>
-    <string name="player_settings_subdl_label">SubDL</string>
+    <string name="player_settings_open_subtitles_title">Untertitel herunterladen</string>
+    <string name="player_settings_open_subtitles_label">⬇ Untertitel herunterladen</string>
+    <string name="player_settings_subdl_title">Untertitel herunterladen (SubDL)</string>
+    <string name="player_settings_subdl_label">⬇ Untertitel herunterladen (SubDL)</string>
     <string name="player_settings_local_subtitles_label">Aus Datei laden</string>
     <string name="player_settings_speed_title">Wiedergabegeschwindigkeit</string>
     <string name="player_settings_speed_label">Geschwindigkeit</string>
