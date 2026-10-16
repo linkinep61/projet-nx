@@ -42,9 +42,14 @@ object YablomProvider {
     //   On essaie donc une liste de façades, on suit l'avis « maintenant sur X » quand une
     //   façade a déménagé, et on lit le dossier dans le lien d'entrée de la page d'accueil
     //   (`<a … href='aab2ae3'>`). Résultat gardé en mémoire pour la session.
+    // 2026-10-16 : tous les serveurs sont éteints. Les pages de passage annoncent
+    //   quatre destinations différentes (ilmiv→gozlov, aplouf→fakrov, yablom→pirvab,
+    //   obrigoz→vozgov) et disent qu'elles seront supprimées sous 24 h. On garde donc
+    //   TOUTES les destinations connues, gozlov (la plus récente) en tête, pour avoir
+    //   un point d'entrée au retour du serveur même si les pages de passage ont disparu.
     private val FACADES = listOf(
-        "fakrov.com", "pirvab.com", "yakmov.com", "vozgov.com",
-        "yablom.com", "www.aplouf.com", "obrigoz.com", "motomaz.com", "dospiv.com",
+        "gozlov.com", "fakrov.com", "pirvab.com", "yakmov.com", "vozgov.com",
+        "www.ilmiv.com", "yablom.com", "www.aplouf.com", "obrigoz.com", "motomaz.com", "dospiv.com",
     )
     private val RX_DEMENAGEMENT = Regex("""maintenant(?:\s|%20|&nbsp;)+sur(?:\s|%20|&nbsp;)+([a-z0-9-]+(?:\.[a-z0-9-]+)+)""", RegexOption.IGNORE_CASE)
     private val RX_DOSSIER = Regex("""<a\b[^>]*\bhref=["']([a-z0-9]{5,20})["']""", RegexOption.IGNORE_CASE)

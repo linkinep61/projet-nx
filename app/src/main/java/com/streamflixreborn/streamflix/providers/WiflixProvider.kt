@@ -86,7 +86,9 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     //   de backup Wiflix + moins de serveurs VOE (Wiflix en fournit beaucoup).
     // 2026-07-09 : flemmix.gold MORT (redirige vers neufneuf.space →
     //   "Redirection sécurisée vers flemmix.garden"). Nouveau domaine actif.
-    override val defaultBaseUrl: String = "https://flemmix.garden/"
+    // 2026-10-16 : flemmix.garden → neufneuf.space (« Accès sécurisé », plus de catalogue).
+    //   Le portail redirige désormais en JS vers flemmix.land (voir onChangeUrl).
+    override val defaultBaseUrl: String = "https://flemmix.land/"
     // Liste des domaines morts/bloqués connus. Si le cache PROVIDER_URL est sur
     // un de ceux-ci, on force un refresh au prochain initializeService() au lieu
     // de rester coincé dessus à vie. Mettre à jour quand le portail évolue.
@@ -98,6 +100,9 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         //   n'est plus listé du tout ; flemmix.fast + flemmix.cafe = "bloqués").
         //   Les mettre ici force un refresh du cache PROVIDER_URL coincé dessus.
         "flemmix.city", "flemmix.fast", "flemmix.cafe", "flemmix.gold",
+        // 2026-10-16 : flemmix.garden redirige vers neufneuf.space (page « Accès
+        //   sécurisé » sans catalogue) → les caches coincés dessus doivent se rafraîchir.
+        "flemmix.garden", "neufneuf.space",
     )
     override val baseUrl: String = defaultBaseUrl
         get() {
@@ -2310,11 +2315,33 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                             !ctx.contains("faux") &&
                             !ctx.contains("frauduleux")
                         }
-                    val newUrl = (candidates.firstOrNull { (_, ctx) ->
+                    // 2026-10-16 (user : « pourquoi Wiflix redirige vers une adresse .garden ? ») :
+                    //   le portail n'a PLUS AUCUN <a href> vers le site actif (seulement Telegram et
+                    //   french-anime). L'adresse est dans un script :
+                    //     _SAFE_PAYLOAD = "aHR0cHM6Ly9mbGVtbWl4LmxhbmQ=" (= base64 de https://flemmix.land)
+                    //     window.location.href = atob(_SAFE_PAYLOAD)   après un compte à rebours de 7 s.
+                    //   Sans ça, l'appli restait sur l'ancien cache (flemmix.garden → neufneuf.space,
+                    //   « Accès sécurisé », aucun catalogue). On lit le payload EN PRIORITÉ ; les
+                    //   <a href> restent en secours si le portail revient à l'ancien format.
+                    //   neufneuf.space (où atterrissent les anciens domaines) fait pareil avec
+                    //   `var _0x4a2f = atob("…")` : on cherche donc TOUT base64 qui décode en URL,
+                    //   quel que soit le nom de variable. Si le portail ne donne rien, on tente
+                    //   neufneuf.space en secours.
+                    var viaPayload = lireDomaineEncode(document.outerHtml())
+                    if (viaPayload == null) {
+                        viaPayload = runCatching {
+                            lireDomaineEncode(Service.buildAddressFetcher("https://neufneuf.space/").getHome().outerHtml())
+                        }.getOrNull()
+                        if (viaPayload != null) Log.i("WiflixProvider", "onChangeUrl : domaine lu via neufneuf.space = $viaPayload")
+                    } else {
+                        Log.i("WiflixProvider", "onChangeUrl : domaine lu dans le payload du portail = $viaPayload")
+                    }
+
+                    val newUrl = (viaPayload ?: (candidates.firstOrNull { (_, ctx) ->
                             ctx.contains("featured") || ctx.contains("active") ||
                             ctx.contains("principal") || ctx.contains("actif")
                         } ?: candidates.firstOrNull())
-                        ?.first
+                        ?.first)
                         ?.replace("http://", "https://")
 
                     if (!newUrl.isNullOrEmpty()) {
@@ -2360,6 +2387,25 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         }
 
         return baseUrl
+    }
+
+    /**
+     * 2026-10-16 : extrait le domaine actif d'une page de redirection JS Flemmix.
+     * Cherche tout `atob("<base64>")` ou `… = "<base64>"` dont le décodage donne une URL
+     * http(s) (hors portail), ex. "aHR0cHM6Ly9mbGVtbWl4LmxhbmQ=" → https://flemmix.land.
+     */
+    private fun lireDomaineEncode(html: String): String? {
+        val rx = Regex("""["']([A-Za-z0-9+/]{12,}={0,2})["']""")
+        for (m in rx.findAll(html)) {
+            val dec = runCatching {
+                String(android.util.Base64.decode(m.groupValues[1], android.util.Base64.DEFAULT), Charsets.UTF_8).trim()
+            }.getOrNull() ?: continue
+            if (dec.matches(Regex("""https?://[a-z0-9.-]+\.[a-z]{2,}/?""")) &&
+                !dec.contains("wiflix-adresses") && !dec.contains("neufneuf")) {
+                return dec
+            }
+        }
+        return null
     }
 
     private suspend fun initializeService() {
@@ -2454,9 +2500,9 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 }
                 .build()
 
-            fun buildAddressFetcher(): Service {
+            fun buildAddressFetcher(url: String = portalUrl): Service {
                 val addressRetrofit = Retrofit.Builder()
-                    .baseUrl(portalUrl)
+                    .baseUrl(url)
                     .addConverterFactory(JsoupConverterFactory.create())
                     .client(client)
                     .build()

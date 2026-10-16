@@ -477,8 +477,10 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     //   passent EN TÊTE ; les anciennes restent pour leur avis « maintenant sur X », suivi
     //   automatiquement par [essayerMiroir].
     private val MIROIRS_CONNUS = listOf(
+        "https://gozlov.com/",   // 2026-10-16 : annoncé par ilmiv.com (« ilmiv devient gozlov.com »)
         "https://fakrov.com/",   // le plus rapide mesuré (~0,13 s), successeur direct d'aplouf
         "https://pirvab.com/",
+        "https://www.ilmiv.com/", // page de passage vers gozlov (supprimée sous 24 h selon elle)
         "https://yakmov.com/",
         "https://vozgov.com/",
         "https://www.aplouf.com/",
