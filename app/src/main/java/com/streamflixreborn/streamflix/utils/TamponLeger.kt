@@ -12,16 +12,38 @@ import androidx.media3.exoplayer.LoadControl
  * En mode léger : 20 s / 50 s d'avance, limite STRICTE de 32 Mo (16 Mo pour le mini-lecteur)
  * → ~-120 Mo pendant toute la lecture.
  *
- * Si l'utilisateur a activé « Buffering étendu » dans le lecteur, il demande explicitement
- * plus de tampon : on ne réduit PAS (retourne null → le lecteur garde ses réglages normaux).
- * Mode normal : retourne toujours null, rien ne change.
+ * 2026-10-16 (user : la petite box Bouygues plante EN COURS de vidéo sur VOE & co) :
+ *   le tampon normal (300 s d'avance, « temps prioritaire sur les octets ») peut dépasser
+ *   300 Mo sur un serveur à gros débit — au-delà du plafond mémoire d'une box à 2 Go,
+ *   Android tue l'appli sans message. Donc :
+ *   • en mode léger, le tampon réduit s'applique MÊME si « Buffering étendu » est coché
+ *     (le mode léger prime : c'est lui qui évite le plantage) ;
+ *   • sur un appareil à faible mémoire (isLowRamDevice ou ≤ 256 Mo par appli), le tampon
+ *     réduit s'applique automatiquement, mode léger ou pas, en plus serré (24 / 12 Mo).
+ * Mode normal sur un appareil normal : retourne toujours null, rien ne change.
  */
 object TamponLeger {
     private const val MO = 1024 * 1024
 
+    /** Appareil à faible mémoire : isLowRamDevice, ou classe mémoire ≤ 256 Mo (box TV d'entrée de gamme). */
+    val appareilFaible: Boolean by lazy {
+        runCatching {
+            val am = com.streamflixreborn.streamflix.StreamFlixApp.instance
+                .getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            am?.isLowRamDevice == true || (am?.memoryClass ?: 512) <= 256
+        }.getOrDefault(false)
+    }
+
     fun loadControl(mini: Boolean, extraBuffering: Boolean, rebufferMs: Int): LoadControl? {
-        if (!UserPreferences.modeLeger || extraBuffering) return null
-        Log.i("TamponLeger", "mode léger : tampon réduit (${if (mini) 16 else 32} Mo, 20-50 s)")
+        val leger = UserPreferences.modeLeger
+        val faible = appareilFaible
+        if (!leger && !faible) return null
+        val mo = when {
+            faible -> if (mini) 12 else 24
+            else -> if (mini) 16 else 32
+        }
+        Log.i("TamponLeger", "tampon réduit ($mo Mo, 20-50 s) — modeLeger=$leger faibleMemoire=$faible" +
+            (if (extraBuffering) " (Buffering étendu ignoré)" else ""))
         return DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 20_000,
@@ -29,7 +51,7 @@ object TamponLeger {
                 1_000,
                 rebufferMs
             )
-            .setTargetBufferBytes((if (mini) 16 else 32) * MO)
+            .setTargetBufferBytes(mo * MO)
             .setPrioritizeTimeOverSizeThresholds(false)
             .build()
     }
