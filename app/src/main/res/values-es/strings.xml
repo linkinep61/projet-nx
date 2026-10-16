@@ -432,10 +432,10 @@
     <string name="settings_tmdb_api_key_reset">Usar clave API de TMDB predeterminada</string>
 
     <string name="settings_category_subdl">Subtítulos (OpenSubtitles / SubDL)</string>
-    <string name="settings_opensubtitles_api_key">Clave OpenSubtitles personal (opcional)</string>
-    <string name="settings_opensubtitles_api_key_summary">Vacío = claves comunes de la app (cuota compartida). Para tu propia cuota, crea una clave gratuita en opensubtitles.com (Consumers) y pégala aquí</string>
+    <string name="settings_opensubtitles_api_key">Clave OpenSubtitles (necesaria para los subtítulos)</string>
+    <string name="settings_opensubtitles_api_key_summary">Obligatoria para descargar subtítulos de OpenSubtitles. Crea una clave gratuita en opensubtitles.com (Consumers) y pégala aquí</string>
     <string name="settings_opensubtitles_api_key_success">Clave OpenSubtitles guardada</string>
-    <string name="settings_opensubtitles_api_key_reset">Clave OpenSubtitles eliminada: claves comunes</string>
+    <string name="settings_opensubtitles_api_key_reset">Clave OpenSubtitles eliminada: sin subtítulos de OpenSubtitles</string>
     <string name="settings_subdl_api_key">Clave API de SubDL</string>
     <string name="settings_subdl_api_key_summary">Ingresa tu clave API personal de SubDL para activar SubDL en los ajustes de subtítulos del reproductor</string>
     <string name="settings_subdl_api_key_success">Clave API de SubDL guardada correctamente</string>

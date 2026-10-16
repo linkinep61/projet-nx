@@ -252,10 +252,10 @@
     <string name="settings_tmdb_api_key_success">تم تحديث مفتاح API بنجاح</string>
     <string name="settings_tmdb_api_key_reset">باستخدام مفتاح TMDb API الافتراضي</string>
     <string name="settings_category_subdl">الترجمة (OpenSubtitles / SubDL)</string>
-    <string name="settings_opensubtitles_api_key">مفتاح OpenSubtitles شخصي (اختياري)</string>
-    <string name="settings_opensubtitles_api_key_summary">فارغ = مفاتيح التطبيق المشتركة (حصة مشتركة). للحصول على حصتك الخاصة أنشئ مفتاحاً مجانياً على opensubtitles.com (Consumers) والصقه هنا</string>
+    <string name="settings_opensubtitles_api_key">مفتاح OpenSubtitles (ضروري للترجمة)</string>
+    <string name="settings_opensubtitles_api_key_summary">مطلوب لتنزيل الترجمات من OpenSubtitles. أنشئ مفتاحاً مجانياً على opensubtitles.com (Consumers) والصقه هنا</string>
     <string name="settings_opensubtitles_api_key_success">تم حفظ مفتاح OpenSubtitles</string>
-    <string name="settings_opensubtitles_api_key_reset">تمت إزالة مفتاح OpenSubtitles: المفاتيح المشتركة</string>
+    <string name="settings_opensubtitles_api_key_reset">تمت إزالة مفتاح OpenSubtitles: لا توجد ترجمات OpenSubtitles</string>
     <string name="settings_subdl_api_key">مفتاح API SubDL</string>
     <string name="settings_subdl_api_key_summary">أدخل مفتاح API SubDL الشخصي لتمكين SubDL في إعدادات ترجمة المشغل</string>
     <string name="settings_subdl_api_key_success">تم حفظ مفتاح API SubDL بنجاح</string>

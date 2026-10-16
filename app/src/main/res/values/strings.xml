@@ -466,10 +466,10 @@
     <string name="settings_tmdb_api_key_reset">Using default TMDb API Key</string>
 
     <string name="settings_category_subdl">Sous-titres (OpenSubtitles / SubDL)</string>
-    <string name="settings_opensubtitles_api_key">Clé OpenSubtitles personnelle (facultatif)</string>
-    <string name="settings_opensubtitles_api_key_summary">Vide = clés communes de l\'appli (quota partagé entre tous les utilisateurs). Pour ton propre quota, crée une clé gratuite sur opensubtitles.com (Consumers) et colle-la ici</string>
+    <string name="settings_opensubtitles_api_key">Clé OpenSubtitles (nécessaire pour les sous-titres)</string>
+    <string name="settings_opensubtitles_api_key_summary">Obligatoire pour télécharger des sous-titres OpenSubtitles. Crée une clé gratuite sur opensubtitles.com (Consumers) et colle-la ici</string>
     <string name="settings_opensubtitles_api_key_success">Clé OpenSubtitles enregistrée</string>
-    <string name="settings_opensubtitles_api_key_reset">Clé OpenSubtitles supprimée : retour aux clés communes</string>
+    <string name="settings_opensubtitles_api_key_reset">Clé OpenSubtitles supprimée : plus de sous-titres OpenSubtitles</string>
     <string name="settings_subdl_api_key">SubDL API Key</string>
     <string name="settings_subdl_api_key_summary">Enter your personal SubDL API key to enable SubDL in the player\'s subtitle settings</string>
     <string name="settings_subdl_api_key_success">SubDL API Key saved successfully</string>

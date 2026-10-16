@@ -371,10 +371,10 @@
     <string name="settings_tmdb_api_key_success">API Key aggiornata correttamente</string>
     <string name="settings_tmdb_api_key_reset">API Key di default in uso</string>
     <string name="settings_category_subdl">Sottotitoli (OpenSubtitles / SubDL)</string>
-    <string name="settings_opensubtitles_api_key">Chiave OpenSubtitles personale (facoltativa)</string>
-    <string name="settings_opensubtitles_api_key_summary">Vuoto = chiavi comuni dell\'app (quota condivisa). Per una quota tua, crea una chiave gratuita su opensubtitles.com (Consumers) e incollala qui</string>
+    <string name="settings_opensubtitles_api_key">Chiave OpenSubtitles (necessaria per i sottotitoli)</string>
+    <string name="settings_opensubtitles_api_key_summary">Obbligatoria per scaricare i sottotitoli da OpenSubtitles. Crea una chiave gratuita su opensubtitles.com (Consumers) e incollala qui</string>
     <string name="settings_opensubtitles_api_key_success">Chiave OpenSubtitles salvata</string>
-    <string name="settings_opensubtitles_api_key_reset">Chiave OpenSubtitles rimossa: chiavi comuni</string>
+    <string name="settings_opensubtitles_api_key_reset">Chiave OpenSubtitles rimossa: niente sottotitoli OpenSubtitles</string>
     <string name="settings_subdl_api_key">SubDL API Key</string>
     <string name="settings_subdl_api_key_summary">Inserisci la tua API key personale di SubDL per abilitare SubDL nelle impostazioni dei sottotitoli del player</string>
     <string name="settings_subdl_api_key_success">SubDL API Key salvata con successo</string>

@@ -237,8 +237,8 @@
 
             <Preference
                 android:key="LIEN_CLE_OPENSUBTITLES"
-                android:title="🔗 Créer une clé OpenSubtitles (site)"
-                android:summary="Ouvre opensubtitles.com : compte gratuit → API Consumers → « New consumer » → copier la clé (cocher « Dev mode » = 100 par jour)"
+                android:title="🔗 Créer une clé OpenSubtitles (site des sous-titres)"
+                android:summary="Ouvre opensubtitles.com, le site qui fournit les sous-titres : compte gratuit → API Consumers → « New consumer » → copier la clé (cocher « Dev mode » = 100 par jour)"
                 app:iconSpaceReserved="false" />
 
             <EditTextPreference
