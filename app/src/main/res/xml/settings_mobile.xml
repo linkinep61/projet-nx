@@ -211,6 +211,58 @@
                 android:summary="@string/settings_tmdb_api_key_summary"
                 android:inputType="text"
                 app:iconSpaceReserved="false" />
+
+            <Preference
+                android:key="LIEN_CLE_TMDB"
+                android:title="🔗 Créer une clé TMDB (site)"
+                android:summary="Ouvre themoviedb.org : compte gratuit → Paramètres → API → copier la « Clé d\'API »"
+                app:iconSpaceReserved="false" />
+        </PreferenceCategory>
+
+        <!-- 2026-10-16 (user : « mets le système dans Contenu et sécurité ») : clés des
+             sous-titres déplacées ici depuis Réseau. Clé OpenSubtitles PERSONNELLE facultative
+             (vide = clés communes de l'APK, quota partagé), clé SubDL (obligatoire pour SubDL),
+             langues recherchées. -->
+        <PreferenceCategory
+            android:key="pc_subdl_settings"
+            android:title="@string/settings_category_subdl"
+            app:iconSpaceReserved="false">
+
+            <EditTextPreference
+                android:key="OPENSUBTITLES_API_KEY"
+                android:title="@string/settings_opensubtitles_api_key"
+                android:summary="@string/settings_opensubtitles_api_key_summary"
+                android:inputType="text"
+                app:iconSpaceReserved="false" />
+
+            <Preference
+                android:key="LIEN_CLE_OPENSUBTITLES"
+                android:title="🔗 Créer une clé OpenSubtitles (site)"
+                android:summary="Ouvre opensubtitles.com : compte gratuit → API Consumers → « New consumer » → copier la clé (cocher « Dev mode » = 100 par jour)"
+                app:iconSpaceReserved="false" />
+
+            <EditTextPreference
+                android:key="SUBDL_API_KEY"
+                android:title="@string/settings_subdl_api_key"
+                android:summary="@string/settings_subdl_api_key_summary"
+                android:inputType="text"
+                app:iconSpaceReserved="false" />
+
+            <Preference
+                android:key="LIEN_CLE_SUBDL"
+                android:title="🔗 Créer une clé SubDL (site)"
+                android:summary="Ouvre subdl.com : compte gratuit → Panel → API → copier la clé"
+                app:iconSpaceReserved="false" />
+
+            <!-- 2026-07-22 : langues de sous-titres recherchées (OpenSubtitles + SubDL). -->
+            <MultiSelectListPreference
+                android:key="SUBTITLE_LANGUAGES"
+                android:title="Langues des sous-titres"
+                android:summary="Choisissez les langues à rechercher (le français reste par défaut)"
+                android:entries="@array/subtitle_language_labels"
+                android:entryValues="@array/subtitle_language_values"
+                android:defaultValue="@array/subtitle_language_default"
+                app:iconSpaceReserved="false" />
         </PreferenceCategory>
 
         <PreferenceCategory
@@ -605,28 +657,6 @@
                 app:iconSpaceReserved="false" />
         </PreferenceCategory>
 
-        <PreferenceCategory
-            android:key="pc_subdl_settings"
-            android:title="@string/settings_category_subdl"
-            app:iconSpaceReserved="false">
-
-            <EditTextPreference
-                android:key="SUBDL_API_KEY"
-                android:title="@string/settings_subdl_api_key"
-                android:summary="@string/settings_subdl_api_key_summary"
-                android:inputType="text"
-                app:iconSpaceReserved="false" />
-
-            <!-- 2026-07-22 : langues de sous-titres recherchées (OpenSubtitles + SubDL). -->
-            <MultiSelectListPreference
-                android:key="SUBTITLE_LANGUAGES"
-                android:title="Langues des sous-titres"
-                android:summary="Choisissez les langues à rechercher (le français reste par défaut)"
-                android:entries="@array/subtitle_language_labels"
-                android:entryValues="@array/subtitle_language_values"
-                android:defaultValue="@array/subtitle_language_default"
-                app:iconSpaceReserved="false" />
-        </PreferenceCategory>
     </PreferenceScreen>
 
     <PreferenceScreen

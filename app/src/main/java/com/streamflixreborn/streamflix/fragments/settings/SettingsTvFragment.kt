@@ -656,6 +656,24 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
 
         setupParentalControlPreferences()
 
+        // 2026-10-16 (user : « faut que les gens puissent mettre leur propre clé ») : clé
+        //   OpenSubtitles PERSONNELLE facultative. Vide = clés communes de l'APK.
+        findPreference<EditTextPreference>("OPENSUBTITLES_API_KEY")?.apply {
+            summary = if (UserPreferences.openSubtitlesApiKey.isEmpty()) getString(R.string.settings_opensubtitles_api_key_summary) else masquerCle(UserPreferences.openSubtitlesApiKey)
+            text = UserPreferences.openSubtitlesApiKey
+            setOnPreferenceChangeListener { _, newValue ->
+                val newKey = (newValue as String).trim()
+                UserPreferences.openSubtitlesApiKey = newKey
+                summary = if (newKey.isEmpty()) getString(R.string.settings_opensubtitles_api_key_summary) else masquerCle(newKey)
+                Toast.makeText(
+                    requireContext(),
+                    getString(if (newKey.isEmpty()) R.string.settings_opensubtitles_api_key_reset else R.string.settings_opensubtitles_api_key_success),
+                    Toast.LENGTH_SHORT
+                ).show()
+                true
+            }
+        }
+
         findPreference<EditTextPreference>("SUBDL_API_KEY")?.apply {
             summary = if (UserPreferences.subdlApiKey.isEmpty()) getString(R.string.settings_subdl_api_key_summary) else UserPreferences.subdlApiKey
             text = UserPreferences.subdlApiKey
@@ -2409,6 +2427,11 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             text = UserPreferences.tmdbApiKey
         }
 
+        findPreference<EditTextPreference>("OPENSUBTITLES_API_KEY")?.apply {
+            summary = if (UserPreferences.openSubtitlesApiKey.isEmpty()) getString(R.string.settings_opensubtitles_api_key_summary) else masquerCle(UserPreferences.openSubtitlesApiKey)
+            text = UserPreferences.openSubtitlesApiKey
+        }
+
         findPreference<EditTextPreference>("SUBDL_API_KEY")?.apply {
             summary = if (UserPreferences.subdlApiKey.isEmpty()) getString(R.string.settings_subdl_api_key_summary) else UserPreferences.subdlApiKey
             text = UserPreferences.subdlApiKey
@@ -2872,4 +2895,8 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             }
         }
     }
+
+    /** 2026-10-16 : affiche une clé API sans la dévoiler entièrement (4 premiers + 4 derniers). */
+    private fun masquerCle(cle: String): String =
+        if (cle.length <= 10) "••••" else cle.take(4) + "••••" + cle.takeLast(4)
 }

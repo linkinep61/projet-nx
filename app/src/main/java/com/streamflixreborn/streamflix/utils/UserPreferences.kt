@@ -1082,6 +1082,13 @@ object UserPreferences {
             Key.SUBDL_API_KEY.setString(value)
         }
 
+    /** 2026-10-16 : clé OpenSubtitles PERSONNELLE (facultative). Vide = clés communes de l'APK. */
+    var openSubtitlesApiKey: String
+        get() = Key.OPENSUBTITLES_API_KEY.getString() ?: ""
+        set(value) {
+            Key.OPENSUBTITLES_API_KEY.setString(value)
+        }
+
     var bypassWsAdvertisedHost: String
         get() = Key.BYPASS_WS_ADVERTISED_HOST.getString() ?: ""
         set(value) {
@@ -1482,6 +1489,7 @@ object UserPreferences {
         IMMERSIVE_MODE,
         TMDB_API_KEY,
         SUBDL_API_KEY,
+        OPENSUBTITLES_API_KEY,
         FORCE_EXTRA_BUFFERING,
         AUTOPLAY_BUFFER,
         SERVER_AUTO_SUBTITLES_DISABLED,

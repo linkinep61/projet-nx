@@ -48,10 +48,32 @@ object OpenSubtitles {
      * Rotation : à chaque requête on prend une key différente. Si une key
      * tombe en quota dépassé (HTTP 429 ou 406), on l'écarte temporairement.
      */
-    private val keysPool: List<String> = BuildConfig.OPENSUBTITLES_API_KEY
+    /** Clés communes compilées dans l'APK (secret CI `OPENSUBTITLES_API_KEY`, cf. CLAUDE.md « CLÉS API »). */
+    private val keysEmbarquees: List<String> = BuildConfig.OPENSUBTITLES_API_KEY
         .split(",")
         .map { it.trim() }
         .filter { it.isNotBlank() }
+
+    /**
+     * 2026-10-16 (user : « faut que les gens puissent mettre leur propre clé ») : si l'utilisateur
+     * a saisi une clé personnelle dans Paramètres (comme pour SubDL), elle est utilisée SEULE
+     * (= son propre quota de 100/jour, pas le quota commun) ; sinon, les clés embarquées.
+     */
+    private val keysPool: List<String>
+        get() {
+            val perso = try { UserPreferences.openSubtitlesApiKey.trim() } catch (_: Throwable) { "" }
+            return if (perso.isNotBlank()) listOf(perso) else keysEmbarquees
+        }
+
+    /** Levée quand toutes les clés disponibles ont dépassé leur quota du jour. */
+    class QuotaDepasseException : Exception(
+        "Quota OpenSubtitles du jour atteint — ajoute ta clé OpenSubtitles gratuite (opensubtitles.com) dans Paramètres pour continuer"
+    )
+
+    /** Aucune clé du tout (APK compilé sans secret ET pas de clé perso). */
+    class AucuneCleException : Exception(
+        "Aucune clé OpenSubtitles — ajoute ta clé gratuite (opensubtitles.com) dans Paramètres"
+    )
 
     /** Map key -> timestamp ms du prochain retry (si quota dépassé). */
     private val keyCooldowns = mutableMapOf<String, Long>()
@@ -134,7 +156,8 @@ object OpenSubtitles {
         episode: Int? = null,
         subLanguageId: String? = null,
     ): List<Subtitle> {
-        if (keysPool.isEmpty()) return emptyList()
+        // 2026-10-16 : plus de liste vide silencieuse — le lecteur affiche la cause.
+        if (keysPool.isEmpty()) throw AucuneCleException()
 
         // ISO 639-2/B (fre) -> ISO 639-1 (fr) pour la nouvelle API
         val lang = when (subLanguageId?.lowercase()) {
@@ -151,7 +174,7 @@ object OpenSubtitles {
 
         // Essaie chaque key du pool jusqu'à succès (rotation auto)
         repeat(keysPool.size.coerceAtLeast(1)) {
-            val key = nextKey() ?: return emptyList()
+            val key = nextKey() ?: throw QuotaDepasseException()
             try {
                 val resp = service.searchSubtitles(
                     apiKey = key,
@@ -172,7 +195,8 @@ object OpenSubtitles {
                 }
             }
         }
-        return emptyList()
+        // Toutes les clés essayées ont répondu 406/429 → quota du jour épuisé.
+        throw QuotaDepasseException()
     }
 
     private interface Service {

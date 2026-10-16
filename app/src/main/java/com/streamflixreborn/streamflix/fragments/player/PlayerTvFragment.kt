@@ -1890,7 +1890,13 @@ class PlayerTvFragment : Fragment() {
                                 binding.settings.openSubtitles = state.subtitles
                             }
 
-                            is PlayerViewModel.SubtitleState.FailedOpenSubtitles -> {}
+                            is PlayerViewModel.SubtitleState.FailedOpenSubtitles -> {
+                        // 2026-10-16 : quota du jour épuisé / aucune clé → le dire (avant : liste vide muette).
+                        if (state.error is com.streamflixreborn.streamflix.utils.OpenSubtitles.QuotaDepasseException ||
+                            state.error is com.streamflixreborn.streamflix.utils.OpenSubtitles.AucuneCleException) {
+                            try { Toast.makeText(requireContext(), state.error.message, Toast.LENGTH_LONG).show() } catch (_: Exception) {}
+                        }
+                    }
 
                             PlayerViewModel.SubtitleState.DownloadingOpenSubtitle -> {}
                             is PlayerViewModel.SubtitleState.SuccessDownloadingOpenSubtitle -> {

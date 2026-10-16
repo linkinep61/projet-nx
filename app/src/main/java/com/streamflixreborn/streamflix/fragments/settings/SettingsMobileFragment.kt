@@ -614,6 +614,37 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             }
         }
 
+        // 2026-10-16 (user : « mets un lien pour aller directement sur le site créer la clé ») :
+        //   une ligne « 🔗 Créer une clé … » sous chaque champ de clé API.
+        mapOf(
+            "LIEN_CLE_TMDB" to "https://www.themoviedb.org/settings/api",
+            "LIEN_CLE_OPENSUBTITLES" to "https://www.opensubtitles.com/fr/consumers",
+            "LIEN_CLE_SUBDL" to "https://subdl.com/panel/api"
+        ).forEach { (cle, url) ->
+            findPreference<androidx.preference.Preference>(cle)?.setOnPreferenceClickListener {
+                ouvrirSiteCle(url)
+                true
+            }
+        }
+
+        // 2026-10-16 (user : « faut que les gens puissent mettre leur propre clé ») : clé
+        //   OpenSubtitles PERSONNELLE facultative. Vide = clés communes de l'APK.
+        findPreference<EditTextPreference>("OPENSUBTITLES_API_KEY")?.apply {
+            summary = if (UserPreferences.openSubtitlesApiKey.isEmpty()) getString(R.string.settings_opensubtitles_api_key_summary) else masquerCle(UserPreferences.openSubtitlesApiKey)
+            text = UserPreferences.openSubtitlesApiKey
+            setOnPreferenceChangeListener { _, newValue ->
+                val newKey = (newValue as String).trim()
+                UserPreferences.openSubtitlesApiKey = newKey
+                summary = if (newKey.isEmpty()) getString(R.string.settings_opensubtitles_api_key_summary) else masquerCle(newKey)
+                Toast.makeText(
+                    requireContext(),
+                    getString(if (newKey.isEmpty()) R.string.settings_opensubtitles_api_key_reset else R.string.settings_opensubtitles_api_key_success),
+                    Toast.LENGTH_SHORT
+                ).show()
+                true
+            }
+        }
+
         findPreference<EditTextPreference>("SUBDL_API_KEY")?.apply {
             summary = if (UserPreferences.subdlApiKey.isEmpty()) getString(R.string.settings_subdl_api_key_summary) else UserPreferences.subdlApiKey
             text = UserPreferences.subdlApiKey
@@ -2046,6 +2077,11 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             text = UserPreferences.tmdbApiKey
         }
 
+        findPreference<EditTextPreference>("OPENSUBTITLES_API_KEY")?.apply {
+            summary = if (UserPreferences.openSubtitlesApiKey.isEmpty()) getString(R.string.settings_opensubtitles_api_key_summary) else masquerCle(UserPreferences.openSubtitlesApiKey)
+            text = UserPreferences.openSubtitlesApiKey
+        }
+
         findPreference<EditTextPreference>("SUBDL_API_KEY")?.apply {
             summary = if (UserPreferences.subdlApiKey.isEmpty()) getString(R.string.settings_subdl_api_key_summary) else UserPreferences.subdlApiKey
             text = UserPreferences.subdlApiKey
@@ -2387,6 +2423,25 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
                 android.util.Log.w("Settings", "téléchargement dernière version : ${e.message}")
                 context?.let { Toast.makeText(it, "Téléchargement impossible : ${e.message}", Toast.LENGTH_LONG).show() }
             }
+        }
+    }
+
+    /** 2026-10-16 : affiche une clé API sans la dévoiler entièrement (4 premiers + 4 derniers). */
+    private fun masquerCle(cle: String): String =
+        if (cle.length <= 10) "••••" else cle.take(4) + "••••" + cle.takeLast(4)
+
+    /** 2026-10-16 : ouvre le site de création d'une clé API ; sans navigateur (box TV) → affiche l'adresse. */
+    private fun ouvrirSiteCle(url: String) {
+        val ctx = context ?: return
+        try {
+            startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (_: Exception) {
+            androidx.appcompat.app.AlertDialog.Builder(ctx)
+                .setTitle("Pas de navigateur sur cet appareil")
+                .setMessage("Ouvre cette adresse sur ton téléphone ou ton PC :\n\n$url")
+                .setPositiveButton("OK", null)
+                .show()
         }
     }
 }

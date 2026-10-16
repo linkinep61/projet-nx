@@ -338,7 +338,11 @@
     <string name="settings_tmdb_api_key_summary">Leer lassen für Standard-API-Key</string>
     <string name="settings_tmdb_api_key_success">API-Key erfolgreich aktualisiert</string>
     <string name="settings_tmdb_api_key_reset">Standard-API-Key wird verwendet</string>
-    <string name="settings_category_subdl">SubDL-Einstellungen</string>
+    <string name="settings_category_subdl">Untertitel (OpenSubtitles / SubDL)</string>
+    <string name="settings_opensubtitles_api_key">Eigener OpenSubtitles-Schlüssel (optional)</string>
+    <string name="settings_opensubtitles_api_key_summary">Leer = gemeinsame Schlüssel der App (geteiltes Kontingent). Für ein eigenes Kontingent einen kostenlosen Schlüssel auf opensubtitles.com (Consumers) erstellen und hier einfügen</string>
+    <string name="settings_opensubtitles_api_key_success">OpenSubtitles-Schlüssel gespeichert</string>
+    <string name="settings_opensubtitles_api_key_reset">OpenSubtitles-Schlüssel entfernt: gemeinsame Schlüssel</string>
     <string name="settings_subdl_api_key">SubDL API-Key</string>
     <string name="settings_subdl_api_key_summary">Eigener SubDL API-Key für Untertitel</string>
     <string name="settings_subdl_api_key_success">SubDL API-Key gespeichert</string>
