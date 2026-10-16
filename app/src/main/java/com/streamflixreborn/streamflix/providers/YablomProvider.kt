@@ -47,9 +47,20 @@ object YablomProvider {
     //   obrigoz→vozgov) et disent qu'elles seront supprimées sous 24 h. On garde donc
     //   TOUTES les destinations connues, gozlov (la plus récente) en tête, pour avoir
     //   un point d'entrée au retour du serveur même si les pages de passage ont disparu.
+    //   Retour du serveur le même jour : vaznob.com et onwaz.com servent le catalogue
+    //   (api_search OK, Inception id 14082), gozlov.com aussi. L'annuaire chezlesducs listait
+    //   7 pages de passage (→ gozlov, vaznob, yakmov, pirvab, onwaz) et 6 SITES-VITRINES en
+    //   .fr/.net (choupox, justdaz, rikmod, saypap, zaniob, zifub) dont toutes les jaquettes
+    //   mènent à gupy.fr (403) : ce ne sont pas des façades, on les ignore (VITRINES_EXCLUES).
     private val FACADES = listOf(
-        "gozlov.com", "fakrov.com", "pirvab.com", "yakmov.com", "vozgov.com",
-        "www.ilmiv.com", "yablom.com", "www.aplouf.com", "obrigoz.com", "motomaz.com", "dospiv.com",
+        "vaznob.com", "onwaz.com", "gozlov.com", "apwav.com",
+        "fakrov.com", "pirvab.com", "yakmov.com", "vozgov.com",
+        "www.ilmiv.com", "gribip.com", "imbrav.com", "www.kidraz.com", "pidoov.com", "zavzip.com",
+        "yablom.com", "www.aplouf.com", "obrigoz.com", "motomaz.com", "dospiv.com",
+    )
+    /** Sites listés par l'annuaire qui ne sont PAS la plateforme (vitrines → gupy.fr mort). */
+    private val VITRINES_EXCLUES = setOf(
+        "choupox", "justdaz", "rikmod", "saypap", "zaniob", "zifub", "gupy",
     )
     private val RX_DEMENAGEMENT = Regex("""maintenant(?:\s|%20|&nbsp;)+sur(?:\s|%20|&nbsp;)+([a-z0-9-]+(?:\.[a-z0-9-]+)+)""", RegexOption.IGNORE_CASE)
     private val RX_DOSSIER = Regex("""<a\b[^>]*\bhref=["']([a-z0-9]{5,20})["']""", RegexOption.IGNORE_CASE)
@@ -83,7 +94,9 @@ object YablomProvider {
                 annuaireLu = true
                 val annuaire = get(ANNUAIRE, referer = ANNUAIRE) ?: break
                 RX_LIEN_ANNUAIRE.findAll(annuaire).map { it.groupValues[1].lowercase() }
-                    .filter { it !in vus }.distinct().forEach { file.addLast(it) }
+                    .filter { it !in vus }
+                    .filter { h -> VITRINES_EXCLUES.none { h.removePrefix("www.").startsWith("$it.") } }
+                    .distinct().forEach { file.addLast(it) }
                 if (file.isEmpty()) break
                 Log.i(TAG, "annuaire : ${file.size} façades candidates")
             }

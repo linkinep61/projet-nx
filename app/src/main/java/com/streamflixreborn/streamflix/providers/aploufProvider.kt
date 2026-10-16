@@ -49,7 +49,8 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     // Fallback portal : kidraz.com (même backend, fusionné 2026-05-21)
     private const val FALLBACK_PORTAL_URL = "http://chezlesducs.free.fr/films.php"
 
-    override val defaultBaseUrl: String = "https://fakrov.com/aab2ae3/home/fakrov"
+    // 2026-10-16 : fakrov mort, vaznob.com sert le catalogue (dossier 1c9b835).
+    override val defaultBaseUrl: String = "https://vaznob.com/1c9b835/home/vaznob"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -477,10 +478,20 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     //   passent EN TÊTE ; les anciennes restent pour leur avis « maintenant sur X », suivi
     //   automatiquement par [essayerMiroir].
     private val MIROIRS_CONNUS = listOf(
-        "https://gozlov.com/",   // 2026-10-16 : annoncé par ilmiv.com (« ilmiv devient gozlov.com »)
+        // 2026-10-16 : retour du serveur — vaznob, onwaz et gozlov servent le catalogue
+        //   (vérifié : api_search renvoie Inception id 14082 sur vaznob et onwaz).
+        "https://vaznob.com/",
+        "https://onwaz.com/",
+        "https://gozlov.com/",
+        "https://apwav.com/",    // signalé par le user (dossier 4d44856)
         "https://fakrov.com/",   // le plus rapide mesuré (~0,13 s), successeur direct d'aplouf
         "https://pirvab.com/",
-        "https://www.ilmiv.com/", // page de passage vers gozlov (supprimée sous 24 h selon elle)
+        "https://www.ilmiv.com/", // pages de passage (« X devient Y »), suivies par essayerMiroir
+        "https://gribip.com/",
+        "https://imbrav.com/",
+        "https://www.kidraz.com/",
+        "https://pidoov.com/",
+        "https://zavzip.com/",
         "https://yakmov.com/",
         "https://vozgov.com/",
         "https://www.aplouf.com/",
