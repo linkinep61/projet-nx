@@ -55,7 +55,10 @@ object NetworkClient {
         HttpLoggingInterceptor { message ->
             Log.d(TAG, "[OkHttp] $message")
         }.apply {
-            level = HttpLoggingInterceptor.Level.HEADERS
+            // 2026-10-17 : ~2 600 lignes/min au lancement d'un film, même dans l'APK publié —
+            //   du CPU et de la mémoire pour rien. Debug uniquement, et jamais sur appareil très faible.
+            level = if (com.streamflixreborn.streamflix.BuildConfig.DEBUG && !TamponLeger.appareilTresFaible)
+                HttpLoggingInterceptor.Level.HEADERS else HttpLoggingInterceptor.Level.NONE
         }
     }
 

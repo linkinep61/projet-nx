@@ -4026,6 +4026,16 @@ object LiveTvHubProvider : Provider, IptvProvider {
         "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-replay.m3u"
     @Volatile private var replayCacheTs: Long = 0L
     @Volatile private var replayCacheSections: List<Category> = emptyList()
+
+    /** 2026-10-17 (box Bouygues, MemDiag : TV Hub gardait ~38 Mo après une recherche de serveurs) :
+     *  sur appareil très faible, on lâche le catalogue replay en RAM après la recherche. Le cache
+     *  DISQUE reste : la prochaine ouverture le relit sans réseau. */
+    fun libererCatalogueReplay() {
+        if (replayCacheSections.isEmpty()) return
+        replayCacheSections = emptyList()
+        replayCacheTs = 0L
+        Log.i(TAG, "catalogue replay libéré de la RAM (appareil très faible)")
+    }
     /** Map si_id → titre programme, pour réutiliser dans getServers. */
     private val replayProgramTitles: MutableMap<String, String> = java.util.concurrent.ConcurrentHashMap()
     /** 2026-06-18 (Phase 2 — TF1+/M6) : map siId → src complet (= "francetv://..."

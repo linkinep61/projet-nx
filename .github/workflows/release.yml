@@ -53,9 +53,11 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           echo "Injecting version $TAG from tag"
-          # Calculate versionCode from tag parts: major*10000 + minor*100 + patch
+          # Calculate versionCode from tag parts: major*100000 + minor*1000 + patch
+          # 2026-10-17 : ancienne formule major*10000 + minor*100 + patch → 1.8.0 (10800) serait
+          #   PLUS PETIT que 1.7.260 (10960) et Android refuserait la mise à jour. Correctif < 1000.
           IFS='.' read -r MAJOR MINOR PATCH <<< "$TAG"
-          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          VERSION_CODE=$((MAJOR * 100000 + MINOR * 1000 + PATCH))
           sed -i "s/versionCode [0-9]*/versionCode $VERSION_CODE/" app/build.gradle
           sed -i "s/versionName \"[^\"]*\"/versionName \"$TAG\"/" app/build.gradle
           echo "Set versionName=$TAG versionCode=$VERSION_CODE"

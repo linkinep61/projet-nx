@@ -76,23 +76,37 @@ object VegetaVod {
     @Volatile private var cache: Index? = null
     @Volatile private var cacheTs = 0L
     private val verrou = Mutex()
+    // 2026-10-17 (box Bouygues, MemDiag) : après une recherche de serveurs, l'index complet restait
+    //   en mémoire 6 h (~21 Mo gardés). Sur appareil très faible, alleger() ne garde que le strict nécessaire
+    //   à la LECTURE (rien : l'URL est déjà dans le serveur) ; le catalogue complet est relu (cache disque HTTP) à la prochaine recherche.
+    @Volatile private var leger = false
 
     /** Index déjà en mémoire (le dialogue est synchrone). */
-    fun indexSiCharge(): Index? = cache
+    fun indexSiCharge(): Index? = if (leger) null else cache
+
+    fun alleger() {
+        val c = cache ?: return
+        if (leger) return
+        cache = Index(serveurs = c.serveurs, films = emptyList(), series = emptyList())
+        leger = true
+        shards.clear()
+        Log.i(TAG, "index allégé (appareil très faible)")
+    }
 
     /** Télécharge l'index (ou rend le cache s'il est frais). Un échec ne vide jamais un cache garni. */
     suspend fun index(forcer: Boolean = false): Index? = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
-        cache?.let { if (!forcer && now - cacheTs < TTL_MS) return@withContext it }
+        cache?.let { if (!leger && !forcer && now - cacheTs < TTL_MS) return@withContext it }
         verrou.withLock {
-            cache?.let { if (!forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withLock it }
+            cache?.let { if (!leger && !forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withLock it }
             // ⚠ Index de ~10 Mo (3 Mo gzip) : lecture EN FLUX (JsonReader), jamais via un
             //   JSONObject géant — sur une box 1 Go, la chaîne + l'arbre org.json = OOM.
             val idx = runCatching { telechargerIndex("$INDEX_URL?h=${System.currentTimeMillis() / 3_600_000L}") }
                 .getOrElse { Log.w(TAG, "index illisible : ${it.message}"); null }
                 ?: return@withLock cache
-            if (idx.films.isEmpty() && idx.series.isEmpty() && cache != null) return@withLock cache
+            if (idx.films.isEmpty() && idx.series.isEmpty() && cache != null && !leger) return@withLock cache
             cache = idx
+            leger = false
             cacheTs = System.currentTimeMillis()
             Log.i(TAG, "index chargé : ${idx.films.size} films, ${idx.series.size} séries, ${idx.serveurs.size} serveurs")
             idx
@@ -241,7 +255,7 @@ object VegetaVod {
 
     /** Charge l'index en fond (au premier affichage d'Autres Replays). */
     fun prechauffer() {
-        if (cache != null && System.currentTimeMillis() - cacheTs < TTL_MS) return
+        if (cache != null && !leger && System.currentTimeMillis() - cacheTs < TTL_MS) return
         if (!prechauffageEnCours.compareAndSet(false, true)) return
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
             try { index() } catch (e: Exception) { Log.w(TAG, "préchauffage KO : ${e.message}") }

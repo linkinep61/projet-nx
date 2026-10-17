@@ -76,13 +76,26 @@ object OlaVod {
     @Volatile private var cacheTs = 0L
     private val verrou = Mutex()
     private val prechauffage = AtomicBoolean(false)
+    // 2026-10-17 (box Bouygues, MemDiag) : après une recherche de serveurs, l'index complet restait
+    //   en mémoire 6 h (~25 Mo gardés). Sur appareil très faible, alleger() ne garde que le strict nécessaire
+    //   à la LECTURE (les portails) ; le catalogue complet est relu (cache disque HTTP) à la prochaine recherche.
+    @Volatile private var leger = false
 
-    fun indexSiCharge(): Index? = cache
+    fun indexSiCharge(): Index? = if (leger) null else cache
+
+    fun alleger() {
+        val c = cache ?: return
+        if (leger) return
+        cache = Index(groupes = c.groupes, films = emptyList(), series = emptyList(), sgroupes = c.sgroupes)
+        leger = true
+        categoriesCalculees.clear()
+        Log.i(TAG, "index allégé (appareil très faible) : seuls les portails restent en mémoire")
+    }
 
     suspend fun index(forcer: Boolean = false): Index? = withContext(Dispatchers.IO) {
-        cache?.let { if (!forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withContext it }
+        cache?.let { if (!leger && !forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withContext it }
         verrou.withLock {
-            cache?.let { if (!forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withLock it }
+            cache?.let { if (!leger && !forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withLock it }
             val h = System.currentTimeMillis() / 3_600_000L
             // Films et séries chargés séparément : l'un peut manquer sans bloquer l'autre.
             val t0 = System.currentTimeMillis()
@@ -102,8 +115,9 @@ object OlaVod {
                 series = s?.series ?: cache?.series.orEmpty(),
                 sgroupes = s?.groupes ?: cache?.sgroupes.orEmpty(),
             )
-            if (idx.films.isEmpty() && idx.series.isEmpty() && cache != null) return@withLock cache
+            if (idx.films.isEmpty() && idx.series.isEmpty() && cache != null && !leger) return@withLock cache
             cache = idx
+            leger = false
             cacheTs = System.currentTimeMillis()
             Log.i(TAG, "index chargé : ${idx.films.size} films, ${idx.series.size} séries")
             idx
@@ -111,7 +125,7 @@ object OlaVod {
     }
 
     fun prechauffer() {
-        if (cache != null && System.currentTimeMillis() - cacheTs < TTL_MS) return
+        if (cache != null && !leger && System.currentTimeMillis() - cacheTs < TTL_MS) return
         if (!prechauffage.compareAndSet(false, true)) return
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
             try { index() } catch (e: Exception) { Log.w(TAG, "préchauffage KO : ${e.message}") }

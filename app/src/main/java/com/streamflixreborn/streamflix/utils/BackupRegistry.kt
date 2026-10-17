@@ -166,9 +166,17 @@ object BackupRegistry {
     //   aucune qui marche, il faut qu'il aille en rechercher d'autres »). Les plus gourmandes, mesurées
     //   sur l'Oppo (pic par fiche : TV Hub +171 Mo, ONYX +83, Cinélux +54, Ciné Films +25), passent
     //   en fin de file. Le sémaphore de kotlinx est équitable : l'ordre d'arrivée = l'ordre de passage.
-    private val legerGate = Semaphore(3)
+    // 2026-10-17 (user : « réduire encore le nombre de serveurs en mode léger ») : 2 à la fois.
+    private val legerGate = Semaphore(2)
     private val LOURDES_EN_FIN_MODE_LEGER = setOf("TV Hub", "ONYX", "Cinélux", "Ciné Films")
     private const val RETARD_LOURDES_MODE_LEGER_MS = 5_000L
+    // 2026-10-17 - APPAREIL TRÈS FAIBLE (box Bouygues 4K, 128 Mo par appli) : gourmandes MESURÉES
+    //   sur la box avec MemDiag (pic / gardé après) : TV Hub +73/38, Cinélux +71/25, Coflix Boston
+    //   +33/6, Ciné Films +21/21 Mo. Toutes les autres ≤ 12 Mo (ONYX +6,5 : léger ici).
+    //   Sur ces appareils, ces 4 sources ATTENDENT que la vidéo ne joue plus (arrêt ou plantage)
+    //   avant de partir : jamais pendant la lecture. Aucune n'est supprimée, les légères continuent
+    //   normalement (règle des 5 sources inchangée).
+    private val GOURMANDES_APPAREIL_TRES_FAIBLE = setOf("TV Hub", "Cinélux", "Coflix Boston", "Ciné Films")
     // 2026-10-04 (user) — mode léger, deux règles de plus, AUCUNE source n'est jamais sautée :
     //   1. les gourmandes passent une SEULE à la fois (jamais 171 + 83 + 54 Mo empilés) ;
     //   2. la recherche se met en PAUSE dès que la vidéo joue ET qu'au moins 5 sources DIFFÉRENTES
@@ -1326,11 +1334,27 @@ object BackupRegistry {
                         }
                         if (annonce) Log.i(TAG, "$source → reprise de la recherche")
                     }
-                    val lourde = source in LOURDES_EN_FIN_MODE_LEGER
+                    val tresFaible = TamponLeger.appareilTresFaible
+                    val lourde = if (tresFaible) source in GOURMANDES_APPAREIL_TRES_FAIBLE
+                                 else source in LOURDES_EN_FIN_MODE_LEGER
                     if (lourde) kotlinx.coroutines.delay(RETARD_LOURDES_MODE_LEGER_MS)
+                    // Appareil très faible : une gourmande ne part JAMAIS pendant la lecture.
+                    suspend fun attendreFinLectureSiGourmande() {
+                        if (!(tresFaible && lourde)) return
+                        var annonce = false
+                        while (lectureEnCours) {
+                            if (!annonce) {
+                                Log.i(TAG, "$source → repoussée (gourmande, vidéo en lecture, appareil très faible)")
+                                annonce = true
+                            }
+                            kotlinx.coroutines.delay(2_000L)
+                        }
+                        if (annonce) Log.i(TAG, "$source → lancée (vidéo arrêtée)")
+                    }
+                    attendreFinLectureSiGourmande()
                     pauseSiLectureSuffit()
                     if (lourde) {
-                        lourdeGate.withPermit { legerGate.withPermit { pauseSiLectureSuffit(); executer() } }
+                        lourdeGate.withPermit { legerGate.withPermit { attendreFinLectureSiGourmande(); pauseSiLectureSuffit(); executer() } }
                     } else {
                         legerGate.withPermit { pauseSiLectureSuffit(); executer() }
                     }
@@ -1403,6 +1427,7 @@ object BackupRegistry {
                 saison = key.season,
                 episode = key.episode,
             )
+            if (TamponLeger.appareilTresFaible) VegetaVod.alleger()
             vegeta
         } }
         // 2026-09-26 (user : « les serveurs… leur trouver un nom différent, car ils ne sont pas au
@@ -1412,7 +1437,7 @@ object BackupRegistry {
             runCatching {
                 if (key.isMovie) OlaVod.serveursPour(resolvedTmdbId, knownTitles, key.year)
                 else OlaVod.serveursEpisodePour(resolvedTmdbId, knownTitles, key.season ?: 0, key.episode ?: 0)
-            }.getOrDefault(emptyList())
+            }.getOrDefault(emptyList()).also { if (TamponLeger.appareilTresFaible) OlaVod.alleger() }
         } }
         // 2026-09-06 (user : « un site avec des vieilles séries… juste un backup ») : Tokyvideo —
         //   Columbo, X-Files, Code Quantum, Magnum, Goldorak… + collections de films, index
@@ -1656,6 +1681,10 @@ object BackupRegistry {
                 emit("TV Hub") {
                     com.streamflixreborn.streamflix.providers.LiveTvHubProvider
                         .fetchTvHubReplayBackupServers(videoType, key.season, key.episode, knownTitles.toList())
+                        .also {
+                            if (TamponLeger.appareilTresFaible)
+                                com.streamflixreborn.streamflix.providers.LiveTvHubProvider.libererCatalogueReplay()
+                        }
                 }
             }
 

@@ -203,7 +203,16 @@ object UserPreferences {
     //   ne sont concernés qu'au démarrage suivant.
     private const val KEY_MODE_LEGER = "pref_mode_leger"
     val modeLeger: Boolean
-        get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_MODE_LEGER, false) else false
+        get() {
+            if (!::prefs.isInitialized) return TamponLeger.appareilTresFaible
+            // 2026-10-17 : jamais réglé + appareil très faible (box 1,5 Go) → activé d'office et
+            //   ENREGISTRÉ, pour que l'interrupteur de Paramètres l'affiche coché (désactivable).
+            if (!prefs.contains(KEY_MODE_LEGER) && TamponLeger.appareilTresFaible) {
+                prefs.edit().putBoolean(KEY_MODE_LEGER, true).apply()
+                return true
+            }
+            return prefs.getBoolean(KEY_MODE_LEGER, false)
+        }
 
     private const val KEY_BACKUPS_ENABLED = "pref_backups_enabled"
     val backupsEnabled: Boolean

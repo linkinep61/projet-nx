@@ -34,11 +34,26 @@ object TamponLeger {
         }.getOrDefault(false)
     }
 
+    /**
+     * 2026-10-17 (user, box Bouygues 4K : 1,5 Go, plafond 128 Mo par appli, l'appli tuée au lancement
+     *   d'un film) : appareil TRÈS faible = isLowRamDevice, ou plafond mémoire par appli ≤ 128 Mo.
+     *   Sur ces appareils : mode léger activé d'office (modifiable dans Paramètres), journaux réseau
+     *   coupés, tampon vidéo 12 Mo. Les téléphones/box normaux (256 Mo et plus) ne sont pas concernés.
+     */
+    val appareilTresFaible: Boolean by lazy {
+        runCatching {
+            val am = com.streamflixreborn.streamflix.StreamFlixApp.instance
+                .getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            am?.isLowRamDevice == true || (am?.memoryClass ?: 512) <= 128
+        }.getOrDefault(false)
+    }
+
     fun loadControl(mini: Boolean, extraBuffering: Boolean, rebufferMs: Int): LoadControl? {
         val leger = UserPreferences.modeLeger
         val faible = appareilFaible
         if (!leger && !faible) return null
         val mo = when {
+            appareilTresFaible -> if (mini) 8 else 12
             faible -> if (mini) 12 else 24
             else -> if (mini) 16 else 32
         }
