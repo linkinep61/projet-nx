@@ -5445,7 +5445,7 @@ class PlayerMobileFragment : Fragment() {
                 }
                 if (videoGroups.isEmpty()) return  // audio-only legit
                 // 2026-10-16 : « Pas de sous-titres → Télécharger » (comme VLC).
-                try { proposerSousTitres(tracks) } catch (_: Exception) {}
+                // 2026-10-18 (user : « un message à chaque fois qu'on lance une vidéo, c'est abusé, on retire carrément ») : plus de bandeau « Pas de sous-titres » ; le téléchargement reste dans ⋮ → Sous-titres.
                 // Y a-t-il AU MOINS un track vidéo supporté par les décodeurs ?
                 val anyVideoSupported = videoGroups.any { group ->
                     (0 until group.length).any { i -> group.isTrackSupported(i) }

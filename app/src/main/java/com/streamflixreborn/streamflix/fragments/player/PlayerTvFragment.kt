@@ -6168,7 +6168,7 @@ class PlayerTvFragment : Fragment() {
                     val videoGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
                     val videoTracks = videoGroups.sumOf { it.length }
                     // 2026-10-16 : « Pas de sous-titres → où les télécharger » (comme VLC).
-                    if (videoGroups.isNotEmpty()) try { proposerSousTitres(tracks) } catch (_: Exception) {}
+                    // 2026-10-18 (user : « un message à chaque fois qu'on lance une vidéo, c'est abusé, on retire carrément ») : plus de bandeau « Pas de sous-titres » ; le téléchargement reste dans ⋮ → Sous-titres.
                     val selectedHeights = buildList {
                         videoGroups.forEach { group ->
                             for (i in 0 until group.length) {
