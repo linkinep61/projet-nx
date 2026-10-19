@@ -667,10 +667,14 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
 
     override suspend fun getHome(): List<Category> = coroutineScope {
         // 2026-07-08 : plus de warm-up cookie — net52 est anonyme, aucun verify.php nécessaire.
+        // 2026-10-19 (user « est-ce qu'on a d'autres carrousels qui sont bloqués pareil ») :
+        //   page 1 fixe = les mêmes 15 films populaires pendant des semaines. Page tirée au
+        //   hasard (1..3) → le carrousel varie d'une ouverture à l'autre. Le filtre des
+        //   plateformes NetMirror (withWatchProviders) est conservé : jamais de titre absent.
         val trendingD = async {
             runCatching {
                 TMDb3.Discover.movie(
-                    page = 1, language = language, region = "FR",
+                    page = (1..3).random(), language = language, region = "FR",
                     sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
                     watchRegion = "FR",
                     withWatchProviders = nmWatchProviders(),
@@ -753,9 +757,18 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         val categories = mutableListOf<Category>()
 
         // Featured (carrousel)
+        // 2026-10-19 : carrousel = 8 films + 7 séries populaires (plateformes NetMirror), seulement
+        //   ceux qui ont une vraie bannière TMDB, ordre MÉLANGÉ à chaque ouverture. Avant : films
+        //   seuls, toujours les 15 mêmes, dans le même ordre. popularTvD est déjà chargé pour la
+        //   rangée « Séries populaires » → aucune requête en plus.
         val trending = trendingD.await()
-        if (trending.isNotEmpty()) {
-            categories.add(Category(name = Category.FEATURED, list = trending.take(15).map(mapMovie)))
+        val seriesCarrousel = runCatching { popularTvD.await() }.getOrDefault(emptyList())
+        val carrousel: List<AppAdapter.Item> = (
+            trending.filter { it.backdropPath != null }.take(8).map(mapMovie) +
+                seriesCarrousel.filter { it.backdropPath != null }.take(7).map(mapTv)
+            ).shuffled()
+        if (carrousel.isNotEmpty()) {
+            categories.add(Category(name = Category.FEATURED, list = carrousel))
         }
 
         // Nouveaux films

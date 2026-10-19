@@ -684,7 +684,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         }
         val finalCarousel = if (carouselItems.size >= 5) carouselItems else featuredItems
         if (finalCarousel.isNotEmpty()) {
-            categories.add(Category(name = Category.FEATURED, list = finalCarousel))
+            // 2026-10-19 : ordre MÉLANGÉ à chaque ouverture (le « TOP » du site bouge peu).
+            categories.add(Category(name = Category.FEATURED, list = finalCarousel.shuffled()))
         }
 
         // 2026-07-04 : DÉDUP GLOBALE inter-catégories — un film n'apparaît QUE dans

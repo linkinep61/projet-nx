@@ -19,6 +19,16 @@ object TmdbUtils {
     private val movieAgeCache = ConcurrentHashMap<String, Int>()
     private val tvAgeCache = ConcurrentHashMap<String, Int>()
 
+    // 2026-10-19 : variante LÉGÈRE de getMovie pour BackupRegistry — rend seulement l'id TMDB du
+    //   meilleur film (même matching titre + année que getMovie), SANS la fiche complète (casting,
+    //   recommandations, vidéos, ids externes) que getMovie télécharge ensuite. Mesuré sur la TV :
+    //   getMovie retardait le démarrage des backups d'environ 3 s.
+    suspend fun getMovieId(title: String, year: Int? = null, language: String? = null): String? {
+        if (!UserPreferences.enableTmdb) return null
+        return try {
+            findBestMovieMatch(title, year ?: extractYear(title), language)?.id?.toString()
+        } catch (_: Exception) { null }
+    }
     suspend fun getMovie(title: String, year: Int? = null, language: String? = null): Movie? {
         if (!UserPreferences.enableTmdb) return null
         return try {

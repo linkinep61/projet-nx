@@ -992,6 +992,34 @@ object BackupRegistry {
                         corrected
                     } else initial
                 } else initial
+            } else if (key.isMovie && !tmdbId.isNullOrBlank() && !initial.isNullOrBlank()) {
+                // 2026-10-19 (user « regarde qui n'a pas répondu et pourquoi ») — MÊME FIX QUE
+                //   CI-DESSUS, POUR LES FILMS. PlayerViewModel prend pour un tmdbId tout id
+                //   100 % numérique ; or certains providers natifs ont des id numériques MAISON.
+                //   Mesuré sur la TV, « The Wrecker » (2025) ouvert depuis FrenchStream :
+                //   id FrenchStream 15141007 transmis comme tmdbId → TMDB details 404, Movix
+                //   404 partout, Frembed/Vidzy/NetMirror/Webflix = 0, titre FR inconnu, et les
+                //   sources anime interrogées pour rien (genre inconnu). Le vrai id TMDB est
+                //   1101284. Ouvert depuis Movix (vrai id), Spider-Man a 46 serveurs Movix.
+                //   On ne corrige QUE sur un 404 franc : une erreur réseau garde l'id reçu,
+                //   pour ne jamais remplacer un bon id par un résultat de recherche.
+                val idInt = initial.toIntOrNull()
+                val idInconnuDeTmdb = idInt == null || runCatching {
+                    TMDb3.Movies.details(movieId = idInt, language = "fr-FR"); false
+                }.getOrElse { e -> (e.message ?: "").contains("404") }
+                if (idInconnuDeTmdb) {
+                    val corrected = runCatching {
+                        val clean = TitleNormalizer.cleanForTmdbSearch(key.title).ifBlank { key.title }
+                        TmdbUtils.getMovieId(clean, key.year, "fr-FR")
+                    }.getOrNull()?.takeIf { it.isNotBlank() }
+                    if (corrected != null) {
+                        Log.i(TAG, "resolvedTmdbId CORRIGÉ (id provider≠TMDB, film): '$initial' → '$corrected'")
+                        corrected
+                    } else {
+                        Log.i(TAG, "resolvedTmdbId : id '$initial' inconnu de TMDB, aucun film trouvé pour '${key.title}' → id ignoré")
+                        null
+                    }
+                } else initial
             } else initial
         }
 

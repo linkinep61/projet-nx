@@ -864,10 +864,13 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                 }
             }.take(12)
             if (trendingAnim.isNotEmpty()) {
-                val featured = trendingAnim.take(6).map { it.toAppItem(banner = true) }
+                // 2026-10-19 : ordre MÉLANGÉ à chaque ouverture (avant : même ordre toute la
+                //   semaine). « En Tendance » reçoit le reste du même tirage → aucun doublon.
+                val melange = trendingAnim.shuffled()
+                val featured = melange.take(6).map { it.toAppItem(banner = true) }
                 categories.add(Category(name = Category.FEATURED, list = featured))
-                if (trendingAnim.size > 6) {
-                    categories.add(Category(name = "En Tendance", list = trendingAnim.drop(6).map { it.toAppItem() }))
+                if (melange.size > 6) {
+                    categories.add(Category(name = "En Tendance", list = melange.drop(6).map { it.toAppItem() }))
                 }
             }
 

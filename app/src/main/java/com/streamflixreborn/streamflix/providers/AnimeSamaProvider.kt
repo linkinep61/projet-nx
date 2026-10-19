@@ -522,14 +522,34 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             async(Dispatchers.IO) {
                 try {
                     kotlinx.coroutines.withTimeoutOrNull(5_000L) {
-                        TMDb3.Discover.tv(
-                            page = 1,
-                            language = "fr-FR",
-                            sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
-                            withOriginalLanguage = TMDb3.Params.WithBuilder("ja"),
-                            voteCount = TMDb3.Params.Range(100, null),
-                            withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
-                        ).results.filter { it.backdropPath != null && it.posterPath != null }
+                        // 2026-10-19 (user « dans le carrousel, j'ai l'impression que c'est tout le
+                        //   temps la même chose ») : la source était « séries d'animation JP les plus
+                        //   POPULAIRES » (tri popularité, page 1) — un classement qui ne bouge
+                        //   quasiment pas (One Piece, Jujutsu Kaisen… en boucle). On passe aux
+                        //   TENDANCES DE LA SEMAINE (change chaque semaine, suit la saison en cours) ;
+                        //   les populaires ne servent plus que de complément si les tendances JP
+                        //   sont trop peu nombreuses.
+                        val tendances = (1..2).map { p ->
+                            async {
+                                runCatching {
+                                    TMDb3.Trending.all(TMDb3.Params.TimeWindow.WEEK, language = "fr-FR", page = p).results
+                                }.getOrDefault(emptyList())
+                            }
+                        }.awaitAll().flatten()
+                            .filterIsInstance<TMDb3.Tv>()
+                            .filter { 16 in it.genresIds && it.originalLanguage == "ja" }
+                        val populaires = if (tendances.size >= 8) emptyList() else runCatching {
+                            TMDb3.Discover.tv(
+                                page = 1,
+                                language = "fr-FR",
+                                sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+                                withOriginalLanguage = TMDb3.Params.WithBuilder("ja"),
+                                voteCount = TMDb3.Params.Range(100, null),
+                                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
+                            ).results
+                        }.getOrDefault(emptyList())
+                        (tendances + populaires).distinctBy { it.id }
+                            .filter { it.backdropPath != null && it.posterPath != null }
                             .take(10)
                             .map { t ->
                                 TvShow(
@@ -725,6 +745,48 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         //   getTvShow() est ensuite direct (plus de redirect TMDB→search).
         //   Parallèle (sem=8) + timeout 1.5s par recherche + 4s global →
         //   home reste rapide.
+        // 2026-10-19 — NOUVEAUTÉS ANIMESAMA DANS LE CARROUSEL (user « basée sur les nouveautés
+        //   d'AnimeSama tout en restant sur TMDB »). On prend la rangée des derniers épisodes
+        //   (déjà scrapée, aucune requête AnimeSama en plus) et on cherche pour chaque anime sa
+        //   fiche TMDB (recherche légère, sans fiche complète) → vraie bannière, résumé, note.
+        //   L'id reste le SLUG AnimeSama → clic direct, jamais de page vide. Lancé EN PARALLÈLE
+        //   de la validation des tendances ci-dessous, mêmes bornes (1,5 s / recherche, 4 s total).
+        val nouveautesDeferred = async(Dispatchers.IO) {
+            val section = categories.firstOrNull { c ->
+                val n = c.name.lowercase()
+                n.contains("épisode") || n.contains("episode") || n.contains("nouveaut") || n.contains("récent")
+            } ?: categories.firstOrNull()
+            val pool = section?.list.orEmpty().filterIsInstance<TvShow>().distinctBy { it.id }.take(12)
+            if (pool.isEmpty() || !UserPreferences.enableTmdb) return@async emptyList<TvShow>()
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                    val sem = kotlinx.coroutines.sync.Semaphore(8)
+                    pool.map { s ->
+                        async(Dispatchers.IO) {
+                            sem.withPermit {
+                                kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                                    try {
+                                        val t = TMDb3.Search.multi(s.title, language = "fr-FR")
+                                            .results.filterIsInstance<TMDb3.Tv>()
+                                            .firstOrNull { 16 in it.genresIds && it.backdropPath != null }
+                                            ?: return@withTimeoutOrNull null
+                                        TvShow(
+                                            id = s.id,
+                                            title = s.title,
+                                            overview = t.overview,
+                                            released = t.firstAirDate,
+                                            rating = t.voteAverage.toDouble(),
+                                            poster = t.posterPath?.w500 ?: s.poster,
+                                            banner = t.backdropPath?.w1280,
+                                        )
+                                    } catch (_: Exception) { null }
+                                }
+                            }
+                        }
+                    }.awaitAll().filterNotNull()
+                } ?: emptyList()
+            } catch (_: Exception) { emptyList() }
+        }
         val trendingAnime: List<TvShow> = if (trendingAnimeRaw.isNotEmpty()) {
             try {
                 kotlinx.coroutines.withTimeoutOrNull(4_000L) {
@@ -767,15 +829,20 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             .distinctBy { it.id }
             .take(10)
             .map { s -> TvShow(id = s.id, title = s.title, poster = s.poster, banner = s.poster ?: s.banner) }
-        // Si le trending TMDB a moins de 5 items validés, compléter avec le fallback scrapé
-        val featuredList: List<TvShow> = if (trendingAnime.size >= 5) {
-            trendingAnime
-        } else if (trendingAnime.isNotEmpty()) {
-            val existingIds = trendingAnime.map { it.id }.toSet()
-            trendingAnime + fallbackPool.filter { it.id !in existingIds }.take(10 - trendingAnime.size)
-        } else {
-            fallbackPool
+        // 2026-10-19 : ASSEMBLAGE — ~7 nouveautés AnimeSama + ~3 tendances TMDB de la semaine,
+        //   chacune complétant l'autre si elle manque ; le secours scrapé (affiches) ne sert plus
+        //   que s'il reste moins de 5 titres. Ordre MÉLANGÉ à chaque ouverture de l'accueil.
+        val nouveautes = try { nouveautesDeferred.await() } catch (_: Exception) { emptyList() }
+        val nv = nouveautes.distinctBy { it.id }
+        val tr = trendingAnime.filter { t -> nv.none { it.id == t.id } }
+        val base = nv.take(7) + tr.take(3)
+        var assemblage = base + (nv.drop(7) + tr.drop(3)).take(10 - base.size)
+        if (assemblage.size < 5) {
+            assemblage = assemblage + fallbackPool.filter { f -> assemblage.none { it.id == f.id } }
+                .take(10 - assemblage.size)
         }
+        Log.i(TAG, "Carrousel : ${nv.size} nouveauté(s) AnimeSama, ${tr.size} tendance(s) TMDB → ${assemblage.size} affiché(s)")
+        val featuredList: List<TvShow> = assemblage.shuffled()
         if (featuredList.isNotEmpty()) {
             categories.add(0, Category(name = Category.FEATURED, list = featuredList))
         }
