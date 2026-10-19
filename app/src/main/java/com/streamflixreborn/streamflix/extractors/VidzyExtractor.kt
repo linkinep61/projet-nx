@@ -313,8 +313,17 @@ class VidzyExtractor : Extractor() {
                     timeoutMs = 20_000L,
                     clickPlay = true,
                     attach = true,
+                    // 2026-10-19 : clé de segments (cf. utils/CleVidzy) — sans elle, 403 dès le 10ᵉ segment.
+                    lireJsApresCapture = "(window.__vzgk||null)",
                 )
                 if (resolved != null) {
+                    val gk = resolved.valeurJs
+                    if (gk != null) {
+                        com.streamflixreborn.streamflix.utils.CleVidzy.memoriser(gk)
+                        Log.i(TAG, "clé de segments Vidzy (gk) récupérée (${gk.length} car.)")
+                    } else {
+                        Log.w(TAG, "clé de segments Vidzy (gk) absente de la page → 403 probable après ~90 s")
+                    }
                     // ⚠️ Les headers captés par WebResourceRequest ne contiennent PAS les
                     //   Sec-Fetch-*. Sans eux, l'intercepteur NetworkClient pose
                     //   « document/navigate/none » = signature d'une NAVIGATION de page →

@@ -50,8 +50,9 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
         val estManifeste = dataSpec.uri.path?.endsWith(".m3u8", ignoreCase = true) == true
         if (!estManifeste) {
             passePlat = true
+            val spec = avecCleVidzy(dataSpec)
             return try {
-                delegue.open(dataSpec)
+                delegue.open(spec)
             } catch (e: Throwable) {
                 // Sans ça, `DefaultDataSource` garde sa source interne assignée après un open
                 // raté (403, timeout…). Son `open` suivant part sur `checkState(dataSource == null)`
@@ -104,6 +105,20 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
         position = 0
         passePlat = true
         uriCourante = null
+    }
+
+    /**
+     * 2026-10-19 : ajoute la clé `gk` (cf. utils/CleVidzy) aux segments Vidzy qui ne l'ont pas.
+     *   Sans elle le CDN refuse (403) tout segment au-delà du 9ᵉ → lecture en boucle.
+     */
+    private fun avecCleVidzy(dataSpec: DataSpec): DataSpec {
+        val cle = CleVidzy.cle ?: return dataSpec
+        val uri = dataSpec.uri
+        val hote = uri.host ?: return dataSpec
+        if (!hote.contains("vidzy", ignoreCase = true)) return dataSpec
+        if (uri.path?.endsWith(".ts", ignoreCase = true) != true) return dataSpec
+        if (runCatching { uri.getQueryParameter("gk") }.getOrNull() != null) return dataSpec
+        return dataSpec.withUri(uri.buildUpon().appendQueryParameter("gk", cle).build())
     }
 
     /** Enveloppe une fabrique existante sans rien changer à sa configuration. */

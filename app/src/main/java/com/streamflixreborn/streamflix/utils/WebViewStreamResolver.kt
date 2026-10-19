@@ -51,6 +51,8 @@ object WebViewStreamResolver {
     data class Resolved(
         val url: String,
         val headers: Map<String, String>,
+        // 2026-10-19 : valeur lue dans la page après la capture (cf. `lireJsApresCapture`).
+        val valeurJs: String? = null,
     )
 
     private const val ANDROID_CHROME_UA =
@@ -108,10 +110,22 @@ object WebViewStreamResolver {
         //   Ces motifs de chemin sont donc refusés à la navigation : le clic garde son effet sur le
         //   player, mais la page reste en place et le m3u8 part bien en XHR.
         cheminsBloques: List<String> = emptyList(),
+        // 2026-10-19 : expression JavaScript à lire dans la page APRÈS la capture du flux (ex. la
+        //   clé de segments de Vidzy, `window.__vzgk`). Relue toutes les 250 ms pendant 3 s au plus,
+        //   le temps que le script de la page la fabrique ; si elle reste vide, on rend le flux
+        //   quand même (valeurJs = null) → comportement identique à avant.
+        lireJsApresCapture: String? = null,
     ): Resolved? = withContext(Dispatchers.Main) {
         withTimeoutOrNull(timeoutMs) {
-            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques)
+            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture)
         }
+    }
+
+    /** Décode le résultat brut d'evaluateJavascript (chaîne JSON entre guillemets, ou "null"). */
+    private fun decoderJs(brut: String?): String? {
+        if (brut.isNullOrBlank() || brut == "null" || brut == "undefined") return null
+        return runCatching { org.json.JSONArray("[$brut]").optString(0, "") }.getOrNull()
+            ?.takeIf { it.isNotBlank() && it != "null" }
     }
 
     private val CLICK_PLAY_JS = """
@@ -136,9 +150,13 @@ object WebViewStreamResolver {
         clickPlay: Boolean,
         attach: Boolean,
         cheminsBloques: List<String> = emptyList(),
+        lireJsApresCapture: String? = null,
     ): Resolved? = suspendCancellableCoroutine { cont ->
         val context = StreamFlixApp.instance.applicationContext
         var resolved = false
+        // Une seule capture traitée : pendant la lecture JS différée, d'autres playlists peuvent
+        //   être demandées par la page — on ne relance pas une 2e lecture pour elles.
+        val captureEnCours = java.util.concurrent.atomic.AtomicBoolean(false)
         var attachedParent: android.view.ViewGroup? = null
 
         val webView = WebView(context).apply {
@@ -259,8 +277,27 @@ object WebViewStreamResolver {
                         val ref = view?.url ?: referer ?: entryUrl
                         capturedHeaders["Referer"] = ref
                     }
-                    view?.post {
-                        resolve(Resolved(url = reqUrl, headers = capturedHeaders))
+                    if (lireJsApresCapture == null) {
+                        view?.post {
+                            resolve(Resolved(url = reqUrl, headers = capturedHeaders))
+                        }
+                    } else if (captureEnCours.compareAndSet(false, true)) {
+                        view?.post {
+                            val wv = view ?: return@post
+                            var essais = 0
+                            fun lire() {
+                                if (resolved) return
+                                wv.evaluateJavascript(lireJsApresCapture) { brut ->
+                                    val valeur = decoderJs(brut)
+                                    if (valeur != null || essais++ >= 12) {
+                                        resolve(Resolved(url = reqUrl, headers = capturedHeaders, valeurJs = valeur))
+                                    } else {
+                                        wv.postDelayed({ lire() }, 250L)
+                                    }
+                                }
+                            }
+                            lire()
+                        }
                     }
                     // On renvoie une réponse vide pour empêcher la WebView de
                     // continuer à télécharger le stream inutilement.
