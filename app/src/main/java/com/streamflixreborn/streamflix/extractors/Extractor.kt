@@ -317,7 +317,10 @@ abstract class Extractor {
             //   aussi à une pub de ~18 s). La classe est conservée : il suffit de remettre
             //   cette ligne, et de retirer le filtre dans FrenchStreamProvider.ignoreSource,
             //   si l'hôte redevient exploitable un jour.
-            // FsvidExtractor(),
+            // 2026-10-19 (user : « si c'est réparé, réactive-le ») : FSVid sert de nouveau le
+            //   vrai film (vérifié dans Chrome : lecteur 1 h 37, logo distributeur) à condition
+            //   de venir de French Stream (Referer) — sinon 403.
+            FsvidExtractor(),
             GoogleDriveExtractor(),
             PcloudExtractor(),
             AmazonDriveExtractor(),

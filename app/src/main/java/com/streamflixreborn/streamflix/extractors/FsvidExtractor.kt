@@ -37,9 +37,57 @@ class FsvidExtractor : Extractor() {
         ): String
     }
 
+    /**
+     * 2026-10-19 (repris de StreamFlix Reborn v1.7.237, vérifié en direct dans Chrome) : la page
+     * embed n'est servie (sinon 403) et le vrai film n'est joué que si l'on VIENT de French Stream.
+     * Referer = adresse actuelle de French Stream (pages ET flux vidéo).
+     */
+    private fun refererFrenchStream(): String = try {
+        com.streamflixreborn.streamflix.providers.FrenchStreamProvider.baseUrl
+            .takeIf { it.isNotBlank() }?.let { if (it.endsWith("/")) it else "$it/" }
+    } catch (_: Throwable) { null } ?: "https://fs26.lol/"
+
+    /**
+     * 2026-10-19 : nouveau format FSVid (cf. StreamFlix Reborn v1.7.237). Le script contient
+     * `(function(s){…})("<base64>")` : base64 → octets INVERSÉS → XOR avec une clé qui varie
+     * par vidéo : (base + i*pas + somme des caractères de l'hôte + bc) & 0xFF, où base/pas sont
+     * lus dans `kk=(0x..+i*..)` et bc = (96 + px) * pct, lus dans `calc(1in + Npx)` / `width:N%`.
+     * Ne renvoie qu'une vraie URL http (jamais le leurre /troll/).
+     */
+    private fun dechiffrerNouveauFormat(fnCode: String, s: String, link: String): String? = try {
+        val hote = Uri.parse(link).host.orEmpty()
+        var h = 0
+        for (ch in hote) h = (h + ch.code) and 0xFF
+        // BC = largeur (px) d'un div enfant mesurée dans le navigateur : parent `calc(1in + Npx)`
+        //   (1in = 96 px), enfant `calc(100% - Mpx)` / `calc(100% + Mpx)` / `N%`.
+        //   2026-10-19, vérifié sur une vraie page : parent 1in+45px = 141, enfant 100%-26px
+        //   → BC = 115 (le script contrôle d'ailleurs `BC!==115`) → vraie URL hls2 720p.
+        val parent = 96 + (Regex("""calc\(1in\s*\+\s*(\d+)px\)""").find(fnCode)?.groupValues?.get(1)?.toIntOrNull() ?: 56)
+        val bc = Regex("""calc\(100%\s*([+-])\s*(\d+)px\)""").find(fnCode)?.let { m ->
+            val n = m.groupValues[2].toInt()
+            if (m.groupValues[1] == "-") parent - n else parent + n
+        } ?: Regex("""width:(\d+)%""").findAll(fnCode).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
+            ?.let { parent * it / 100 }
+        ?: parent
+        val kk = Regex("""kk\s*=\s*\(\s*(0x[0-9a-fA-F]+|\d+)\s*\+\s*i\s*\*\s*(\d+)""").find(fnCode)
+        val base = kk?.groupValues?.get(1)?.let {
+            if (it.startsWith("0x", true)) it.substring(2).toIntOrNull(16) else it.toIntOrNull()
+        } ?: 0x3d
+        val pas = kk?.groupValues?.get(2)?.toIntOrNull() ?: 89
+        val octets = android.util.Base64.decode(s, android.util.Base64.DEFAULT).reversedArray()
+        val sb = StringBuilder()
+        for (i in octets.indices) {
+            val k = (base + i * pas + h + bc) and 0xFF
+            sb.append(((octets[i].toInt() and 0xFF) xor k).toChar())
+        }
+        sb.toString().trim().takeIf { it.startsWith("http") && !it.contains("/troll/") }
+    } catch (_: Throwable) { null }
+
     override suspend fun extract(link: String): Video {
         val uri = Uri.parse(link)
         val host = "${uri.scheme}://${uri.host}"
+        val refFs = refererFrenchStream()
+        val origineFs = refFs.removeSuffix("/")
 
         // 2026-07-31 (user, FSVid) : un fichier SUPPRIMÉ renvoie 403 sur /embed-xxx.html
         //   alors que le site (fsvid.lol/) répond normalement — vérifié en direct : ce n'est
@@ -57,12 +105,12 @@ class FsvidExtractor : Extractor() {
         //   et les en-têtes d'une navigation d'iframe. Repli sur OkHttp si Cronet indisponible.
         val enTetesNavigation = mapOf(
             "User-Agent" to DEFAULT_USER_AGENT,
-            "Referer" to "$host/",
+            "Referer" to refFs,
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language" to "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
             "Sec-Fetch-Dest" to "iframe",
             "Sec-Fetch-Mode" to "navigate",
-            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-Site" to "cross-site",
             "Upgrade-Insecure-Requests" to "1",
         )
         val viaCronet = try {
@@ -84,7 +132,7 @@ class FsvidExtractor : Extractor() {
 
         val html = htmlCronet ?: try {
             Log.d("FsvidExtractor", "repli OkHttp (Cronet indisponible ou page leurre)")
-            service.get(link, "$host/")
+            service.get(link, refFs, secSite = "cross-site")
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
             if (msg.contains("403") || msg.contains("404") || msg.contains("410")) {
@@ -183,12 +231,18 @@ class FsvidExtractor : Extractor() {
             return null
         }
 
-        dechiffrerUrl()?.let { urlClaire ->
+        // 2026-10-19 : nouveau format d'abord (fonction de déchiffrement + charge base64).
+        val nouveau = (Regex("""sources:\s*\[\s*\{\s*src\s*:\s*\((function\(s\)\{.*?\})\)\s*\(\s*["']([^"']+)["']""").find(js)
+            ?: Regex("""\((function\(s\)\{.*?\})\)\s*\(\s*["']([A-Za-z0-9+/=]+)["']""").find(js))
+            ?.let { dechiffrerNouveauFormat(it.groupValues[1], it.groupValues[2], link) }
+        (nouveau ?: dechiffrerUrl())?.let { urlClaire ->
+            Log.d("FsvidExtractor", "flux FSVid trouvé (${if (nouveau != null) "nouveau format" else "XOR 8 octets"})")
             return Video(
                 source = urlClaire,
                 headers = mapOf(
-                    "Referer" to "$host/",
-                    "Origin" to host,
+                    "User-Agent" to DEFAULT_USER_AGENT,
+                    "Referer" to refFs,
+                    "Origin" to origineFs,
                 ),
             )
         }
@@ -256,8 +310,9 @@ class FsvidExtractor : Extractor() {
         return Video(
             source = m3u8,
             headers = mapOf(
-                "Referer" to "$host/",
-                "Origin" to host,
+                "User-Agent" to DEFAULT_USER_AGENT,
+                "Referer" to refFs,
+                "Origin" to origineFs,
             )
         )
     }

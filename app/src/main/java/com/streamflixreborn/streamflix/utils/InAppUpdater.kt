@@ -204,7 +204,11 @@ object InAppUpdater {
         .build()
 
     suspend fun downloadApk(context: Context, asset: GitHub.Release.Asset): File {
-        context.cacheDir.listFiles()
+        // 2026-10-19 : sur Android 6, l'installateur lit l'APK par une adresse file:// ; le
+        //   cache INTERNE de l'appli lui est fermé → APK dans le cache externe (lisible).
+        val dossier = if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.N)
+            (context.externalCacheDir ?: context.cacheDir) else context.cacheDir
+        dossier.listFiles()
             ?.filter { it.extension == "apk" }
             ?.forEach { it.deleteOnExit() }
 
@@ -212,7 +216,7 @@ object InAppUpdater {
             File.createTempFile(
                 "${File(asset.name).nameWithoutExtension}-",
                 ".${File(asset.name).extension}",
-                context.cacheDir
+                dossier
             )
         }
 
@@ -239,17 +243,39 @@ object InAppUpdater {
         return apk
     }
 
+    /**
+     * 2026-10-19 (repris du correctif StreamFlix Reborn v1.7.237) :
+     *   • Android 6 : son installateur ne sait pas lire une adresse content:// (FileProvider)
+     *     → adresse file:// sur un fichier rendu lisible ;
+     *   • box / TV : sans le type « APK » explicite, certaines répondent « aucune application
+     *     pour ouvrir ce fichier » → setDataAndType + NEW_TASK, et repli sur INSTALL_PACKAGE.
+     */
     fun installApk(context: Context, uri: Uri) {
-        val intent = Intent(Intent.ACTION_VIEW).also { intent ->
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
-            intent.data = FileProvider.getUriForFile(
-                context,
-                BuildConfig.APPLICATION_ID + ".provider",
-                File(uri.path!!)
-            )
+        val type = "application/vnd.android.package-archive"
+        val apkFile = File(uri.path!!)
+        val apkUri = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            FileProvider.getUriForFile(context, BuildConfig.APPLICATION_ID + ".provider", apkFile)
+        } else {
+            apkFile.setReadable(true, false)
+            Uri.fromFile(apkFile)
         }
-        context.startActivity(intent)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, type)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+        }
+        try {
+            context.startActivity(intent)
+        } catch (e: android.content.ActivityNotFoundException) {
+            @Suppress("DEPRECATION")
+            context.startActivity(Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+                setDataAndType(apkUri, type)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+            })
+        }
     }
 }

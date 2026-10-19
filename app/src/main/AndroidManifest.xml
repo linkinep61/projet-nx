@@ -97,6 +97,15 @@
             <data android:scheme="https" android:host="youtu.be" />
         </intent>
 
+        <!-- 2026-10-19 : installateur visible pour la mise à jour intégrée (Android 11+). -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.android.package-archive" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.INSTALL_PACKAGE" />
+            <data android:mimeType="application/vnd.android.package-archive" />
+        </intent>
     </queries>
 
     <application

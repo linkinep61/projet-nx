@@ -338,8 +338,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         //   extraire : l'hôte est devenu un diffuseur de pub. On le masque à la source
         //   plutôt que de laisser l'utilisateur tomber dessus (ou l'extracteur se faire
         //   blacklister). Retirer ces lignes suffira à le réactiver s'il redevient sain.
-        if (href.contains("fsvid.", ignoreCase = true)) return true
-        if (source.contains("fsvid", ignoreCase = true)) return true
+        // 2026-10-19 : FSVid RÉACTIVÉ (l'hôte sert de nouveau le film, cf. FsvidExtractor).
         // 2026-07-13 : kakaflix.lol MORT mais le redirect proxy générique
         // (KakaflixExtractor) gère maintenant kokoflix + kakaflix + newPlayer.
         // On ne filtre plus kakaflix ici — l'extracteur essaiera et échouera
