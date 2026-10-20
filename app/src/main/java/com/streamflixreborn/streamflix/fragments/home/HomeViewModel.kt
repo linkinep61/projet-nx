@@ -415,10 +415,24 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
 
     private suspend fun enrichContinueWatchingEpisodes(episodes: List<Episode>): List<Episode> = coroutineScope {
         val provider = UserPreferences.currentProvider ?: return@coroutineScope episodes
+        // 2026-10-20 (signalement : TV Hub qui plante au chargement, RAM 5 Go → 1 Go, réglé en vidant
+        //   les « en cours ») — MESURÉ sur l'Oppo avec 8 émissions en cours : à l'ouverture du TV Hub,
+        //   cet enrichissement relançait EN PARALLÈLE la fiche complète de chaque reprise : pages TF1
+        //   de 10 Mo (×3 pour la même émission), index OLA VOD (15 000 films) et Vegeta VOD (31 000
+        //   films) entiers → mémoire de l'appli 176 → 430 Mo. Sur les sources TV/IPTV, les données
+        //   déjà enregistrées (titre, image, épisode, position) suffisent : on n'enrichit plus.
+        if (com.streamflixreborn.streamflix.providers.Provider.getGroup(provider) ==
+            com.streamflixreborn.streamflix.providers.Provider.Companion.ProviderGroup.IPTV
+        ) return@coroutineScope episodes
+        // Ailleurs : 10 reprises enrichies au plus, 2 à la fois (au-delà, données enregistrées).
+        val limiteur = kotlinx.coroutines.sync.Semaphore(2)
 
-        episodes.map { episode ->
+        episodes.mapIndexed { index, episode ->
             async {
+                if (index >= 10) return@async episode
                 val tvShowId = episode.tvShow?.id ?: return@async episode
+                limiteur.acquire()
+                try {
                 // 2026-10-04 : chaque appel est plafonné (cf. DELAI_ENRICHISSEMENT_MS). Sans plafond,
                 //   l'accueil attendait la série la plus lente avant de s'afficher. Au-delà du délai,
                 //   on garde les données déjà enregistrées, comme en cas d'échec.
@@ -467,6 +481,7 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                 ).apply {
                     merge(episode)
                 }
+                } finally { limiteur.release() }
             }
         }.awaitAll()
     }

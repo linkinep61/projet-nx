@@ -2146,6 +2146,7 @@ object BackupRegistry {
             val dessinAnimeProviders = setOf("DessinAnime")
             if (skipAnimeOnly) Log.i(TAG, "fetchAll → skip providers dessins animés")
             Provider.providers.keys
+                .filter { !Provider.estSepare(it) }   // 2026-10-20 : Mini Drama n'est jamais un backup
                 .filter { p ->
                     // 2026-07-12 : providers orientés FILMS → sautés pour les séries/épisodes.
                     !(!key.isMovie && p.name in FILM_ONLY_PROVIDERS) &&

@@ -333,7 +333,8 @@ class SearchMobileFragment : Fragment() {
         hideKeyboard()
         SearchHistory.add(requireContext(), query)
 
-        if (binding.swGlobalSearch.isChecked) {
+        // 2026-10-20 : provider séparé (Mini Drama) → recherche TOUJOURS limitée à lui-même.
+        if (binding.swGlobalSearch.isChecked && !Provider.estSepare(UserPreferences.currentProvider)) {
             globalSearchScrollDone = false
             val currentProvider = UserPreferences.currentProvider
             val currentLanguage = currentProvider?.language ?: "fr"
@@ -378,6 +379,8 @@ class SearchMobileFragment : Fragment() {
         binding.swGlobalSearch.setOnCheckedChangeListener { _, isChecked ->
             UserPreferences.isGlobalSearchEnabled = isChecked
         }
+        // 2026-10-20 : Mini Drama a sa recherche à lui → pas d'interrupteur « Recherche globale ».
+        if (Provider.estSepare(UserPreferences.currentProvider)) binding.swGlobalSearch.visibility = android.view.View.GONE
 
         // 2026-06-13 : hint dynamique selon provider courant (IPTV vs VOD).
         binding.etSearch.hint = getString(getSearchHintRes())

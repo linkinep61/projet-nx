@@ -33,7 +33,7 @@ object GlobalFavorites {
             originByItemId.clear()
             val movies = mutableListOf<Movie>()
             val tvShows = mutableListOf<TvShow>()
-            val providers = Provider.providers.keys.filter { it !is IptvProvider }
+            val providers = Provider.providers.keys.filter { it !is IptvProvider && !Provider.estSepare(it) }
             Log.i(TAG, "════ AUDIT FAVORIS — ${providers.size} providers non-IPTV ════")
             for (p in providers) {
                 val dbExists = AppDatabase.providerDbExists(p.name, context)
@@ -74,7 +74,7 @@ object GlobalFavorites {
         withContext(Dispatchers.IO) {
             val movies = mutableListOf<Movie>()
             val tvShows = mutableListOf<TvShow>()
-            val providers = Provider.providers.keys.filter { it !is IptvProvider }
+            val providers = Provider.providers.keys.filter { it !is IptvProvider && !Provider.estSepare(it) }
             for (p in providers) {
                 if (!AppDatabase.providerDbExists(p.name, context)) continue
                 try {
@@ -120,7 +120,7 @@ object GlobalFavorites {
     suspend fun loadContinueWatchingMovies(context: Context, limit: Int = 20): List<Movie> =
         withContext(Dispatchers.IO) {
             val all = mutableListOf<Movie>()
-            val providers = Provider.providers.keys.filter { it !is IptvProvider }
+            val providers = Provider.providers.keys.filter { it !is IptvProvider && !Provider.estSepare(it) }
             Log.i(TAG, "════ AUDIT REPRISE FILMS — ${providers.size} providers non-IPTV ════")
             for (p in providers) {
                 if (!AppDatabase.providerDbExists(p.name, context)) {
@@ -169,7 +169,7 @@ object GlobalFavorites {
             data class RawEntry(val providerName: String, val episode: Episode, val db: AppDatabase)
             val seriesMap = LinkedHashMap<String, RawEntry>()
             val openDbs = mutableListOf<AppDatabase>()
-            val providers = Provider.providers.keys.filter { it !is IptvProvider }
+            val providers = Provider.providers.keys.filter { it !is IptvProvider && !Provider.estSepare(it) }
             Log.i(TAG, "════ AUDIT REPRISE SÉRIES — ${providers.size} providers non-IPTV ════")
             for (p in providers) {
                 if (!AppDatabase.providerDbExists(p.name, context)) {
@@ -315,7 +315,7 @@ object GlobalFavorites {
 
     /** Retire le drapeau « vu » de TOUS les films et épisodes, cross-provider. */
     suspend fun clearAllWatched(context: Context) = withContext(Dispatchers.IO) {
-        val providers = Provider.providers.keys.filter { it !is IptvProvider }
+        val providers = Provider.providers.keys.filter { it !is IptvProvider && !Provider.estSepare(it) }
         for (p in providers) {
             if (!AppDatabase.providerDbExists(p.name, context)) continue
             try {
@@ -339,7 +339,7 @@ object GlobalFavorites {
 
     /** Retire TOUS les films des favoris, cross-provider. */
     suspend fun clearAllFavoriteMovies(context: Context) = withContext(Dispatchers.IO) {
-        val providers = Provider.providers.keys.filter { it !is IptvProvider }
+        val providers = Provider.providers.keys.filter { it !is IptvProvider && !Provider.estSepare(it) }
         for (p in providers) {
             if (!AppDatabase.providerDbExists(p.name, context)) continue
             try {
@@ -357,7 +357,7 @@ object GlobalFavorites {
 
     /** Retire TOUTES les séries des favoris, cross-provider. */
     suspend fun clearAllFavoriteTvShows(context: Context) = withContext(Dispatchers.IO) {
-        val providers = Provider.providers.keys.filter { it !is IptvProvider }
+        val providers = Provider.providers.keys.filter { it !is IptvProvider && !Provider.estSepare(it) }
         for (p in providers) {
             if (!AppDatabase.providerDbExists(p.name, context)) continue
             try {

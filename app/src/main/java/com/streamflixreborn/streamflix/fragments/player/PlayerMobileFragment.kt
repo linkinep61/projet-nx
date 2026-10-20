@@ -1090,6 +1090,11 @@ class PlayerMobileFragment : Fragment() {
     /** 2026-10-20 : vrai seulement quand le user a ouvert lui-même les sous-titres → messages OpenSubtitles autorisés. */
     private var sousTitresDemandes = false
 
+    /** 2026-10-20 : Mini Drama = vidéos VERTICALES (720×1280) → lecteur en portrait, sinon paysage. */
+    private fun orientationLecteur(): Int =
+        if (args.id.startsWith("minidrama-")) ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -1102,8 +1107,7 @@ class PlayerMobileFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         if (!isSetupDone) {
-            requireActivity().requestedOrientation =
-                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            requireActivity().requestedOrientation = orientationLecteur()
             
             val window = requireActivity().window
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -2303,7 +2307,7 @@ class PlayerMobileFragment : Fragment() {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             hide(WindowInsetsCompat.Type.systemBars())
         }
-        requireActivity().requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        requireActivity().requestedOrientation = orientationLecteur()
         when (val type = args.videoType) {
             is Video.Type.Episode -> {
                 nextEpisodeOverlayDismissed = false
@@ -5419,7 +5423,13 @@ class PlayerMobileFragment : Fragment() {
                 Log.d("PlayerDebug", "DASH: DashMediaSource + TeeDataSource (DRM=${widevineUrl != null})")
             } else {
                 // Non-HLS / Non-DASH (mp4 progressive). Wrap with TeeDataSource for REC.
-                val progressiveSource = androidx.media3.exoplayer.source.ProgressiveMediaSource
+                // 2026-10-20 (Mini Drama : sous-titres VTT invisibles) : ProgressiveMediaSource IGNORE les
+                //   sous-titres externes du MediaItem (SubtitleConfiguration). Quand il y en a, on passe par
+                //   DefaultMediaSourceFactory, qui crée la même source progressive ET y fusionne les sous-titres.
+                val aDesSousTitres = mediaItem.localConfiguration?.subtitleConfigurations?.isNotEmpty() == true
+                val progressiveSource = if (aDesSousTitres)
+                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(teeFactory).createMediaSource(mediaItem)
+                else androidx.media3.exoplayer.source.ProgressiveMediaSource
                     .Factory(teeFactory)
                     .createMediaSource(mediaItem)
                 player.setMediaSource(progressiveSource)

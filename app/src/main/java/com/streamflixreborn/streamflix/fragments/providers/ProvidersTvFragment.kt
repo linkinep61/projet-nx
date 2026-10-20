@@ -427,6 +427,8 @@ class ProvidersTvFragment : Fragment() {
                 return@filter targetGroup == Provider.Companion.ProviderGroup.FILMS_SERIES
             }
             val provider = Provider.providers.keys.find { it.name == mp.name }
+            // 2026-10-20 : providers réservés au téléphone (Mini Drama, vidéo verticale) masqués sur TV.
+            if (provider != null && Provider.providers[provider]?.mobileOnly == true) return@filter false
             val group = if (provider != null) Provider.providers[provider]?.group else null
             group == targetGroup
         }

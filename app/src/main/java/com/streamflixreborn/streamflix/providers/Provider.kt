@@ -78,7 +78,9 @@ interface Provider {
             val movies: Boolean,
             val tvShows: Boolean,
             val group: ProviderGroup = ProviderGroup.FILMS_SERIES,
-            val enrichHome: Boolean = true
+            val enrichHome: Boolean = true,
+            /** 2026-10-20 : provider réservé au téléphone (vidéo verticale) → masqué sur TV. */
+            val mobileOnly: Boolean = false
         )
 
         val providers: Map<Provider, ProviderSupport> = linkedMapOf(
@@ -125,6 +127,8 @@ interface Provider {
             // NetMirror — Netflix/Prime/Hotstar/Disney+ via net52.cc mirror.
             // Catalogue TMDB + CatalogFilter, streams via NewTV API.
             NetMirrorProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // 2026-10-20 (user) : micro-séries verticales (minutedrama.com), mobile uniquement.
+            MiniDramaProvider to ProviderSupport(movies = false, tvShows = true, enrichHome = false, mobileOnly = true),
             // ─── Anime (onglet Animés) — ordre interne inchangé ───
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
@@ -209,6 +213,10 @@ interface Provider {
         fun getGroup(provider: Provider): ProviderGroup {
             return providers[provider]?.group ?: ProviderGroup.FILMS_SERIES
         }
+
+        /** 2026-10-20 (user : « il doit être séparé des autres… recherche indépendante ») : provider
+         *  à part (Mini Drama) → jamais mélangé : ni recherche globale/unifiée, ni genres, ni backups. */
+        fun estSepare(provider: Provider?): Boolean = provider != null && providers[provider]?.mobileOnly == true
 
         fun getProvidersByGroup(group: ProviderGroup): List<Provider> {
             return providers.filter { it.value.group == group }.keys.toList()

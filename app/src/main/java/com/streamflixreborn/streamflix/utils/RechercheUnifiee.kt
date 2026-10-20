@@ -159,6 +159,7 @@ object RechercheUnifiee {
         return Provider.providers.entries
             .filter { (p, _) -> langue == null || p.language == langue }
             .filter { (p, _) -> !leger || p.name !in SAUTES_MODE_LEGER }
+            .filter { (_, s) -> !s.mobileOnly }   // 2026-10-20 : Mini Drama jamais mélangé
             .filter { (_, s) ->
                 val iptv = s.group == Provider.Companion.ProviderGroup.IPTV
                 when (m) {

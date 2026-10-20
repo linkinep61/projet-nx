@@ -278,7 +278,7 @@ class GenreViewModel(private val id: String, private val genreName: String = "",
         val currentProvider = UserPreferences.currentProvider ?: return
         val currentLanguage = currentProvider.language
         // Tous les providers de la même langue
-        val providers = Provider.providers.keys.filter { it.language == currentLanguage }
+        val providers = Provider.providers.keys.filter { it.language == currentLanguage && !Provider.estSepare(it) }
         val searchKeyword = genreSearchKeywords[id]
 
         val allShows = mutableListOf<Show>()

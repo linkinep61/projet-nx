@@ -238,6 +238,7 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
         val targetProviders = Provider.providers.keys
             .filter { it.language == currentLanguage }
             .filter { it.name !in sautesModeLeger }
+            .filter { !Provider.estSepare(it) }   // 2026-10-20 : Mini Drama jamais mélangé
             .filter { p ->
                 val pIsIptv = Provider.getGroup(p) == Provider.Companion.ProviderGroup.IPTV
                 if (isIptvScope) pIsIptv else !pIsIptv
