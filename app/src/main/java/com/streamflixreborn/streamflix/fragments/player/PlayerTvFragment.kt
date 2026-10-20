@@ -718,6 +718,9 @@ class PlayerTvFragment : Fragment() {
         }
     }
 
+    /** 2026-10-20 : vrai seulement quand le user a ouvert lui-même les sous-titres → messages OpenSubtitles autorisés. */
+    private var sousTitresDemandes = false
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -1894,6 +1897,8 @@ class PlayerTvFragment : Fragment() {
                         // 2026-10-16 : quota du jour épuisé / aucune clé → le dire (avant : liste vide muette).
                         if (state.error is com.streamflixreborn.streamflix.utils.OpenSubtitles.QuotaDepasseException ||
                             state.error is com.streamflixreborn.streamflix.utils.OpenSubtitles.AucuneCleException) {
+                            // 2026-10-20 : seulement si le user a ouvert les sous-titres (jamais sur la recherche auto).
+                            if (!sousTitresDemandes) return@collect
                             try { Toast.makeText(requireContext(), state.error.message, Toast.LENGTH_LONG).show() } catch (_: Exception) {}
                         }
                     }
@@ -9246,7 +9251,7 @@ class PlayerTvFragment : Fragment() {
             binding.pvPlayer.player = player
             binding.settings.player = player
             binding.settings.subtitleView = binding.pvPlayer.subtitleView
-            binding.settings.onSubtitlesClicked = { viewModel.getSubtitles(args.videoType) }
+            binding.settings.onSubtitlesClicked = { sousTitresDemandes = true; viewModel.getSubtitles(args.videoType) }
             // 2026-06-29 RESTAURÉ depuis APK v1.7.226 — relie le slider luminosité
             //   (= seekbar_brightness en haut du panneau Serveurs) à applyPlayerDim()
             //   pour mise à jour en temps réel pendant que l'user bouge le slider.
@@ -9656,7 +9661,7 @@ class PlayerTvFragment : Fragment() {
             binding.settings.player = player
             binding.settings.subtitleView = binding.pvPlayer.subtitleView
             binding.settings.onSubtitlesClicked = {
-                viewModel.getSubtitles(args.videoType)
+                sousTitresDemandes = true; viewModel.getSubtitles(args.videoType)
             }
         }
 

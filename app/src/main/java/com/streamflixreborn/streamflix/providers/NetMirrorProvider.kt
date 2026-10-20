@@ -1318,32 +1318,16 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
      * Les autres langues restent accessibles en serveurs secondaires.
      */
     /**
-     * 2026-09-20 — LA PLATEFORME NETFLIX NE PROPOSE PLUS DE SERVEUR.
-     *   (user : « fais en sorte de pas afficher le serveur NetMirror Netflix »)
+     * Interrupteur de secours pour la plateforme Netflix de NetMirror.
      *
-     * POURQUOI. Leur backend a MIGRÉ le stockage de son catalogue Netflix. Avant : des segments
-     * vidéo nus, en accès libre, qu'on devinait à partir de l'adresse du son — c'est ce que fait
-     * reconstructRealFilm, et c'est ce qui marche encore sur Prime Video / Hotstar / Disney+.
-     * Maintenant : un vrai HLS protégé. Mesuré le 2026-09-20 :
-     *     Prime   → manifeste sans jeton : « File Has been Removed. »  (il n'existe pas)
-     *     Netflix → manifeste sans jeton : « Only Valid Users Allowed » (il existe, il est gardé)
-     * et côté Netflix les segments nus rendent un vrai 404. Le son, lui, reste libre chez les deux.
-     * Ça touche TOUT le catalogue Netflix, films compris (vérifié sur l'id 81788481) — ce n'était
-     * donc ni « les séries », ni une panne passagère.
+     * Septembre 2026 : leur catalogue Netflix avait été verrouillé (manifeste « Only Valid Users
+     * Allowed ») et le serveur avait été masqué. Le verrou est levé : Netflix, Prime Video, Hotstar
+     * et Disney+ fonctionnent tous (vérifié par le user en octobre 2026).
      *
-     * Le jeton signé qui ouvre ce manifeste n'est délivré qu'à un visiteur porteur des cookies du
-     * site ; un visiteur neuf tombe d'abord sur une vérification anti-robot. L'application démarre
-     * vierge à chaque lecture : elle ne peut pas l'obtenir. Détail complet des mesures et piste
-     * restante (« err: 1003 » sur net52/play.php) dans le CLAUDE.md du projet.
-     *
-     * CE QUE ÇA CHANGE. Plus aucun serveur « NetMirror Netflix » proposé, au lieu d'une source qui
-     * échoue sous les yeux de l'utilisateur. Coupé ICI, en amont : aucun appel réseau inutile non
-     * plus. Prime Video, Hotstar et Disney+ ne sont PAS touchés.
-     * ⚠ Le jour où ils migreront ces trois-là de la même façon, ils tomberont pareil.
-     *
-     * POUR LE RÉACTIVER quand ils rouvrent : passer NETFLIX_HS à false. Rien d'autre.
+     * Si Netflix se verrouille de nouveau : on RÉPARE (voir la recette de déverrouillage du
+     * 2026-09-27 dans le CLAUDE.md, session mobile « ::m »), on ne masque pas le serveur.
      */
-    private const val NETFLIX_HS = false   // 2026-09-27 : réactivé (user) — tests de déverrouillage en cours
+    private const val NETFLIX_HS = false
 
     private suspend fun fetchServersForPlatform(
         platform: OttPlatform,

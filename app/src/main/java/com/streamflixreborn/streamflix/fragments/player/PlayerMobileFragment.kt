@@ -1087,6 +1087,9 @@ class PlayerMobileFragment : Fragment() {
         player.play()
     }
 
+    /** 2026-10-20 : vrai seulement quand le user a ouvert lui-même les sous-titres → messages OpenSubtitles autorisés. */
+    private var sousTitresDemandes = false
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -1365,7 +1368,12 @@ class PlayerMobileFragment : Fragment() {
             val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
             if (isIptv) {
                 binding.pvPlayer.useController = true
-                binding.pvPlayer.controllerShowTimeoutMs = 0
+                // 2026-10-20 (user : « les boutons ne disparaissent plus tout seuls ») : au passage
+                //   mini-lecteur → plein écran, le player transféré est DÉJÀ en lecture → l'événement
+                //   STATE_READY qui remettait les 2 s ne vient jamais → commandes figées. Dans ce cas
+                //   on garde directement la disparition automatique.
+                val dejaEnLecture = runCatching { player.playbackState == Player.STATE_READY }.getOrDefault(false)
+                binding.pvPlayer.controllerShowTimeoutMs = if (dejaEnLecture) 2000 else 0
                 binding.pvPlayer.showController()
             }
         }
@@ -2052,6 +2060,8 @@ class PlayerMobileFragment : Fragment() {
                         // 2026-10-16 : quota du jour épuisé / aucune clé → le dire (avant : liste vide muette).
                         if (state.error is com.streamflixreborn.streamflix.utils.OpenSubtitles.QuotaDepasseException ||
                             state.error is com.streamflixreborn.streamflix.utils.OpenSubtitles.AucuneCleException) {
+                            // 2026-10-20 : seulement si le user a ouvert les sous-titres (jamais sur la recherche auto).
+                            if (!sousTitresDemandes) return@collect
                             try { Toast.makeText(requireContext(), state.error.message, Toast.LENGTH_LONG).show() } catch (_: Exception) {}
                         }
                     }
@@ -2325,7 +2335,7 @@ class PlayerMobileFragment : Fragment() {
 
 
         binding.settings.onSubtitlesClicked = {
-            viewModel.getSubtitles(args.videoType)
+            sousTitresDemandes = true; viewModel.getSubtitles(args.videoType)
         }
         binding.settings.setOnExtraBufferingSelectedListener {
             displayVideo(
@@ -7812,7 +7822,7 @@ class PlayerMobileFragment : Fragment() {
         binding.pvPlayer.player = player
         binding.settings.player = player
         binding.settings.subtitleView = binding.pvPlayer.subtitleView
-        binding.settings.onSubtitlesClicked = { viewModel.getSubtitles(args.videoType) }
+        binding.settings.onSubtitlesClicked = { sousTitresDemandes = true; viewModel.getSubtitles(args.videoType) }
 
         // Android Auto : publier AUSSI le player TRANSFÉRÉ du mini-lecteur au pont (sinon, en passant
         // par le mini-lecteur, le miroir voiture reste vide — le hook de création n'est pas atteint).
@@ -8062,7 +8072,7 @@ class PlayerMobileFragment : Fragment() {
         binding.settings.player = player
         binding.settings.subtitleView = binding.pvPlayer.subtitleView
         binding.settings.onSubtitlesClicked = {
-            viewModel.getSubtitles(args.videoType)
+            sousTitresDemandes = true; viewModel.getSubtitles(args.videoType)
         }
 
         // Android Auto : publier ce player au pont voiture → l'écran AA projette la MÊME lecture (miroir).
