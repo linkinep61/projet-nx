@@ -130,7 +130,7 @@ interface Provider {
             // Catalogue TMDB + CatalogFilter, streams via NewTV API.
             NetMirrorProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // 2026-10-20 (user) : micro-séries verticales (minutedrama.com), mobile uniquement.
-            MiniDramaProvider to ProviderSupport(movies = false, tvShows = true, enrichHome = false, mobileOnly = true),
+            MiniDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false, mobileOnly = true),
             // ─── Anime (onglet Animés) — ordre interne inchangé ───
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),

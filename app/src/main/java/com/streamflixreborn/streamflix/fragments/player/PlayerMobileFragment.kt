@@ -4388,7 +4388,10 @@ class PlayerMobileFragment : Fragment() {
             // de serveurs DIRECTEMENT (pas le menu Main) — comme ça l'user
             // voit l'état (chargement du serveur courant) ET peut cliquer un
             // autre serveur sans étape intermédiaire.
-            runCatching { binding.settings.showServers() }
+            // 2026-10-20 (user : Â« l'affichage des serveurs sur celui-lÃ  ne sert Ã  rien Â») : pas de
+            //   liste de serveurs automatique pour Mini Drama, la lecture dÃ©marre seule (le bouton
+            //   Serveur en haut reste disponible pour changer de copie).
+            if (!args.id.startsWith("minidrama-")) runCatching { binding.settings.showServers() }
         }
         loadingShowRunnable = runnable
         loadingShowHandler.postDelayed(runnable, LOADING_OVERLAY_SHOW_DELAY_MS)
