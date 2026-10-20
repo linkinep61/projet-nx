@@ -333,6 +333,148 @@ object MiniDramaProvider : Provider {
         }
     }
 
+    // ───────────────────────── YouTube (séries complètes VF, par chaîne) ─────────────────────────
+    //
+    // 2026-10-20 (user : « envoie YouTube ») : relevé dans Chrome sur 50 chaînes de short dramas.
+    //   On ne trie PAS sur les titres (ils mentent, cf. Dailymotion) mais sur des CHAÎNES dont
+    //   toutes les vidéos sont en français (titres 100 % FR sur la page Vidéos, séries complètes
+    //   de 45 min à 2 h 50, format vertical 1080×1920). Les chaînes multilingues (DramaDairy,
+    //   Rosy Chapter, MiniSeries Lab…) sont exclues. Lecture via NewPipe (pas de lecteur
+    //   YouTube, donc pas de pub), même recette que les clips YouTube du TV Hub.
+
+    private const val YT_PREFIX = "minidrama-yt-"
+    private const val CHROME_UA =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+    private val YT_CHAINES = listOf(
+        "UCF1sNs7n1VCgV4oQw10cIvw" to "Miaou-Drama",
+        "UCKtfTvc4OO3qgvi5jWc27sQ" to "Chaîne Orange Océan",
+        "UC7W7mjKl_QBn5W92F_cASEQ" to "Napoléon Drama",
+        "UCvlTOkCb_Re40Qjpq3DA7lQ" to "Théâtre du fromage",
+        "UCgHiqP2wiI3oOPzWhjNjNJQ" to "Superbe contre-attaque",
+        "UC6QyhbtpWF1JiAD1DgdAe6Q" to "Série Choc",
+        "UCRZq0H6bekRza0BvzsJ4deA" to "Étoile Cinéma",
+        "UCFeq-_VtHRUf1p-hM2BxphA" to "Drame Twist",
+        "UCVJdtuU22v-On4LVUaMHMrw" to "Théâtre du Roi Dragon",
+        "UC5xKHxNt_E6ILB0GmpGLEiw" to "Studio Lumière",
+        "UC_2UXEXYKGPONwRu8dKuc4Q" to "Kaiser Drama",
+        "UCVq9JXz0-WdTb8SUd0bIKow" to "Ciné-Choc",
+        "UCAHk5-s9vgyVyPWn0HSDTHg" to "Baguette Drama",
+        "UCgt6NoMrA5BtRZ5zd76onpA" to "Romantique Drama",
+        "UCeOlF-aykDB1AUbgZBP4Bmg" to "Passion Noir TV",
+        "UC3uOqTxtM3HWU7W1NbUhgLA" to "POPO Ciné IA",
+        "UCuqhW9UhYEGTl51DDuPzkYw" to "Théâtre Nirvana",
+        "UCijd9agw3gdwN-YhP7kk77A" to "LolaDrama TV",
+        "UCDSfs-FdWRgFk6d3UsuKAVg" to "Nicenice Drama",
+        "UCYb-UchXphswZyWPHTht8tg" to "Rêverie Drama",
+        "UCGGfxdUpV84pZOZpOxaQy9A" to "Reine Drama",
+        "UC7gaNGHpE6AApCPZiw6-hNQ" to "Rêve Doré Drama",
+        "UCI9dZcL9vplpGTryRg_Q34Q" to "Rose Secrète",
+        "UCRQAX6YL0vixanDIsGrRzwA" to "Théâtre du Chuchotement",
+        "UCWRsQRwHx5prKOp3rSTawew" to "Scandale Drama",
+        "UCgXQWks6Wv_CbDm2z7QLOgQ" to "Soirée Drama",
+    )
+    private val YT_NOMS = YT_CHAINES.map { it.second.lowercase() }.toSet()
+
+    /** Thèmes calculés sur les titres YouTube (mots-clés), pour des rangées type « genre ». */
+    private val YT_THEMES = listOf(
+        "Milliardaires et PDG" to Regex("(?i)milliard|pdg|héritier|héritière|riche"),
+        "Vengeance" to Regex("(?i)veng|humili|regrett|trahi"),
+        "Mariages et trahisons" to Regex("(?i)mari[ée]|épous|fianc|divorc"),
+        "Loups-garous et alphas" to Regex("(?i)alpha|loup|meute|luna"),
+        "Mafia et parrains" to Regex("(?i)mafi|parrain|gang"),
+        "Renaissance et destin" to Regex("(?i)rena[iî]|réincarn|passé|système"),
+        "Guerriers et dieux" to Regex("(?i)guerrier|dieu|dragon|roi |reine|empereur|impératrice|invincible"),
+    )
+
+    private class YtSerie(val vid: String, val titre: String, val chaine: String, val duree: Int)
+
+    private val ytSeries = ConcurrentHashMap<String, YtSerie>()          // vid → série
+    private var ytParChaine: List<Pair<String, List<String>>> = emptyList() // chaîne → vids (plus récents d'abord)
+    private var ytLoadedAt = 0L
+    private val ytMutex = Mutex()
+
+    private fun nettoyerTitreYt(brut: String): String {
+        var t = brut.replace(Regex("(?i)\\[(complet|intégral|integral)[^\\]]*]|【[^】]*】|\\[[^\\]]*vf[^\\]]*]"), " ")
+        t = t.replace(Regex("#\\S+"), " ").replace(Regex("\\|\\s*(DramaBox|ReelShort|GoodShort|NetShort)\\b.*$", RegexOption.IGNORE_CASE), " ")
+        t = t.replace(Regex("\\s+"), " ").trim(' ', '-', '–', '—', '|', '·')
+        return t
+    }
+
+    /** Charge la page Vidéos de chaque chaîne validée (≈ 30 vidéos chacune, en parallèle, cache 1 h). */
+    private suspend fun ensureYt() = ytMutex.withLock {
+        if (System.currentTimeMillis() - ytLoadedAt < CACHE_MS && ytSeries.isNotEmpty()) return@withLock
+        val parChaine = coroutineScope {
+            YT_CHAINES.map { (id, nom) ->
+                async(Dispatchers.IO) {
+                    val l = runCatching { NewPipeAudio.videosChaine(id) }
+                        .onFailure { Log.w(TAG, "YouTube $nom : ${it.javaClass.simpleName} ${it.message}") }
+                        .getOrDefault(emptyList())
+                    nom to l.filter { it.durationS >= 40 * 60 || it.durationS <= 0 }.map { v ->
+                        ytSeries[v.videoId] = YtSerie(v.videoId, nettoyerTitreYt(v.title), nom, v.durationS)
+                        v.videoId
+                    }
+                }
+            }.awaitAll()
+        }
+        if (ytSeries.isNotEmpty()) {
+            ytParChaine = parChaine.filter { it.second.isNotEmpty() }
+            ytLoadedAt = System.currentTimeMillis()
+        }
+        Log.i(TAG, "YouTube : ${ytSeries.size} séries VF sur ${ytParChaine.size} chaînes")
+    }
+
+    /** Toutes les séries YouTube, en alternant les chaînes (la plus récente de chacune d'abord). */
+    private fun ytToutes(): List<YtSerie> {
+        val out = ArrayList<YtSerie>()
+        val max = ytParChaine.maxOfOrNull { it.second.size } ?: 0
+        for (i in 0 until max) for ((_, vids) in ytParChaine) vids.getOrNull(i)?.let { ytSeries[it] }?.let(out::add)
+        return out
+    }
+
+    private fun YtSerie.toMovie() = Movie(
+        id = YT_PREFIX + vid,
+        title = titre,
+        overview = "Série complète doublée en français · $chaine",
+        runtime = if (duree > 0) duree / 60 else null,
+        quality = "VF",
+        poster = "https://i.ytimg.com/vi/$vid/hqdefault.jpg",
+        banner = "https://i.ytimg.com/vi/$vid/hq720.jpg",
+    )
+
+    private suspend fun ytGetMovie(id: String): Movie {
+        val vid = id.removePrefix(YT_PREFIX)
+        runCatching { ensureYt() }
+        val s = ytSeries[vid]
+        val recos: List<Show> = (ytParChaine.firstOrNull { it.first == s?.chaine }?.second.orEmpty() + ytToutes().map { it.vid })
+            .distinct().filter { it != vid }.take(16).mapNotNull { ytSeries[it]?.toMovie() }
+        return Movie(
+            id = id,
+            title = s?.titre ?: "",
+            overview = s?.let { "Série complète doublée en français, publiée par ${it.chaine} sur YouTube." },
+            runtime = s?.duree?.takeIf { it > 0 }?.let { it / 60 },
+            quality = "VF",
+            poster = "https://i.ytimg.com/vi/$vid/hqdefault.jpg",
+            banner = "https://i.ytimg.com/vi/$vid/hq720.jpg",
+            recommendations = recos,
+        )
+    }
+
+    /** Même recette que les clips YouTube du TV Hub : NewPipe (flux direct, sans pub), sinon secours. */
+    private suspend fun ytVideo(vid: String): Video {
+        val flux = withContext(Dispatchers.IO) {
+            val parExtracteur = try { NewPipeAudio.resolveVideoPlayable(vid) } catch (t: Throwable) {
+                Log.w(TAG, "YouTube extracteur KO (${t.javaClass.simpleName}) → lecture de secours"); null
+            }
+            if (parExtracteur != null) Triple(
+                parExtracteur.first,
+                if (parExtracteur.second) androidx.media3.common.MimeTypes.APPLICATION_MPD else androidx.media3.common.MimeTypes.VIDEO_MP4,
+                CHROME_UA,
+            ) else NewPipeAudio.lectureSecours(vid)
+        } ?: throw Exception("YouTube : aucun flux lisible pour $vid")
+        return Video(source = flux.first, type = flux.second, headers = mapOf("User-Agent" to flux.third))
+    }
+
     // ───────────────────────── caches ─────────────────────────
 
     private const val CACHE_MS = 60 * 60 * 1000L          // catalogue : 1 h
@@ -488,7 +630,12 @@ object MiniDramaProvider : Provider {
         //   parallèle, cache 1 h) pour composer un accueil riche, façon TMDB.
         runCatching { ensureFullCatalog() }.onFailure { Log.w(TAG, "catalogue complet : ${it.message}") }
         if (shows.isEmpty()) ensureHome()
-        runCatching { ensureDm() }.onFailure { Log.w(TAG, "Dailymotion : ${it.message}") }
+        coroutineScope {
+            listOf(
+                async { runCatching { ensureDm() }.onFailure { Log.w(TAG, "Dailymotion : ${it.message}") } },
+                async { runCatching { ensureYt() }.onFailure { Log.w(TAG, "YouTube : ${it.message}") } },
+            ).awaitAll()
+        }
         val tous = shows.values.toList()
         val out = ArrayList<Category>()
         val dejaVus = HashSet<Int>()
@@ -503,7 +650,8 @@ object MiniDramaProvider : Provider {
             .distinctBy { it.id }.take(10)
         // + 5 séries complètes VF de Dailymotion (les plus vues du moment).
         val dmCarrousel = dmRangees.getOrNull(1)?.second.orEmpty().take(15).shuffled().take(5).mapNotNull { dmSeries[it] }
-        val itemsCarrousel: List<Show> = carrousel.map { it.toTvShow() } + dmCarrousel.map { it.toMovie() }
+        val ytCarrousel = ytToutes().take(20).shuffled().take(6)
+        val itemsCarrousel: List<Show> = carrousel.map { it.toTvShow() } + dmCarrousel.map { it.toMovie() } + ytCarrousel.map { it.toMovie() }
         if (itemsCarrousel.isNotEmpty()) out.add(Category(Category.FEATURED, itemsCarrousel.shuffled()))
 
         // 2) Dailymotion : les grandes rangées VF en tête (le plus gros du catalogue).
@@ -511,7 +659,15 @@ object MiniDramaProvider : Provider {
             val l = cles.mapNotNull { dmSeries[it] }.take(30)
             if (l.size >= 4) out.add(Category(nom, l.map { it.toMovie() }))
         }
+        // YouTube en tête : chaînes validées 100 % VF (le catalogue le plus fiable).
+        val ytTout = ytToutes()
+        if (ytTout.size >= 4) out.add(Category("Séries complètes en VF", ytTout.take(40).map { it.toMovie() }))
         dmRangees.take(2).forEach { (nom, cles) -> rangeeDm(nom, cles) }
+        // Thèmes (titres YouTube).
+        for ((nom, re) in YT_THEMES) {
+            val l = ytTout.filter { re.containsMatchIn(it.titre) }.take(30)
+            if (l.size >= 4) out.add(Category("$nom · VF", l.map { it.toMovie() }))
+        }
 
         // 3) Rangées « éditoriales » Mini Drama.
         rangee("Les plus populaires", populaires)
@@ -525,6 +681,11 @@ object MiniDramaProvider : Provider {
         rangee("Les plus longues sagas", tous.sortedByDescending { it.episodesCount ?: 0 })
         rangee("Vite vues (les plus courtes)", tous.filter { (it.episodesCount ?: 0) > 0 }.sortedBy { it.episodesCount ?: 0 })
         rangee("À découvrir", tous.shuffled())
+        // Une rangée par chaîne YouTube.
+        ytParChaine.forEach { (nom, vids) ->
+            val l = vids.mapNotNull { ytSeries[it] }
+            if (l.size >= 4) out.add(Category(nom, l.map { it.toMovie() }))
+        }
         // Rangées thématiques Dailymotion (VF).
         dmRangees.drop(2).forEach { (nom, cles) -> rangeeDm(nom, cles) }
         // 4) Les autres catégories du site, calculées depuis les tags de chaque série (les plus fournies d'abord).
@@ -550,6 +711,16 @@ object MiniDramaProvider : Provider {
         val dmEnLigne = runCatching { dmRanger(dmSearch("$query doublage")) }.getOrDefault(emptyList())
         val dmLocal = dmSeries.values.filter { normalize(it.titre).contains(qn) }.map { it.cle }
         val dmItems = (dmLocal + dmEnLigne).distinct().mapNotNull { dmSeries[it]?.toMovie() }
+        // YouTube : séries connues dont le titre correspond + recherche en ligne limitée aux chaînes validées.
+        runCatching { ensureYt() }
+        val motsYt = qn.split(" ").filter { it.length > 1 }
+        val ytLocal = ytSeries.values.filter { val t = normalize(it.titre); t.contains(qn) || (motsYt.isNotEmpty() && motsYt.all { w -> t.contains(w) }) }
+        val ytEnLigne = runCatching {
+            NewPipeAudio.searchVideos("$query drama", limit = 60, maxPages = 2)
+                .filter { it.author.lowercase() in YT_NOMS && (it.durationS >= 40 * 60 || it.durationS <= 0) }
+                .map { v -> ytSeries.getOrPut(v.videoId) { YtSerie(v.videoId, nettoyerTitreYt(v.title), v.author, v.durationS) } }
+        }.getOrDefault(emptyList())
+        val ytItems = (ytLocal + ytEnLigne).distinctBy { it.vid }.map { it.toMovie() }
         val q = normalize(query)
         val words = q.split(" ").filter { it.length > 1 }
         val scored = shows.values.mapNotNull { tv ->
@@ -566,7 +737,7 @@ object MiniDramaProvider : Provider {
             }
             if (score > 0) score to tv else null
         }
-        return scored.sortedByDescending { it.first }.map { it.second.toTvShow() } + dmItems
+        return scored.sortedByDescending { it.first }.map { it.second.toTvShow() } + ytItems + dmItems
     }
 
     /** Onglet Films = séries complètes VF de Dailymotion, des plus récentes aux plus anciennes. */
@@ -578,9 +749,10 @@ object MiniDramaProvider : Provider {
         if (page == 1) {
             filmsDejaDonnes.clear()
             runCatching { ensureDm() }
+            runCatching { ensureYt() }
             val l = dmSeries.values.sortedByDescending { it.date }
             filmsDejaDonnes.addAll(l.map { it.cle })
-            return l.map { it.toMovie() }
+            return ytToutes().map { it.toMovie() } + l.map { it.toMovie() }
         }
         val cles = coroutineScope {
             listOf(
@@ -601,7 +773,9 @@ object MiniDramaProvider : Provider {
     }
 
     override suspend fun getMovie(id: String): Movie =
-        if (id.startsWith(DM_PREFIX)) dmGetMovie(id) else Movie(id = id, title = "")
+        if (id.startsWith(DM_PREFIX)) dmGetMovie(id)
+        else if (id.startsWith(YT_PREFIX)) ytGetMovie(id)
+        else Movie(id = id, title = "")
 
     override suspend fun getTvShow(id: String): TvShow {
         val tvId = idOf(id) ?: return TvShow(id = id)
@@ -705,6 +879,12 @@ object MiniDramaProvider : Provider {
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         if (id.startsWith(DM_PREFIX)) return dmServers(id)
+        if (id.startsWith(YT_PREFIX)) {
+            val vid = id.removePrefix(YT_PREFIX)
+            val chaine = ytSeries[vid]?.chaine ?: "YouTube"
+            return listOf(Video.Server(id = "ytv|$vid", name = "YouTube · $chaine [VF]", src = "https://www.youtube.com/watch?v=$vid")
+                .also { it.language = "VF" })
+        }
         val tvId = idOf(id) ?: return emptyList()
         val num = id.substringAfterLast(":").toIntOrNull()
             ?: (videoType as? Video.Type.Episode)?.number ?: return emptyList()
@@ -726,6 +906,7 @@ object MiniDramaProvider : Provider {
 
     override suspend fun getVideo(server: Video.Server): Video {
         if (server.id.startsWith("dmv|")) return DailymotionExtractor().extract(server.src)
+        if (server.id.startsWith("ytv|")) return ytVideo(server.id.removePrefix("ytv|"))
         val parts = server.id.split("|")
         val tvId = parts.getOrNull(1)?.toIntOrNull()
         val num = parts.getOrNull(2)?.toIntOrNull()

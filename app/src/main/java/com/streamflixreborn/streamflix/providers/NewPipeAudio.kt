@@ -230,6 +230,46 @@ object NewPipeAudio {
     fun videoIdOf(watchUrl: String): String? =
         Regex("(?:v=|youtu\\.be/|/shorts/)([A-Za-z0-9_-]{11})").find(watchUrl)?.groupValues?.get(1)
 
+    /**
+     * 2026-10-20 — Mini Drama : vidéos de l'onglet « Vidéos » d'une chaîne YouTube (identifiant
+     * UC…), les plus récentes d'abord. Une page ≈ 30 vidéos. Lève une exception si NewPipe échoue
+     * (l'appelant décide quoi faire).
+     */
+    fun videosChaine(channelId: String, maxPages: Int = 1): List<VideoResult> {
+        ensureInit()
+        val service = ServiceList.YouTube
+        val info = org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(service, "https://www.youtube.com/channel/$channelId")
+        val onglet = info.tabs.firstOrNull {
+            it.contentFilters.contains(org.schabi.newpipe.extractor.channel.tabs.ChannelTabs.VIDEOS)
+        } ?: return emptyList()
+        val tabInfo = org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getInfo(service, onglet)
+        val out = ArrayList<VideoResult>()
+        val seen = HashSet<String>()
+        fun consume(items: List<org.schabi.newpipe.extractor.InfoItem>) {
+            for (item in items) {
+                if (item !is StreamInfoItem) continue
+                val vid = videoIdOf(item.url ?: continue) ?: continue
+                if (!seen.add(vid)) continue
+                out.add(VideoResult(
+                    videoId = vid,
+                    title = item.name ?: continue,
+                    author = item.uploaderName ?: info.name ?: "",
+                    durationS = item.duration.toInt(),
+                    thumbnail = "https://i.ytimg.com/vi/$vid/hqdefault.jpg",
+                ))
+            }
+        }
+        consume(tabInfo.relatedItems)
+        var next = tabInfo.nextPage
+        var n = 1
+        while (next != null && n++ < maxPages) {
+            val page = org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getMoreItems(service, onglet, next)
+            consume(page.items)
+            next = page.nextPage
+        }
+        Log.i(TAG, "videosChaine $channelId → ${out.size} vidéos")
+        return out
+    }
     /** Recherche VIDÉOS YouTube (clips, films, extraits…), paginée. */
     suspend fun searchVideos(query: String, limit: Int = 60, maxPages: Int = 3): List<VideoResult> =
         withContext(Dispatchers.IO) {

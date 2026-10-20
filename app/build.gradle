@@ -266,7 +266,9 @@ dependencies {
     //   NewPipe et les classes venaient de Firebase. Firebase parti, plus de doublon possible :
     //   NewPipe doit reprendre son propre protobuf, sinon la recherche musicale YouTube lÃ¨ve une
     //   NoClassDefFoundError Ã  la premiÃ¨re requÃªte. NE PAS remettre cette exclusion.
-    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.26.5')
+    // 2026-10-20 (user : « vérifie que notre NewPipe est à jour ») : même commit que l'appli NewPipe
+    //   (branche dev, 13/10) — 51 commits après v0.26.5, dont les clients YouTube mis à jour.
+    implementation('com.github.TeamNewPipe:NewPipeExtractor:8443c91bf4276c326f7b33e30a36d88e0ab94cfe')
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     // 2026-05-07 : conscrypt 2.5.3 â€” libs natives 16 KB-aligned (fix popup
     // "Android App Compatibility" sur Android 16+ avec page size 16 KB).
