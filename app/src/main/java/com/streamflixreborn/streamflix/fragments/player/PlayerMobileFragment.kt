@@ -1095,17 +1095,26 @@ class PlayerMobileFragment : Fragment() {
         if (args.id.startsWith("minidrama-")) ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
+    /** 2026-10-20 : true = ce lecteur a juste redirige vers la liseuse de scans et se referme. */
+    private var redirectionScan = false
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
+        // 2026-10-20 : un episode de scans (id scan::...) s'ouvre dans la liseuse, pas ici.
+        if (com.streamflixreborn.streamflix.activities.ScanReaderActivity.redirigerSiScan(this, args.id, args.videoType)) {
+            redirectionScan = true
+            return View(requireContext())
+        }
         _binding = FragmentPlayerMobileBinding.inflate(inflater, container, false)
         return binding.root
     }
 
     override fun onResume() {
         super.onResume()
+        if (redirectionScan) return
         if (!isSetupDone) {
             requireActivity().requestedOrientation = orientationLecteur()
             
@@ -1162,6 +1171,7 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        if (redirectionScan) return
 
         // 2026-09-27 — AUDIT DES TÉLÉCHARGEMENTS (debug uniquement) : depuis le PC,
         //   adb shell am broadcast -a com.streamfr.AUDIT_DL
@@ -2154,6 +2164,7 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onStop() {
         super.onStop()
+        if (redirectionScan) return
         val inPip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
                 requireActivity().isInPictureInPictureMode
         if (::player.isInitialized && !inPip) {
@@ -2163,6 +2174,7 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        if (redirectionScan) return
         com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(false)
         // 2026-08-02 : on sort du lecteur → plus d'hébergeur courant. Sans ça, un changement de
         //   format fait depuis les réglages généraux serait attribué au dernier hébergeur lu.
@@ -7351,6 +7363,7 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        if (redirectionScan) return
         stopProgressHandler()
         hideNextEpisodeOverlay()
     }

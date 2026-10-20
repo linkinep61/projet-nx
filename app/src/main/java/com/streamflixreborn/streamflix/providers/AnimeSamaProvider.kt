@@ -436,6 +436,10 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     private suspend fun fetchText(url: String): String = fetchTextWith(url, client)
 
+    /** 2026-10-20 : acces pour le profil Scans (meme bypass Cloudflare que le provider). */
+    internal suspend fun documentPourScans(url: String): Document = fetchDocument(url)
+    internal suspend fun textePourScans(url: String): String = fetchText(url)
+
     private suspend fun probeText(url: String): String = fetchTextWith(url, probeClient)
 
     private suspend fun fetchTextWith(url: String, httpClient: OkHttpClient): String = withContext(Dispatchers.IO) {

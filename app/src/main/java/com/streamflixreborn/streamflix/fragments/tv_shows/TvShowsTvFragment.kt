@@ -141,19 +141,30 @@ class TvShowsTvFragment : Fragment() {
         if (_binding == null) return
         // 2026-06-09 : applique le fond d'écran personnalisé.
         com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+        // 2026-10-20 (user : « problème de transfert de vidéo sur la version TV », Chromecast) :
+        //   au retour du plein écran, le lecteur restait accroché à la PlayerView de
+        //   HomeTv (cachée) → image décodée mais jamais affichée (rendu=0), aperçu noir
+        //   et compteur figé. Même correctif que TvShowsMobile (2026-06-23) : CE fragment
+        //   enregistre SA PlayerView auprès du MiniPlayerController, puis la ré-accroche
+        //   après le layout pour passer après un éventuel attach de HomeTv.
+        MiniPlayerController.attachPlayerView(binding.miniPlayerView, null)
+        binding.miniPlayerView.post {
+            if (_binding != null && isResumed) {
+                MiniPlayerController.attachPlayerView(binding.miniPlayerView, null)
+                Log.d("TvShowsTv", "onResume: post-layout re-attach (PlayerView de ce fragment)")
+            }
+        }
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         if (MiniPlayerController.getPlayer() == null) {
             Log.d("TvShowsTv", "onResume: player was released, re-initializing for $channelId")
             MiniPlayerController.initPlayer(requireContext())
-            binding.miniPlayerView.player = MiniPlayerController.getPlayer()
+            MiniPlayerController.attachPlayerView(binding.miniPlayerView, null)
             MiniPlayerController.playChannel(
                 channelId,
                 MiniPlayerController.currentChannelName ?: channelId,
                 MiniPlayerController.currentChannelPoster
             )
-        } else {
-            binding.miniPlayerView.player = MiniPlayerController.getPlayer()
         }
 
         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)

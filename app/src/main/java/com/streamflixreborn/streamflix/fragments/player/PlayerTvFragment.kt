@@ -673,6 +673,7 @@ class PlayerTvFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        if (redirectionScan) return
         if (!isSetupDone) {
             requireActivity().requestedOrientation =
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -721,11 +722,19 @@ class PlayerTvFragment : Fragment() {
     /** 2026-10-20 : vrai seulement quand le user a ouvert lui-même les sous-titres → messages OpenSubtitles autorisés. */
     private var sousTitresDemandes = false
 
+    /** 2026-10-20 : true = ce lecteur a juste redirige vers la liseuse de scans et se referme. */
+    private var redirectionScan = false
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
+        // 2026-10-20 : un episode de scans (id scan::...) s'ouvre dans la liseuse, pas ici.
+        if (com.streamflixreborn.streamflix.activities.ScanReaderActivity.redirigerSiScan(this, args.id, args.videoType)) {
+            redirectionScan = true
+            return View(requireContext())
+        }
         _binding = FragmentPlayerTvBinding.inflate(inflater, container, false)
         return binding.root
     }
@@ -933,6 +942,7 @@ class PlayerTvFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        if (redirectionScan) return
 
         // 2026-07-12 (user « au moment où on fait play (film) / on clique un épisode (série), rien
         //   d'autre ne doit tourner en arrière-plan à part la recherche de serveurs ») : on MET EN
@@ -1982,6 +1992,7 @@ class PlayerTvFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        if (redirectionScan) return
 
         if (::player.isInitialized) {
             try {
@@ -1997,6 +2008,7 @@ class PlayerTvFragment : Fragment() {
 
         override fun onDestroyView() {
             super.onDestroyView()
+            if (redirectionScan) return   // lecteur jamais initialise (scan redirige vers la liseuse)
             com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(false)
             // 2026-08-02 : sortie du lecteur → plus d'hébergeur courant (cf. PlayerMobileFragment).
             UserPreferences.currentPlayerHost = null

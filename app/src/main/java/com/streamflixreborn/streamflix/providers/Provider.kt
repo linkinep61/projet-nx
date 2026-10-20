@@ -80,7 +80,9 @@ interface Provider {
             val group: ProviderGroup = ProviderGroup.FILMS_SERIES,
             val enrichHome: Boolean = true,
             /** 2026-10-20 : provider réservé au téléphone (vidéo verticale) → masqué sur TV. */
-            val mobileOnly: Boolean = false
+            val mobileOnly: Boolean = false,
+            /** 2026-10-20 : provider à part (Scans) → jamais mélangé aux autres, mais visible sur TV. */
+            val separe: Boolean = false
         )
 
         val providers: Map<Provider, ProviderSupport> = linkedMapOf(
@@ -132,6 +134,8 @@ interface Provider {
             // ─── Anime (onglet Animés) — ordre interne inchangé ───
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
+            // 2026-10-20 (user) : profil « Scans » (mangas/manhwas à lire), un seul profil pour les sites de scans.
+            ScansProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false, separe = true),
             // 2026-07-03 (user "FrenchAnime est revenu en natif, supprime-le en web") :
             //   FrenchAnime repasse en provider NATIF (Kotlin) → plus AUCUNE WebView
             //   FrenchAnime. Le WebJsProvider FrenchAnime (french-anime.com + frenchanime.js)
@@ -216,7 +220,8 @@ interface Provider {
 
         /** 2026-10-20 (user : « il doit être séparé des autres… recherche indépendante ») : provider
          *  à part (Mini Drama) → jamais mélangé : ni recherche globale/unifiée, ni genres, ni backups. */
-        fun estSepare(provider: Provider?): Boolean = provider != null && providers[provider]?.mobileOnly == true
+        fun estSepare(provider: Provider?): Boolean = provider != null &&
+            (providers[provider]?.mobileOnly == true || providers[provider]?.separe == true)
 
         fun getProvidersByGroup(group: ProviderGroup): List<Provider> {
             return providers.filter { it.value.group == group }.keys.toList()

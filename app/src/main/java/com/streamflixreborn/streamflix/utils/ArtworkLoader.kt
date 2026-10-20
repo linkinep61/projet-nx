@@ -173,7 +173,9 @@ fun optimizeArtworkUrl(url: String?, targetWidthPx: Int): String? {
     if (url.contains("voirdrama.") || url.contains("dramacool")
         || url.contains("voir-anime") || url.contains("voiranime")
         || url.contains("french-anime") || url.contains("dessinanime")
-        || url.contains("flemmix.") || url.contains("wiflix.")) return url
+        || url.contains("flemmix.") || url.contains("wiflix.")
+        // 2026-10-20 : couvertures Sushiscan (profil Scans) — weserv renvoie 404, on charge en direct.
+        || url.contains("sushiscan.")) return url
     val noScheme = url.substringAfter("://")
     val originParam = if (isHttps) "ssl:$noScheme" else noScheme
     return "https://images.weserv.nl/?url=" +

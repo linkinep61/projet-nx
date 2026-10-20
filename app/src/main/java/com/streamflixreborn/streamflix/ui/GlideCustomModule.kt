@@ -129,7 +129,9 @@ class GlideCustomModule : AppGlideModule() {
                 //   (mon ajout le faisait rejeter par CF → jaquettes 403/grises).
                 val newRequest = request.newBuilder()
                     .header("User-Agent", ua)
-                    .header("Referer", "${request.url.scheme}://${request.url.host}/")
+                    // 2026-10-20 : on garde le Referer fourni par l'appelant (pages de scans : le CDN exige
+                    //   le site d'origine, pas son propre sous-domaine), sinon celui de l'hôte.
+                    .header("Referer", request.header("Referer") ?: "${request.url.scheme}://${request.url.host}/")
                     .build()
                 chain.proceed(newRequest)
             }
