@@ -97,6 +97,12 @@
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
 
         <!-- Demande de permission média auto-enchaînée (transparente, navigable télécommande). -->
+        <!-- 2026-10-20 : liseuse du profil Scans (absente de ce manifeste = plantage en version normale). -->
+        <activity
+            android:name=".activities.ScanReaderActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
         <activity
             android:name=".activities.LocalMediaPermissionActivity"
             android:exported="false"
