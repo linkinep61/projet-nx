@@ -26,7 +26,7 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
     override val name = "Frembed"
     // 2026-07-22 : frembed.cyou / .hair morts → défaut = frembed.asia (repli si newUrl vide ;
     //   en pratique le provider passe déjà son baseUrl résolu).
-    val defaultUrl = "https://frembed.asia"
+    val defaultUrl = "https://frembed.bar"
     override var mainUrl = newUrl.ifBlank { defaultUrl }
 
     data class listLinks (

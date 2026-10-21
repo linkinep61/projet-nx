@@ -78,7 +78,11 @@ class LiveReconnectingHttpDataSource(
             urlFull.contains("netplus.ch") ||
             urlFull.contains("diff.tf1.fr") ||
             urlFull.contains("ftven.fr") ||
-            urlFull.contains("bct.nextradiotv.com")
+            urlFull.contains("bct.nextradiotv.com") ||
+            // 2026-10-21 : segments Pluto (siloh-ns1.plutotv.net/live/…/123456.ts) pris à tort
+            //   pour du Xtream → le même segment rejoué en boucle (chaînes « Nouveau sur Pluto TV »).
+            urlFull.contains("plutotv.net") ||
+            urlFull.contains("pluto.tv")
 
         enableReconnect = !hasHlsMarker &&
             urlPath.contains("/live/") &&

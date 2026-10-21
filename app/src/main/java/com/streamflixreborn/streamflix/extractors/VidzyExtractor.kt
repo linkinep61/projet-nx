@@ -180,6 +180,15 @@ class VidzyExtractor : Extractor() {
             val response1 = client.newCall(request).execute()
             val body1 = response1.body?.string() ?: throw Exception("Empty response from Vidzy")
             Log.d(TAG, "Request 1 - code: ${response1.code}, length: ${body1.length}, cookies: ${cookieStore.size}")
+            // 2026-10-21 (user : « quand Vidzy renvoie cette page-là, on skip ») — page d'attente
+            //   « Chargement vidéo / moins de 3 minutes » : fichier coincé en traitement chez Vidzy.
+            //   Vérifié dans le navigateur : le compte à rebours repart de zéro et ne lit jamais.
+            //   On abandonne tout de suite (serveur en rouge) au lieu de 2 essais + 20 s de WebView.
+            if (body1.contains("<title>Chargement vidéo</title>") ||
+                (body1.contains("Chargement de la vidéo") && body1.contains("moins de 3 minutes"))) {
+                Log.w(TAG, "Page d'attente « Chargement vidéo » → vidéo indisponible chez Vidzy, on passe")
+                throw Exception("Vidzy: vidéo en cours de traitement chez l'hébergeur (page d'attente)")
+            }
 
             // Check if we got the real page (has packed JS)
             val hasPacked = body1.contains("function(p,a,c,k,e,d)") || body1.contains("eval(") || body1.contains("atob(s)")

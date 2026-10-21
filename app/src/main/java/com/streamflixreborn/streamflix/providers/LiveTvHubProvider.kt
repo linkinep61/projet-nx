@@ -3642,7 +3642,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 "?advertisingId=&appName=web&appVersion=9.9.0&deviceDNT=0" +
                 "&deviceId=$deviceId&deviceLat=0&deviceLon=0" +
                 "&deviceMake=Chrome&deviceModel=web&deviceType=web" +
-                "&deviceVersion=120.0.0.0&sid=$sid&jwt=$jwt"
+                "&deviceVersion=120.0.0.0&sid=$sid&jwt=$jwt&masterJWTPassthrough=true"
             val masterReq = okhttp3.Request.Builder()
                 .url(masterUrl)
                 .header("User-Agent", CHROME_UA)
@@ -3655,6 +3655,14 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
             Log.w(TAG, "Pluto master.m3u8 body (${masterBody.length} chars): ${masterBody.take(300)}")
 
+            // 2026-10-21 (user : chaînes Pluto sans son) — si le son est À PART
+            //   (#EXT-X-MEDIA:TYPE=AUDIO), la meilleure variante ne contient que l'image :
+            //   on donne le MASTER au lecteur (image + son). masterJWTPassthrough=true fait
+            //   porter le jwt par toutes les sous-playlists (sinon 401). Cf. PlutoTvResolver.
+            if (masterBody.lineSequence().any { it.startsWith("#EXT-X-MEDIA") && it.contains("TYPE=AUDIO") }) {
+                Log.w(TAG, "Pluto audio séparé → master au lecteur")
+                return@withContext masterUrl
+            }
             // Parser les variantes : chercher la meilleure résolution
             // Format HLS : #EXT-X-STREAM-INF:BANDWIDTH=...,RESOLUTION=...
             //               <relative or absolute URL>

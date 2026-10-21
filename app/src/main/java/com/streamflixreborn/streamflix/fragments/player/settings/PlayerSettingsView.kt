@@ -497,6 +497,20 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                     }.getOrNull() ?: 3_000L
                     return Pair(if (mort) 1 else 0, ms)
                 }
+                // 2026-10-21 (user : « depuis les groupes on tombe souvent sur du VOSTFR, alors
+                //   qu'on a plein de groupes avec du français ») : dans un groupe, la LANGUE passe
+                //   avant la vitesse. Même règle que le tri général (PlayerViewModel.isVfServer) :
+                //   un serveur qui annonce du VF (même « VF/VOSTFR ») compte comme VF. Un appui sur
+                //   le groupe lance donc son meilleur serveur en français ; le VOSTFR seulement s'il
+                //   n'y a pas de VF dans le groupe. Lecture du nom seulement, aucun test réseau.
+                fun estVf(s: Settings.Server): Boolean {
+                    val n = (s.name + " " + (s.language ?: "")).lowercase()
+                    if (Regex("""(^|[^a-z])vf([^a-z]|$)""").containsMatchIn(n)) return true
+                    if (n.contains("vostfr") || n.contains("sous-titr")) return false
+                    if (Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n)) return false
+                    if (n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b"))) return false
+                    return true
+                }
                 val favoris = serveurs.filter { estFavori(it) }
                 val idsFavoris = favoris.map { it.id }.toHashSet()
                 val groupes = LinkedHashMap<String, MutableList<Settings.Server>>()
@@ -511,7 +525,7 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 for ((nom, membresBruts) in groupes) {
                     if (membresBruts.size == 1) { lignes.add(membresBruts[0]); continue }
                     val cles = membresBruts.associateWith { cleVitesse(it) }
-                    val membres = membresBruts.sortedWith(compareBy({ cles[it]?.first }, { cles[it]?.second }))
+                    val membres = membresBruts.sortedWith(compareBy({ if (estVf(it)) 0 else 1 }, { cles[it]?.first }, { cles[it]?.second }))
                     lignes.add(SourceServeurs(nom, membres))
                     if (nom == sourceOuverte) {
                         ouverte = nom

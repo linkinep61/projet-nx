@@ -4809,6 +4809,7 @@ class PlayerTvFragment : Fragment() {
             //   faisait qu'on n'avait pas la même liste au 1er et au 2ᵉ lancement.
             if (_binding != null) {
                 Log.d("PlayerTvFragment", "Variante en échec (conservée, marquée) : ${server.name}")
+                com.streamflixreborn.streamflix.utils.ServeurRougeDebug.signaler(server.name, server.src, runCatching { player.currentMediaItem?.localConfiguration?.uri?.toString() }.getOrNull())
                 binding.settings.refreshChannelVariantList()
             }
         }

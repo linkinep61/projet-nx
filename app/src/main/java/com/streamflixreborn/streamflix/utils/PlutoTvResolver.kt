@@ -327,7 +327,7 @@ object PlutoTvResolver {
         val q = "advertisingId=&appName=web&appVersion=9.9.0&deviceDNT=0" +
             "&deviceId=$strClientId&deviceLat=0&deviceLon=0&deviceMake=Chrome" +
             "&deviceModel=web&deviceType=web&deviceVersion=120.0.0.0$adsParam" +
-            "&sid=$strSid&jwt=${strToken.orEmpty()}"
+            "&sid=$strSid&jwt=${strToken.orEmpty()}&masterJWTPassthrough=true"
         val masterUrl = "$stitcherHost$masterPath?$q"
         Log.w(TAG, "STREAM region=${jwtField(strToken.orEmpty(), "country")} ip=${jwtField(strToken.orEmpty(), "clientIP")} noAds=$noAds path=$masterPath")
         try {
@@ -360,6 +360,21 @@ object PlutoTvResolver {
             val variant = if (variantResolved.contains("jwt=")) variantResolved
                 else variantResolved + (if (variantResolved.contains("?")) "&" else "?") +
                     "jwt=${strToken.orEmpty()}"
+            // 2026-10-21 (user : « 4 chaînes de "Nouveau sur Pluto TV" sans son, à part Soda ») —
+            //   ces chaînes ont l'AUDIO À PART (#EXT-X-MEDIA:TYPE=AUDIO + AUDIO="…" sur les
+            //   variantes). La variante seule ne contient QUE l'image → aucun son. Pour elles on
+            //   donne le MASTER au lecteur, qui charge l'image ET la piste audio. Grâce à
+            //   masterJWTPassthrough=true, Pluto met le jwt sur toutes les sous-playlists
+            //   (vérifié : 200 avec, 401 sans). Les chaînes à son intégré restent sur la variante.
+            val audioSepare = master.lineSequence().any { it.startsWith("#EXT-X-MEDIA") && it.contains("TYPE=AUDIO") }
+            if (audioSepare) {
+                Log.d(TAG, "pluto audio séparé → master au lecteur")
+                return@withContext Video(
+                    source = masterUrl,
+                    type = "application/vnd.apple.mpegurl",
+                    headers = mapOf("User-Agent" to CHROME_UA),
+                )
+            }
             Log.d(TAG, "pluto variant ${if (variantResolved == masterUrl) "(master)" else "OK"} +jwt")
             Video(
                 source = variant,

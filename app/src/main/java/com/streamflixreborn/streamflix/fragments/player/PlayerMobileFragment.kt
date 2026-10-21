@@ -4472,6 +4472,7 @@ class PlayerMobileFragment : Fragment() {
         //   visible et cliquable si l'utilisateur veut retenter.
         if (_binding != null) {
             Log.d("PlayerMobileFragment", "Variante en échec (conservée, marquée) : ${server.name}")
+            com.streamflixreborn.streamflix.utils.ServeurRougeDebug.signaler(server.name, server.src, runCatching { player.currentMediaItem?.localConfiguration?.uri?.toString() }.getOrNull())
             binding.settings.refreshChannelVariantList()
         }
     }

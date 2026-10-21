@@ -58,7 +58,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
     //   Les anciens domaines morts sont ignorés dans le cache pour forcer la bascule.
     private val DEAD_DOMAINS = listOf("audin213", "frembed.bond", "frembed.hair", "frembed.cyou", "frembed.asia")
 
-    override val defaultPortalUrl: String = "https://frembed.casa/"
+    override val defaultPortalUrl: String = "https://frembed.bar/"
 
     override val portalUrl: String = defaultPortalUrl
         get() {
@@ -68,7 +68,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             return if (isValid) cachePortalURL else field
         }
 
-    override val defaultBaseUrl: String = "https://frembed.casa/"
+    override val defaultBaseUrl: String = "https://frembed.bar/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
