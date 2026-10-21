@@ -780,12 +780,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
      *   (« 12 après ignoreSource » puis « servers parsés (0) ») → Wiflix rendait 0.
      *   L'ancien format reste lu au cas où le site reviendrait en arrière.
      */
-    private fun srcLecteur(a: org.jsoup.nodes.Element, onclick: String): String? {
+    private fun srcLecteur(a: org.jsoup.nodes.Element, onclick: String, fx: Map<String, String> = emptyMap()): String? {
         if (onclick.contains("loadVideo('")) {
             return onclick.substringAfter("loadVideo('").substringBefore("'")
         }
         val brut = a.attr("data-v").trim().ifEmpty { return null }
         if (brut.startsWith("http") || brut.startsWith("//")) return brut
+        if (brut.startsWith("fx1_")) return fx[brut]
         val texte = try {
             String(android.util.Base64.decode(brut, android.util.Base64.DEFAULT), Charsets.UTF_8)
         } catch (e: Exception) { return null }
@@ -798,6 +799,78 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 }
             )
         }
+    }
+
+    /**
+     * 2026-10-21 — NOUVEAU FORMAT flemmix (user : « Wiflix a un peu changé son design »).
+     *   Les boutons portent maintenant `data-v="fx1_…"` : un JETON, plus l'adresse. La page
+     *   l'échange au clic contre la vraie adresse : POST /ajax_player.php avec v=<jeton>,
+     *   k=<clé de la page>, b=1 → JSON {"u": "https://…"}. La clé change à chaque chargement
+     *   de page ; elle est cachée dans un script (`var _a=[…],_m=N` : chaque nombre XOR N
+     *   donne un caractère, la clé est avant le premier « | »). Vérifié : pas besoin de cookie.
+     *   Le nom du lecteur est lui aussi caché : `<span data-n="VmlkYXJh">` (base64 → « Vidara »),
+     *   le texte brut du HTML vaut « Lecteur HD » pour tous.
+     */
+    //   2026-10-21 (2) — sans SIGNATURE, le site répond quand même… avec de FAUX liens (Vidara
+    //   /api/stream 404, VOE 404 : vu sur Spider-Man, le vrai Vidara était un autre code). Leur
+    //   script ajoute au POST `s=<signature>&t=1` : s = hachage de « jeton|clé|sel » partant de
+    //   `_in`, h = (h × `_mu` + caractère) sur 31 bits, en 8 chiffres hexa. Le sel est la partie
+    //   après « | » du texte décodé ; `_in` et `_mu` changent à chaque page.
+    private class CleFx(val k: String, val sel: String, val depart: Long, val mult: Long) {
+        fun signer(jeton: String): String {
+            var h = depart
+            for (c in "$jeton|$k|$sel") h = (h * mult + c.code) and 0x7fffffffL
+            return h.toString(16).padStart(8, '0').takeLast(8)
+        }
+    }
+
+    private fun cleFx(html: String): CleFx? {
+        val m = Regex("""var _a=\[([\d,]+)\],_m=(\d+),_in=(\d+),_mu=(\d+)""").find(html) ?: return null
+        val x = m.groupValues[2].toIntOrNull() ?: return null
+        val texte = m.groupValues[1].split(',').mapNotNull { it.trim().toIntOrNull() }
+            .map { (it xor x).toChar() }.joinToString("")
+        val k = texte.substringBefore('|').ifEmpty { return null }
+        return CleFx(k, texte.substringAfter('|', ""), m.groupValues[3].toLong(), m.groupValues[4].toLong())
+    }
+
+    /** Échange en parallèle les jetons `fx1_` des boutons contre leurs adresses. */
+    private suspend fun resoudreFx(liens: List<org.jsoup.nodes.Element>, html: String, page: String): Map<String, String> {
+        val jetons = liens.map { it.attr("data-v").trim() }.filter { it.startsWith("fx1_") }.distinct()
+        if (jetons.isEmpty()) return emptyMap()
+        val cle = cleFx(html)
+        val url = baseUrl.trimEnd('/') + "/ajax_player.php"
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            coroutineScope {
+                jetons.map { jeton ->
+                    async {
+                        runCatching {
+                            val corps = okhttp3.FormBody.Builder().add("v", jeton).add("k", cle?.k ?: "").add("b", "1")
+                                .apply { if (cle != null) add("s", cle.signer(jeton)).add("t", "1") }.build()
+                            val req = Request.Builder().url(url).post(corps)
+                                .header("User-Agent", WebViewResolver.STEALTH_UA)
+                                .header("Referer", page)
+                                .header("X-Requested-With", "XMLHttpRequest")
+                                .build()
+                            bypassClient.newCall(req).execute().use { r ->
+                                if (!r.isSuccessful) null
+                                else org.json.JSONObject(r.body?.string().orEmpty()).optString("u")
+                                    .takeIf { it.startsWith("http") }?.let { jeton to it }
+                            }
+                        }.getOrNull()
+                    }
+                }.mapNotNull { it.await() }.toMap()
+            }
+        }.also { Log.i("WiflixProvider", "jetons fx1 : ${it.size}/${jetons.size} résolus (clé ${if (cle == null) "absente" else "ok"})") }
+    }
+
+    /** Nom affiché d'un lecteur : `data-n` (base64) s'il existe, sinon le texte. */
+    private fun nomLecteur(a: org.jsoup.nodes.Element): String {
+        val span = a.selectFirst("span")
+        val n = span?.attr("data-n")?.trim().orEmpty()
+        if (n.isNotEmpty()) runCatching {
+            String(android.util.Base64.decode(n, android.util.Base64.DEFAULT), Charsets.UTF_8).trim()
+        }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { return it }
+        return span?.text()?.trim() ?: a.text().trim()
     }
 
     suspend fun ignoreSource(source: String): Boolean {
@@ -2098,7 +2171,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 //   et combien en perd-on au filtrage ? (user : « pourquoi les serveurs Wiflix
                 //   n'apparaissent pas ? » alors que le site en affiche une quinzaine).
                 val allAnchors = document.select("div.$rel a")
-                val keptAnchors = allAnchors.filter { ignoreSource(it.text().trim()) == false }
+                val keptAnchors = allAnchors.filter { ignoreSource(nomLecteur(it)) == false }
+                val fxSerie = resoudreFx(keptAnchors, document.html(), "${baseUrl}serie-en-streaming/$tvShowId")
                 val ecartesSerie = hotesEcartesParLeSite(document.html())
                 Log.i("WiflixProvider", "serveurs série: ${allAnchors.size} <a> trouvés, " +
                     "${keptAnchors.size} après ignoreSource (rel=$rel)")
@@ -2113,7 +2187,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         //   les <a> qui sont en réalité des boutons "Sauvegarder
                         //   en favoris" ou autres liens parasites du HTML Wiflix.
                         //   Résultat : faux serveur "Save" qui n'existe pas.
-                        val src = srcLecteur(it, onclick) ?: return@mapIndexedNotNull null
+                        val src = srcLecteur(it, onclick, fxSerie) ?: return@mapIndexedNotNull null
                         // Filtre robuste : le src doit être une vraie URL HTTP(S),
                         //   sinon c'est un fragment JS qui s'est faufilé.
                         if (src.isBlank() || !src.startsWith("http", ignoreCase = true)) {
@@ -2124,7 +2198,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                             Log.i("WiflixProvider", "lecteur écarté comme sur le site : ${it.text().trim()}")
                             return@mapIndexedNotNull null
                         }
-                        val spanText = it.selectFirst("span")?.text()?.trim() ?: ""
+                        val spanText = nomLecteur(it)
                         val serviceName = Extractor.identifyServiceName(src)
                         val displayName = when {
                             serviceName != null && spanText.isNotEmpty() -> "$serviceName — $spanText"
@@ -2162,7 +2236,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 // 2026-07-31 : même diagnostic que pour les séries (combien de lecteurs la page
                 //   expose vraiment vs combien survivent au filtrage).
                 val allMovieAnchors = document.select("div.tabs-sel a")
-                val keptMovieAnchors = allMovieAnchors.filter { ignoreSource(it.text().trim()) == false }
+                val keptMovieAnchors = allMovieAnchors.filter { ignoreSource(nomLecteur(it)) == false }
+                val fxFilm = resoudreFx(keptMovieAnchors, document.html(), "${baseUrl}film-en-streaming/$id")
                 val ecartesFilm = hotesEcartesParLeSite(document.html())
                 Log.i("WiflixProvider", "serveurs film: ${allMovieAnchors.size} <a> trouvés, " +
                     "${keptMovieAnchors.size} après ignoreSource")
@@ -2177,7 +2252,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         //   les <a> qui sont en réalité des boutons "Sauvegarder
                         //   en favoris" ou autres liens parasites du HTML Wiflix.
                         //   Résultat : faux serveur "Save" qui n'existe pas.
-                        val src = srcLecteur(it, onclick) ?: return@mapIndexedNotNull null
+                        val src = srcLecteur(it, onclick, fxFilm) ?: return@mapIndexedNotNull null
                         // Filtre robuste : le src doit être une vraie URL HTTP(S),
                         //   sinon c'est un fragment JS qui s'est faufilé.
                         if (src.isBlank() || !src.startsWith("http", ignoreCase = true)) {
@@ -2188,7 +2263,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                             Log.i("WiflixProvider", "lecteur écarté comme sur le site : ${it.text().trim()}")
                             return@mapIndexedNotNull null
                         }
-                        val spanText = it.selectFirst("span")?.text()?.trim() ?: ""
+                        val spanText = nomLecteur(it)
                         val serviceName = Extractor.identifyServiceName(src)
                         val displayName = when {
                             serviceName != null && spanText.isNotEmpty() -> "$serviceName — $spanText"
