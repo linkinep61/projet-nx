@@ -2947,6 +2947,7 @@ class PlayerMobileFragment : Fragment() {
         //   SUPPRIMÉ : les "passes" qui effaçaient les DEAD et rebouclaient sur des serveurs déjà
         //   morts (cause du re-pick d'un serveur mort, ex Videasy VOSTFR), et le skip basé sur les
         //   drapeaux HEAD peu fiables. On ne se fie qu'à l'échec RÉEL sur ce titre.
+        coeurSuivant(current, allServers)?.let { return it }
         return allServers.firstOrNull { srv ->
             (current == null || srv.id != current.id) &&
                 com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(srv.id) !=
@@ -4430,8 +4431,29 @@ class PlayerMobileFragment : Fragment() {
      * Remplace les `servers.getOrNull(indexOf+1)` bruts qui ré-essayaient
      * les serveurs rouges en boucle.
      */
+    /** 2026-10-21 (user : « les cœurs prioritaires ne devraient pas être impactés… c'est
+     *  l'utilisateur qui les a placés là ») : quand un serveur casse, on essaie d'abord les
+     *  serveurs ❤ pas encore essayés — cœurs de la chaîne dans l'ordre choisi par l'user, puis
+     *  cœurs des films/séries — avant de continuer dans le reste de la liste. */
+    private fun coeurSuivant(current: Video.Server?, liste: List<Video.Server> = servers): Video.Server? {
+        fun canon(id: String): String {
+            val p = id.split("::")
+            return if (p.size >= 4 && p[0].endsWith("_stream")) "${p[0]}::${p[1]}::${p[2]}" else id
+        }
+        fun libre(s: Video.Server) = s.id != current?.id &&
+            com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(s.id) !=
+                com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+        val favIds = runCatching { IptvFavorites.getFavoritesForChannel(args.id) }.getOrDefault(emptyList())
+        for (f in favIds) {
+            val c = canon(f)
+            liste.firstOrNull { canon(it.id) == c && libre(it) }?.let { return it }
+        }
+        return liste.firstOrNull { libre(it) && com.streamflixreborn.streamflix.utils.ExtractorRanker.estFavori(it) }
+    }
+
     private fun nextNonDeadServer(current: Video.Server?): Video.Server? {
         if (current == null) return null
+        coeurSuivant(current)?.let { return it }
         val idx = servers.indexOfFirst { it.id == current.id }
         if (idx < 0) return null
         return servers.drop(idx + 1).firstOrNull {

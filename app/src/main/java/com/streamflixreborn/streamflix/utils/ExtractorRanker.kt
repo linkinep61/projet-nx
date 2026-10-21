@@ -538,6 +538,14 @@ object ExtractorRanker {
      *  favoriser un Filemoon les favorisait TOUS. */
     fun favKeyFor(server: Video.Server): String = favKeyFor(server.name)
 
+    /** 2026-10-21 : vrai si le serveur porte un ❤ pour le provider courant. */
+    fun estFavori(server: Video.Server): Boolean = runCatching {
+        val p = UserPreferences.currentProvider?.name
+        if (p.isNullOrEmpty()) return@runCatching false
+        val favoris = ExtractorToggleStore.getFavorites(p)
+        favoris.isNotEmpty() && favKeyFor(server) in favoris
+    }.getOrDefault(false)
+
     /** Construit la clé favori langue-aware depuis un nom de serveur. */
     fun favKeyFor(serverName: String): String {
         val parts = serverName.split(Regex("\\s[—–·-]\\s"), limit = 2)

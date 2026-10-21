@@ -697,9 +697,14 @@ class PlayerViewModel(
     private suspend fun emitQualitySortedServers() {
         val list = allKnownServers
         if (list.isEmpty()) return
-        val vfSorted = list.filter { isVfServer(it) }.sortedByDescending { qualityRank(it.quality) }
-        val nonVf = list.filter { !isVfServer(it) }
-        val merged = vfSorted + nonVf
+        // 2026-10-21 (user : « les cœurs prioritaires ne devraient pas être impactés ») : les
+        //   serveurs ❤ restent en tête, dans leur ordre ; le tri par qualité ne touche que le reste.
+        val coeurs = list.filter { com.streamflixreborn.streamflix.utils.ExtractorRanker.estFavori(it) }
+        val idsCoeurs = coeurs.map { it.id }.toHashSet()
+        val reste = list.filter { it.id !in idsCoeurs }
+        val vfSorted = reste.filter { isVfServer(it) }.sortedByDescending { qualityRank(it.quality) }
+        val nonVf = reste.filter { !isVfServer(it) }
+        val merged = coeurs + vfSorted + nonVf
         allKnownServers = merged
         _serversReordered.emit(collapseIdenticalServers(merged))
     }
@@ -2037,12 +2042,14 @@ class PlayerViewModel(
             kotlinx.coroutines.delay(patienceMs)
             if (!job.isActive || getVideoJob !== job) return@launch
             val memeLangue = isVfServer(server)
-            val alternative = allKnownServers.firstOrNull { alt ->
+            // 2026-10-21 : parmi les serveurs déjà prêts, un ❤ passe en premier.
+            val alternative = allKnownServers.filter { alt ->
                 alt.id != server.id &&
                     alt.src.isNotBlank() &&
                     (!memeLangue || isVfServer(alt)) &&
                     com.streamflixreborn.streamflix.extractors.Extractor.peekCachedVideo(alt.src) != null
-            } ?: run {
+            }.sortedBy { if (com.streamflixreborn.streamflix.utils.ExtractorRanker.estFavori(it)) 0 else 1 }
+                .firstOrNull() ?: run {
                 Log.d("PlayerViewModel", "Patience ${patienceMs / 1000}s dépassée sur ${server.name}, aucune alternative prête → on attend")
                 return@launch
             }
