@@ -198,7 +198,7 @@ class TvShowViewHolder(
                                     ?.clearHomeCache()
                                 com.streamflixreborn.streamflix.utils.HomeCacheStore
                                     .clear(context, current)
-                                UserPreferences.currentProvider = current
+                                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged(forceRelaunch = true)
                             }
                         } catch (_: Throwable) { }
                     } else if (label.startsWith("🔒") || label.startsWith("🔓")) {
@@ -243,7 +243,9 @@ class TvShowViewHolder(
 
         val options = listOfNotNull(
             if (isFavorite) "★ Retirer des favoris" else "★ Ajouter aux favoris",
-            if (isBanned) "✕ Débannir cette chaîne" else "✕ Bannir cette chaîne",
+            // 2026-10-21 (user : « bannir, ça sert à rien… juste le code parental ») : pas de
+            //   « Bannir » sur un dossier, seulement le contrôle parental.
+            if (isGenericFolder) null else if (isBanned) "✕ Débannir cette chaîne" else "✕ Bannir cette chaîne",
             folderLockOption,
         ).toTypedArray()
 
@@ -296,7 +298,7 @@ class TvShowViewHolder(
                 if (!tvShow.id.startsWith("livehub::otf::")) {
                     try {
                         val current = UserPreferences.currentProvider
-                        if (current != null) UserPreferences.currentProvider = current
+                        if (current != null) com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged(forceRelaunch = true)
                     } catch (_: Throwable) { }
                 }
             }
@@ -332,7 +334,7 @@ class TvShowViewHolder(
                             ?.clearHomeCache()
                         com.streamflixreborn.streamflix.utils.HomeCacheStore
                             .clear(context, current)
-                        UserPreferences.currentProvider = current
+                        com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged(forceRelaunch = true)
                     }
                 } catch (_: Throwable) { }
             },

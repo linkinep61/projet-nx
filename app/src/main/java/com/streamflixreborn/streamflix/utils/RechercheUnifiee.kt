@@ -160,6 +160,9 @@ object RechercheUnifiee {
             .filter { (p, _) -> langue == null || p.language == langue }
             .filter { (p, _) -> !leger || p.name !in SAUTES_MODE_LEGER }
             .filter { (_, s) -> !s.mobileOnly }   // 2026-10-20 : Mini Drama jamais mélangé
+            // 2026-10-21 (user : « la recherche ne doit pas franchir le verrouillage ») :
+            //   un provider verrouillé (appui long → code parental) n'est pas interrogé.
+            .filter { (p, _) -> providerOuvert(p.name) }
             .filter { (_, s) ->
                 val iptv = s.group == Provider.Companion.ProviderGroup.IPTV
                 when (m) {
@@ -170,6 +173,10 @@ object RechercheUnifiee {
             }
             .map { it.key }
     }
+
+    private fun providerOuvert(nom: String): Boolean = runCatching {
+        com.streamflixreborn.streamflix.utils.ProviderLockStore.isAccessible(com.streamflixreborn.streamflix.StreamFlixApp.instance, nom)
+    }.getOrDefault(true)
 
     private fun titre(i: AppAdapter.Item): String = when (i) {
         is Movie -> i.title
@@ -634,7 +641,9 @@ object RechercheUnifiee {
             val provs = sources(m)
             val sections = ArrayList<Section>()
             // Mode léger : pas de « Ciné Films » (index VOD OLA +68 Mo, Vegeta +26 Mo chargés en entier).
-            if (m != Mode.LIVE && !UserPreferences.modeLeger) sections += Section("Ciné Films", null)
+            if (m != Mode.LIVE && !UserPreferences.modeLeger && providerOuvert(com.streamflixreborn.streamflix.providers.LiveTvHubProvider.name) &&
+                runCatching { com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isAccessible(ctx, "folder:vegetavod") }.getOrDefault(true))
+                sections += Section("Ciné Films", null)
             val hub = com.streamflixreborn.streamflix.providers.LiveTvHubProvider
             provs.forEach { p ->
                 if (m == Mode.LIVE && p === hub) sections += Section(p.name, p, dossier = "*")

@@ -1585,7 +1585,28 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     suspend fun rechercheParDossier(query: String): List<Pair<String, List<TvShow>>> {
         val q = query.trim().lowercase()
-        val all = allHomeChannels()
+        // 2026-10-21 (user : « si on fait une recherche, elle ne doit pas franchir le
+        //   verrouillage » — ex. Stream4Free verrouillé) : rien de ce qui est derrière un code
+        //   parental (TV Hub entier, dossier ou sous-dossier) ne sort dans la recherche tant
+        //   qu'il n'a pas été déverrouillé (fenêtre de 30 min).
+        val ctxVerrou = appContextRef ?: runCatching { com.streamflixreborn.streamflix.StreamFlixApp.instance }.getOrNull()
+        if (ctxVerrou != null && !com.streamflixreborn.streamflix.utils.ProviderLockStore.isAccessible(ctxVerrou, name)) return emptyList()
+        fun verrouille(cle: String): Boolean = ctxVerrou != null && !com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isAccessible(ctxVerrou, cle)
+        val idsVerrouilles: Set<String> = folderContents.entries
+            .filter { verrouille("folder:${it.key}") }
+            .flatMap { e -> e.value.flatMap { (it.list as? List<*>).orEmpty().filterIsInstance<TvShow>().map { t -> t.id } } }
+            .toHashSet()
+        val prefixesFast = mapOf("Samsung TV+" to "samsung_tvplus", "Pluto TV" to "pluto_tv", "Plex TV" to "plex_tv",
+            "LG Channels" to "lg_channels", "Rakuten TV" to "rakuten_tv", "Sony One" to "sony_one")
+        fun categorieVerrouillee(source: String, cat: Category): Boolean {
+            val sous = cat.name.substringAfter(" - ", "").trim()
+            if (sous.isNotEmpty() && verrouille(com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.subFolderKey("agg:$source", sous))) return true
+            val fast = prefixesFast.entries.firstOrNull { cat.name.startsWith(it.key) }
+            return fast != null && verrouille("folder:${fast.value}")
+        }
+        fun itemVerrouille(t: TvShow): Boolean =
+            t.id in idsVerrouilles || com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.folderKeyFromId(t.id)?.let { verrouille(it) } == true
+        val all = allHomeChannels().filter { !itemVerrouille(it) }
         if (q.isBlank()) return listOf("Chaînes" to all)
         val liveHits = all.filter { (it.title ?: "").lowercase().contains(q) }
         // Sources parcourues (historique) :
@@ -1601,18 +1622,19 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //    ces sources étaient interrogées L'UNE APRÈS L'AUTRE (jusqu'à ~6 s chacune) : sur une
         //    box plus lente, le total dépassait le délai de la recherche et TOUT le TV Hub était
         //    perdu. Elles partent maintenant EN PARALLÈLE, chacune avec son propre garde-fou.
-        fun filtrer(cats: List<Category>?, max: Int): List<TvShow> = cats.orEmpty().asSequence()
+        fun filtrer(cats: List<Category>?, max: Int, source: String = ""): List<TvShow> = cats.orEmpty().asSequence()
+            .filter { !categorieVerrouillee(source, it) }
             .flatMap { it.list.asSequence() }
             .filterIsInstance<TvShow>()
-            .filter { !it.id.startsWith("livehub::folder::") && (it.title ?: "").lowercase().contains(q) }
+            .filter { !it.id.startsWith("livehub::folder::") && !itemVerrouille(it) && (it.title ?: "").lowercase().contains(q) }
             .distinctBy { it.id }
             .take(max)
             .toList()
-        suspend fun chainesDe(nom: String, delai: Long = 8_000, max: Int = 60,
-                              charge: suspend () -> List<Category>): List<TvShow> = try {
+        suspend fun chainesDe(nom: String, delai: Long = 8_000, max: Int = 60, cle: String? = null,
+                              charge: suspend () -> List<Category>): List<TvShow> = if (cle != null && verrouille(cle)) emptyList() else try {
             // 2026-10-03 : MemDiag = exécution directe hors diagnostic (debug + setprop).
             com.streamflixreborn.streamflix.utils.MemDiag.mesurer("tvhub-recherche:$nom") {
-                filtrer(withTimeoutOrNull(delai) { charge() }, max)
+                filtrer(withTimeoutOrNull(delai) { charge() }, max, nom)
             }
         } catch (e: Exception) {
             Log.w(TAG, "search: $nom KO: ${e.message}"); emptyList()
@@ -1633,16 +1655,16 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return coroutineScope {
             val io = kotlinx.coroutines.Dispatchers.IO
             val replay = async(io) { lourd { chainesDe("Replays", 10_000, 150) { fetchReplayCategories() } } }
-            val mix = async(io) { lourd { chainesDe("Mix FR") { fetchMixFrCategoriesPublic() } } }
+            val mix = async(io) { lourd { chainesDe("Mix FR", cle = "folder:mixfr") { fetchMixFrCategoriesPublic() } } }
             val fast = async(io) { lourd { chainesDe("FAST") { fetchFastCategoriesPublic() } } }
-            val ww = async(io) { lourd { chainesDe("WorldWide") { fetchWorldwideCategoriesPublic() } } }
+            val ww = async(io) { lourd { chainesDe("WorldWide", cle = "folder:worldwide") { fetchWorldwideCategoriesPublic() } } }
             val iptvWeb = async(io) {
                 lourd { chainesDe("IPTV du web", max = 100) {
                     com.streamflixreborn.streamflix.providers.WorldLiveTvProvider.categoriesIptvDuWebFr()
                 } }
             }
             val otf = async(io) {
-                lourd { chainesDe("OTF TV") {
+                lourd { chainesDe("OTF TV", cle = "folder:otf") {
                     val svc = com.streamflixreborn.streamflix.utils.OtfTvService
                     val groupe = svc.selectedGroup.ifBlank { "France" }
                     val chaines = svc.sortChannelsFrenchTntOrder(
@@ -1658,20 +1680,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   lançait en fond le chauffage Cloudflare (WebView) + la pré-résolution de 53 chaînes :
             //   42 s de charge mesurés sur la box pendant une simple recherche.
             val s4f = async(io) {
-                chainesDe("Stream4Free") {
+                chainesDe("Stream4Free", cle = "folder:stream4cf") {
                     stream4CfCache.ifEmpty {
                         parseFastM3u(com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.BAKED_CHANNELS_M3U_PROXIED)
                     }
                 }
             }
             val reneveo = async(io) {
-                chainesDe("Reneveo") {
+                chainesDe("Reneveo", cle = "folder:${com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY}") {
                     val rv = com.streamflixreborn.streamflix.utils.ReneveoTv
                     rv.categories(rv.chainesSiDejaChargees())
                 }
             }
             val voe = async(io) {
-                try {
+                if (verrouille("folder:ma_bibliotheque")) emptyList() else try {
                     withTimeoutOrNull(5_000) { com.streamflixreborn.streamflix.utils.VidaraLibrary.toutNav() }.orEmpty()
                         .filter {
                             val v = com.streamflixreborn.streamflix.utils.VidaraLibrary
@@ -1686,7 +1708,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val dossiers = folderContents.keys
                 .filter { !it.startsWith("__") && !it.startsWith("vegetavod") && it != "ma_bibliotheque" }
                 .sorted()
-                .map { k -> (libellesDossiers[k] ?: nomsLazy[k] ?: k) to async(io) { chainesDe(k) { folderContents[k].orEmpty() } } }
+                .map { k -> (libellesDossiers[k] ?: nomsLazy[k] ?: k) to async(io) { chainesDe(libellesDossiers[k] ?: nomsLazy[k] ?: k, cle = "folder:$k") { folderContents[k].orEmpty() } } }
             val vus = HashSet<String>()
             (listOf("Ma bibliothèque" to voe.await(), "Chaînes" to liveHits,
                 "Mix FR · Multi Live" to mix.await(), "IPTV du web" to iptvWeb.await(),

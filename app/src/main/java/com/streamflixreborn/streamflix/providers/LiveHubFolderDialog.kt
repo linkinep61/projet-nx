@@ -2006,7 +2006,11 @@ private fun normSearch(s: String): String =
         //   un film ou une série ou un Live") : passe le parentFolderKey pour
         //   activer le contrôle parental sur chaque sous-dossier (long-press).
         // 2026-07-23 : + recherche à l'ouverture (agrège chaînes + films + séries).
-        val plexSearch = (live + films + series).flatMap {
+        // 2026-10-21 : les sous-dossiers verrouillés restent hors de la recherche.
+        fun ouvert(libelle: String) = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isAccessible(ctx, com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.subFolderKey("folder:stream4", libelle))
+        val plexSearch = ((if (ouvert("📡 Chaînes en direct")) live else emptyList()) +
+            (if (ouvert("🎬 Films")) films else emptyList()) +
+            (if (ouvert("📺 Séries")) series else emptyList())).flatMap {
             (it.list as? List<*>)?.filterIsInstance<TvShow>().orEmpty()
         }
         showSimpleFolderList(ctx, folderName, folders, parentFolderKey = "folder:stream4",
@@ -2040,7 +2044,11 @@ private fun normSearch(s: String): String =
         // 2026-07-04 : idem que Stream4 — active le contrôle parental sur les
         //   sous-dossiers Pluto (Chaînes en direct / Films / Séries).
         // 2026-07-23 : + recherche à l'ouverture (agrège chaînes + films + séries).
-        val plutoSearch = (live + films + series).flatMap {
+        // 2026-10-21 : les sous-dossiers verrouillés restent hors de la recherche.
+        fun ouvert(libelle: String) = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isAccessible(ctx, com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.subFolderKey("folder:pluto_tv", libelle))
+        val plutoSearch = ((if (ouvert("📡 Chaînes en direct")) live else emptyList()) +
+            (if (ouvert("🎬 Films")) films else emptyList()) +
+            (if (ouvert("📺 Séries")) series else emptyList())).flatMap {
             (it.list as? List<*>)?.filterIsInstance<TvShow>().orEmpty()
         }
         showSimpleFolderList(ctx, folderName, folders, parentFolderKey = "folder:pluto_tv",
@@ -2425,7 +2433,11 @@ private fun normSearch(s: String): String =
         //   travers TOUS les programmes de toutes les sous-catégories. Quand une
         //   requête est saisie, la liste des catégories est remplacée par les
         //   programmes correspondants (clic = lecture directe).
-        val aggAllProgs = aggregated.values.flatten().distinctBy { it.id }
+        // 2026-10-21 : la recherche ne franchit pas un sous-dossier verrouillé (recalculé à
+        //   chaque frappe → un sous-dossier déverrouillé entre-temps redevient cherchable).
+        fun aggAllProgs() = aggregated.filter { (sous, _) ->
+            com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isAccessible(ctx, com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.subFolderKey("agg:$folderName", sous))
+        }.values.flatten().distinctBy { it.id }
         var aggSearchMode = false
         var aggResults: List<TvShow> = emptyList()
         // 2026-09-19 : porteur du champ (créé plus bas) → mémorisation à l'ouverture d'un résultat.
@@ -2438,7 +2450,38 @@ private fun normSearch(s: String): String =
             selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
             isDrawSelectorOnTop = true
             adapter = aggAdapter
-            setOnItemClickListener { _, _, idx, _ ->
+            // 2026-10-21 (user : « verrouiller la Zone 18 », pas d'option à l'appui long dans
+            //   Autres Replays > Mix FR) : les sous-dossiers de cette vue (Mix FR, Replays…)
+            //   n'avaient pas le contrôle parental de showSimpleFolderList. Même logique ici :
+            //   appui long = verrouiller / déverrouiller par PIN, clic sur un dossier verrouillé
+            //   = PIN puis ouverture (déverrouillé 30 min glissantes).
+            setOnItemLongClickListener { _, _, idx, _ ->
+                if (aggSearchMode) return@setOnItemLongClickListener false
+                val label = displayEntries.getOrNull(idx)?.first ?: return@setOnItemLongClickListener false
+                if (label.startsWith("🔓")) return@setOnItemLongClickListener false
+                val nom = label.substringBefore(" (")
+                val cleVerrou = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.subFolderKey("agg:$folderName", nom)
+                val etaitVerrouille = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isLocked(ctx, cleVerrou)
+                val option = if (etaitVerrouille) "🔓 Retirer le contrôle parental" else "🔒 Contrôle parental (verrouiller)"
+                androidx.appcompat.app.AlertDialog.Builder(ctx)
+                    .setTitle(nom)
+                    .setItems(arrayOf(option)) { _, _ ->
+                        com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                            context = ctx,
+                            title = if (etaitVerrouille) "Retirer le contrôle parental" else "Activer le contrôle parental",
+                            onSuccess = {
+                                val verrouille = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.toggleLock(ctx, cleVerrou)
+                                android.widget.Toast.makeText(ctx,
+                                    if (verrouille) "🔒 $nom verrouillé" else "🔓 $nom déverrouillé",
+                                    android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                            onCancel = null,
+                        )
+                    }
+                    .show()
+                true
+            }
+            setOnItemClickListener { _, vueLigne, idx, idLigne ->
                 if (aggSearchMode) {
                     val show = aggResults.getOrNull(idx) ?: return@setOnItemClickListener
                     memoriserRecherche(ctx, champAgg)
@@ -2449,6 +2492,23 @@ private fun normSearch(s: String): String =
                     return@setOnItemClickListener
                 }
                 val (label, shows) = displayEntries[idx]
+                if (!label.startsWith("🔓")) {
+                    val cleVerrou = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                        .subFolderKey("agg:$folderName", label.substringBefore(" ("))
+                    if (!com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isAccessible(ctx, cleVerrou)) {
+                        com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                            context = ctx,
+                            title = "🔒 ${label.substringBefore(" (")} — Code parental",
+                            onSuccess = {
+                                com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.unlockForSession(cleVerrou)
+                                performItemClick(vueLigne, idx, idLigne)
+                            },
+                            onCancel = null,
+                        )
+                        return@setOnItemClickListener
+                    }
+                    com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.touchSessionUnlock(cleVerrou)
+                }
                 if (label.startsWith("🔓")) {
                     dismissAllDialogs()
                     // 2026-06-23 (user "le bouton connexion lance un playback
@@ -2574,7 +2634,7 @@ private fun normSearch(s: String): String =
                         aggResults = emptyList()
                         aggAdapter.clear(); aggAdapter.addAll(labels); aggAdapter.notifyDataSetChanged()
                     } else {
-                        aggResults = aggAllProgs.filter { normSearch(it.title).contains(q) }
+                        aggResults = aggAllProgs().filter { normSearch(it.title).contains(q) }
                         aggSearchMode = true
                         aggAdapter.clear()
                         aggAdapter.addAll(aggResults.map { it.title })
