@@ -75,6 +75,7 @@ object ScansProvider : Provider {
     /** En-têtes d'une page selon le site qui la sert. */
     fun headersPour(url: String): Map<String, String> =
         if (url.contains("anime-sama")) mapOf("Referer" to "$AS_BASE/", "User-Agent" to NetworkClient.USER_AGENT)
+        else if (url.contains("pstatic.net") || url.contains("webtoons.com")) mapOf("Referer" to "$WT_BASE/", "User-Agent" to NetworkClient.USER_AGENT)
         else headersImages
 
     private suspend fun getDoc(url: String): Document = withContext(Dispatchers.IO) {
@@ -226,6 +227,125 @@ object ScansProvider : Provider {
         )
     }
 
+
+    // ───────────────────────── Webtoon (3ᵉ site du profil) ─────────────────────────
+    //
+    // 2026-10-21 (user : « si c'est possible et qu'on peut agrémenter de contenu, pourquoi pas ») —
+    //   plateforme OFFICIELLE (webtoons.com/fr), relevé dans Chrome. On ne prend QUE ce que le site
+    //   web propose librement : les épisodes listés sur la page de la série (le Fast Pass payant
+    //   n'y figure pas et n'est jamais demandé).
+    //  • CATALOGUE : /fr/genres (≈ 420 séries, toutes catégories) ; /fr/genres/<g>?sortOrder=MANA ;
+    //      /fr/originals (≈ 130). Cartes a[href*=/list?title_no=] (data-title-no, img, strong.title).
+    //  • RECHERCHE : /fr/search?keyword=<texte> → a._card_item (mêmes cartes).
+    //  • SÉRIE : /fr/x/x/list?title_no=N (redirige vers l'adresse canonique ; la pagination
+    //      &page=P ne marche QUE sur l'adresse canonique) → h1.subj, p.summary, og:image,
+    //      li._episodeItem[data-episode-no] (10 par page, du plus récent au plus ancien).
+    //  • ÉPISODE : /fr/x/x/x/viewer?title_no=N&episode_no=E (redirige aussi) → #_imageList img[data-url]
+    //      (JPEG 800 px de large sur webtoon-phinf.pstatic.net, Referer webtoons.com exigé),
+    //      a._prevEpisode / a._nextEpisode.
+
+    private const val WT_BASE = "https://www.webtoons.com"
+    private const val WT_PREFIX = "${ID_PREFIX}wt::"
+    private val WT_GENRES = linkedMapOf(
+        "Romance" to "romance", "Fantasy" to "fantasy", "Drame" to "drama", "Action" to "action",
+        "Comédie" to "comedy", "Thriller" to "thriller", "Horreur" to "horror", "Tranche de vie" to "slice_of_life",
+        "Super-héros" to "super_hero", "Science-fiction" to "sf", "Sport" to "sports", "Informatif" to "tiptoon",
+        "Création française" to "local",
+    )
+
+    fun estWebtoon(id: String) = id.startsWith(WT_PREFIX)
+
+    /** Document + adresse finale (après redirection). */
+    private suspend fun wtDoc(url: String): Pair<Document, String> = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url(url)
+            .header("User-Agent", NetworkClient.USER_AGENT)
+            .header("Referer", "$WT_BASE/fr/")
+            .header("Accept-Language", "fr-FR,fr;q=0.9")
+            .build()
+        NetworkClient.default.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) throw Exception("HTTP ${r.code} sur $url")
+            val fin = r.request.url.toString()
+            Jsoup.parse(r.body?.string() ?: "", fin) to fin
+        }
+    }
+
+    private suspend fun wtListe(url: String): List<TvShow> {
+        cacheListes[url]?.let { (t, l) -> if (System.currentTimeMillis() - t < CACHE_MS) return l }
+        val doc = wtDoc(url).first
+        val l = doc.select("a[href*=/list?title_no=]").mapNotNull { a ->
+            val no = a.attr("data-title-no").ifBlank { Regex("title_no=(\\d+)").find(a.attr("href"))?.groupValues?.get(1).orEmpty() }
+                .takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val titre = a.selectFirst("strong.title, .title")?.text()?.trim().orEmpty()
+            if (titre.isBlank()) return@mapNotNull null
+            val img = a.selectFirst("img")?.attr("src")
+            TvShow(id = "$WT_PREFIX$no", title = titre, poster = img, banner = img, quality = "Webtoon")
+        }.distinctBy { it.id }
+        if (l.isNotEmpty()) cacheListes[url] = System.currentTimeMillis() to l
+        return l
+    }
+
+    private fun wtGenre(g: String) = "$WT_BASE/fr/genres/$g?sortOrder=MANA"
+
+    private data class WtSerie(val tv: TvShow, val episodes: List<Pair<Int, String>>)
+    private val wtSeries = ConcurrentHashMap<String, Pair<Long, WtSerie>>()
+
+    private suspend fun wtSerie(no: String): WtSerie = coroutineScope {
+        wtSeries[no]?.let { (t, s) -> if (System.currentTimeMillis() - t < CACHE_MS) return@coroutineScope s }
+        val (doc, fin) = wtDoc("$WT_BASE/fr/x/x/list?title_no=$no")
+        val base = fin.substringBefore("?")
+        fun episodesDe(d: Document) = d.select("li._episodeItem").mapNotNull { li ->
+            val n = li.attr("data-episode-no").toIntOrNull() ?: return@mapNotNull null
+            n to (li.selectFirst(".subj span")?.text()?.trim()?.ifBlank { null } ?: "Ép. $n")
+        }
+        val page1 = episodesDe(doc)
+        val dernier = page1.maxOfOrNull { it.first } ?: 0
+        val nbPages = ((dernier + 9) / 10 + 1).coerceIn(1, 60)
+        val autres = (2..nbPages).map { p ->
+            async { runCatching { episodesDe(wtDoc("$base?title_no=$no&page=$p").first) }.getOrDefault(emptyList()) }
+        }.awaitAll().flatten()
+        val episodes = (page1 + autres).distinctBy { it.first }.sortedBy { it.first }
+        val titre = doc.selectFirst("h1.subj, h1")?.text()?.trim().orEmpty()
+        val cover = doc.selectFirst("meta[property=og:image]")?.attr("content")
+        val genre = doc.selectFirst("h2.genre, .genre")?.text()?.trim()
+        val auteur = doc.selectFirst(".author_area")?.ownText()?.trim()?.trimEnd(',')?.ifBlank { null }
+            ?: doc.selectFirst(".author_area")?.text()?.substringBefore("Info")?.trim()
+        val tv = TvShow(
+            id = "$WT_PREFIX$no",
+            title = titre,
+            overview = listOfNotNull(doc.selectFirst("p.summary")?.text()?.trim(),
+                "Webtoon officiel · ${episodes.size} épisodes gratuits").joinToString("\n\n"),
+            quality = "Webtoon",
+            poster = cover, banner = cover,
+            genres = listOfNotNull(genre?.let { g ->
+                WT_GENRES.entries.firstOrNull { it.key.equals(g, true) }?.let { Genre(id = "wt:g:${it.value}", name = it.key) }
+            }),
+            directors = listOfNotNull(auteur?.let { People(id = "${ID_PREFIX}auteur:$it", name = it) }),
+            seasons = listOf(Season(id = "$WT_PREFIX$no", number = 1, title = "${episodes.size} épisodes", poster = cover)),
+        )
+        val s = WtSerie(tv, episodes)
+        wtSeries[no] = System.currentTimeMillis() to s
+        s
+    }
+
+    private suspend fun wtChargerChapitre(id: String): Chapitre {
+        // scan::wt::<titleNo>::<episodeNo>
+        val reste = id.removePrefix(WT_PREFIX).split("::")
+        val no = reste[0]; val ep = reste.getOrNull(1) ?: "1"
+        val (doc, _) = wtDoc("$WT_BASE/fr/x/x/x/viewer?title_no=$no&episode_no=$ep")
+        val images = doc.select("#_imageList img").mapNotNull { im ->
+            im.attr("data-url").ifBlank { im.attr("src") }.takeIf { it.startsWith("http") }
+        }
+        fun voisin(sel: String) = doc.selectFirst(sel)?.attr("href")
+            ?.let { Regex("episode_no=(\\d+)").find(it)?.groupValues?.get(1) }
+            ?.let { "$WT_PREFIX$no::$it" }
+        val titre = doc.selectFirst("title")?.text()?.substringBefore(" | WEBTOON")?.trim()
+            ?.let { t -> t.substringAfter(" | ", t).let { serie -> "$serie — ${t.substringBefore(" - ")}" } }
+            ?: "Épisode $ep"
+        Log.i(TAG, "webtoon $no ép. $ep : ${images.size} images")
+        return Chapitre(id = id, titre = titre, images = images,
+            precedent = voisin("a._prevEpisode"), suivant = voisin("a._nextEpisode"))
+    }
+
     // ───────────────────────── Provider ─────────────────────────
 
     override suspend fun getHome(): List<Category> = coroutineScope {
@@ -250,6 +370,13 @@ object ScansProvider : Provider {
         val resultatsAs = rangeesAs.map { (nom, url) ->
             async { nom to runCatching { asListe(url) }.onFailure { Log.w(TAG, "rangée $nom : ${it.message}") }.getOrDefault(emptyList()) }
         }.awaitAll()
+        // Webtoon : les séries originales (mélangées) + quelques grands genres.
+        val rangeesWt = listOf("Webtoon · séries officielles" to "$WT_BASE/fr/originals") +
+            listOf("Romance", "Fantasy", "Action", "Thriller", "Comédie", "Drame")
+                .map { "$it · Webtoon" to wtGenre(WT_GENRES.getValue(it)) }
+        val resultatsWt = rangeesWt.map { (nom, url) ->
+            async { nom to runCatching { wtListe(url).shuffled() }.onFailure { Log.w(TAG, "rangée $nom : ${it.message}") }.getOrDefault(emptyList()) }
+        }.awaitAll()
 
         val out = ArrayList<Category>()
         val populaires = resultats.firstOrNull()?.second.orEmpty()
@@ -258,12 +385,14 @@ object ScansProvider : Provider {
         // Copies obligatoires : le carrousel change le type d'affichage de ses éléments ; partager
         //   les mêmes objets avec les rangées faisait planter (ViewPager2 « match_parent »).
         val decouvertesAs = resultatsAs.firstOrNull()?.second.orEmpty()
-        val carrousel = (populaires.take(6) + miseAJour.take(3) + decouvertesAs.shuffled().take(3))
+        val officielsWt = resultatsWt.firstOrNull()?.second.orEmpty()
+        val carrousel = (populaires.take(6) + miseAJour.take(3) + decouvertesAs.shuffled().take(3) + officielsWt.take(3))
             .distinctBy { it.id }.map { it.copy() }
         if (carrousel.isNotEmpty()) out.add(Category(Category.FEATURED, carrousel))
         // Sushiscan d'abord (populaires, mises à jour, nouveautés), puis Anime-Sama, puis les genres.
         resultats.take(3).forEach { (nom, l) -> if (l.size >= 4) out.add(Category(nom, l.map { it.copy() })) }
         resultatsAs.forEach { (nom, l) -> if (l.size >= 4) out.add(Category(nom, l.map { it.copy() })) }
+        resultatsWt.forEach { (nom, l) -> if (l.size >= 4) out.add(Category(nom, l.map { it.copy() })) }
         resultats.drop(3).forEach { (nom, l) -> if (l.size >= 4) out.add(Category(nom, l.map { it.copy() })) }
         out
     }
@@ -274,16 +403,21 @@ object ScansProvider : Provider {
             // Écran de recherche vide → types puis genres, comme le filtre du site.
             return TYPES.map { (nom, t) -> Genre(id = "t:$t", name = nom) } +
                 GENRES.map { (nom, id) -> Genre(id = "g:$id", name = nom) } +
-                AS_GENRES.map { Genre(id = "as:g:$it", name = "$it · Anime-Sama") }
+                AS_GENRES.map { Genre(id = "as:g:$it", name = "$it · Anime-Sama") } +
+                WT_GENRES.map { (nom, g) -> Genre(id = "wt:g:$g", name = "$nom · Webtoon") }
         }
         val q = URLEncoder.encode(query.trim(), "UTF-8")
         val url = if (page <= 1) "$BASE/?s=$q" else "$BASE/page/$page/?s=$q"
         return coroutineScope {
             val ss = async { runCatching { liste(url) }.getOrDefault(emptyList()) }
             val asr = async { runCatching { asListe(asCatalogue(page, recherche = query.trim())) }.getOrDefault(emptyList()) }
-            // Les deux sites mélangés, un résultat de chaque à tour de rôle.
-            val a = ss.await(); val b = asr.await()
-            (0 until maxOf(a.size, b.size)).flatMap { listOfNotNull(a.getOrNull(it), b.getOrNull(it)) }
+            val wtr = async {
+                if (page > 1) emptyList()
+                else runCatching { wtListe("$WT_BASE/fr/search?keyword=${URLEncoder.encode(query.trim(), "UTF-8")}") }.getOrDefault(emptyList())
+            }
+            // Les trois sites mélangés, un résultat de chaque à tour de rôle.
+            val a = ss.await(); val b = asr.await(); val c = wtr.await()
+            (0 until maxOf(a.size, b.size, c.size)).flatMap { listOfNotNull(a.getOrNull(it), b.getOrNull(it), c.getOrNull(it)) }
         }
     }
 
@@ -357,6 +491,10 @@ object ScansProvider : Provider {
     }
 
     override suspend fun getTvShow(id: String): TvShow {
+        if (estWebtoon(id)) {
+            val no = id.removePrefix(WT_PREFIX).substringBefore("::")
+            return runCatching { wtSerie(no).tv }.getOrElse { Log.w(TAG, "fiche webtoon $id : ${it.message}"); TvShow(id = id) }
+        }
         if (estAnimeSama(id)) {
             val slug = id.removePrefix(AS_PREFIX).substringBefore("::")
             return runCatching { asFiche(slug) }.getOrElse { Log.w(TAG, "fiche AS $id : ${it.message}"); TvShow(id = id) }
@@ -370,6 +508,13 @@ object ScansProvider : Provider {
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
+        if (estWebtoon(seasonId)) {
+            val no = seasonId.removePrefix(WT_PREFIX).substringBefore("::")
+            val s = runCatching { wtSerie(no) }.getOrElse { Log.w(TAG, "épisodes webtoon : ${it.message}"); return emptyList() }
+            return s.episodes.mapIndexed { i, (n, nom) ->
+                Episode(id = "$WT_PREFIX$no::$n", number = i + 1, title = nom, poster = s.tv.poster)
+            }
+        }
         if (estAnimeSama(seasonId)) {
             val reste = seasonId.removePrefix(AS_PREFIX).split("::")
             val slug = reste.getOrNull(0) ?: return emptyList()
@@ -391,6 +536,13 @@ object ScansProvider : Provider {
     }
 
     override suspend fun getGenre(id: String, page: Int): Genre {
+        if (id.startsWith("wt:g:")) {
+            val g = id.removePrefix("wt:g:")
+            val nom = WT_GENRES.entries.firstOrNull { it.value == g }?.key ?: g
+            // Le site rend tout le genre sur une seule page.
+            return Genre(id = id, name = "$nom · Webtoon",
+                shows = if (page > 1) emptyList() else runCatching { wtListe(wtGenre(g)) }.getOrDefault(emptyList()))
+        }
         if (id.startsWith("as:g:")) {
             val g = id.removePrefix("as:g:")
             return Genre(id = id, name = "$g · Anime-Sama", shows = runCatching { asListe(asCatalogue(page, genre = g)) }.getOrDefault(emptyList()))
@@ -433,6 +585,7 @@ object ScansProvider : Provider {
     /** Pages d'un chapitre (ordre de lecture) + chapitres voisins. */
     suspend fun chargerChapitre(id: String): Chapitre = withContext(Dispatchers.IO) {
         if (estAnimeSama(id)) return@withContext asChargerChapitre(id)
+        if (estWebtoon(id)) return@withContext wtChargerChapitre(id)
         val slug = slugOf(id)
         val doc = getDoc("$BASE/$slug/")
         val html = doc.outerHtml()

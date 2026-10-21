@@ -205,6 +205,39 @@ class ScanReaderActivity : AppCompatActivity() {
 
     /** Largeur de lecture : tout l'écran en portrait ; sur un écran large (TV, téléphone couché),
      *  une colonne centrée pour que la page reste lisible sans défiler à l'infini. */
+    // 2026-10-21 (user : « certains scans sont un peu flous ou pas trop lisibles ») —
+    //   NETTETÉ DES PAGES. Avant : Glide ramenait chaque page à la taille de l'ImageView
+    //   (FIT_CENTER, borné par l'écran) et en couleurs réduites (RGB_565, réglage global de
+    //   l'app). Une page large perdait sa définition, un long webtoon était réduit à
+    //   quelques centaines de pixels de large, et le zoom (+ / pincement) agrandissait
+    //   cette version réduite → flou. Désormais : décodage à la LARGEUR utile × 2 (le zoom
+    //   reste net), hauteur libre, couleurs complètes — avec un plafond de pixels par page
+    //   pour la mémoire (plus bas en mode léger, qui garde aussi le RGB_565).
+    private val pixelsMaxPage: Int
+        get() = if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 6_000_000 else 12_000_000
+
+    private val echellePage = object : com.bumptech.glide.load.resource.bitmap.DownsampleStrategy() {
+        override fun getScaleFactor(sw: Int, sh: Int, rw: Int, rh: Int): Float {
+            if (sw <= 0 || sh <= 0) return 1f
+            val parLargeur = if (rw > 0) rw.toFloat() / sw else 1f
+            val plafond = kotlin.math.sqrt(pixelsMaxPage.toDouble() / (sw.toDouble() * sh)).toFloat()
+            return minOf(1f, parLargeur, plafond)
+        }
+        override fun getSampleSizeRounding(sw: Int, sh: Int, rw: Int, rh: Int) =
+            com.bumptech.glide.load.resource.bitmap.DownsampleStrategy.SampleSizeRounding.QUALITY
+    }
+
+    private fun optionsPage(): com.bumptech.glide.request.RequestOptions {
+        val m = resources.displayMetrics
+        val colonne = if (m.widthPixels > m.heightPixels)
+            (m.heightPixels * 1.05f).toInt().coerceAtMost(m.widthPixels) else m.widthPixels
+        val leger = com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger
+        return com.bumptech.glide.request.RequestOptions()
+            .override(colonne * 2, com.bumptech.glide.request.target.Target.SIZE_ORIGINAL)
+            .downsample(echellePage)
+            .format(com.bumptech.glide.load.DecodeFormat.PREFER_RGB_565)  // 2 octets/pixel : indispensable pour les webtoons (690 × 15 000)
+            .apply { if (leger) dontTransform() else transform(NetteteScan) }
+    }
     private fun largeurColonne(): Int {
         val m = resources.displayMetrics
         return if (m.widthPixels > m.heightPixels) (m.heightPixels * 1.05f).toInt().coerceAtMost(m.widthPixels)
@@ -472,6 +505,7 @@ class ScanReaderActivity : AppCompatActivity() {
             }.build())
             Glide.with(iv).load(url)
                 .diskCacheStrategy(DiskCacheStrategy.DATA)
+                .apply(optionsPage())
                 .listener(object : com.bumptech.glide.request.RequestListener<android.graphics.drawable.Drawable> {
                     override fun onLoadFailed(e: com.bumptech.glide.load.engine.GlideException?, model: Any?,
                         target: com.bumptech.glide.request.target.Target<android.graphics.drawable.Drawable>, isFirstResource: Boolean): Boolean = false
@@ -487,8 +521,67 @@ class ScanReaderActivity : AppCompatActivity() {
             for (k in 1..2) pages.getOrNull(position + k)?.let { u ->
                 Glide.with(iv).load(GlideUrl(u, LazyHeaders.Builder().apply {
                     ScansProvider.headersPour(u).forEach { (a, b) -> addHeader(a, b) }
-                }.build())).diskCacheStrategy(DiskCacheStrategy.DATA).preload()
+                }.build())).diskCacheStrategy(DiskCacheStrategy.DATA).apply(optionsPage()).preload()
             }
         }
     }
+}
+
+/**
+ * 2026-10-21 (user : « un filtre de netteté ») — certaines pages de scans sont petites à la
+ * source (mesuré sur Sushiscan : pages de texte en 1024 × 1418 pour un écran de 1080 de
+ * large) : aucune résolution de plus à aller chercher. On renforce donc légèrement les
+ * contours (masque flou 3×3 : pixel + K × (pixel − moyenne des voisins)), UNIQUEMENT sur les
+ * pages de moins de 1600 px de large ; les grandes pages ont déjà leur détail. Calcul fait
+ * par Glide en arrière-plan, une fois par page (le résultat est mis en cache mémoire).
+ */
+object NetteteScan : com.bumptech.glide.load.resource.bitmap.BitmapTransformation() {
+    private const val ID = "scan-nettete-v1"
+    private const val K = 0.6f
+    private const val LARGEUR_MAX = 1600
+
+    override fun transform(
+        pool: com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool,
+        src: android.graphics.Bitmap, outWidth: Int, outHeight: Int,
+    ): android.graphics.Bitmap {
+        val w = src.width
+        val h = src.height
+        if (w > LARGEUR_MAX || w < 3 || h < 3 || w.toLong() * h > 4_000_000L) return src  // pas sur les longs webtoons
+        val px = IntArray(w * h)
+        src.getPixels(px, 0, w, 0, 0, w, h)
+        val sortie = px.copyOf()
+        for (y in 1 until h - 1) {
+            val l0 = (y - 1) * w; val l1 = y * w; val l2 = (y + 1) * w
+            for (x in 1 until w - 1) {
+                var sr = 0; var sg = 0; var sb = 0
+                // 9 voisins sans allocation (une page = ~1,5 million de pixels)
+                var dy = 0
+                while (dy < 3) {
+                    val base = (if (dy == 0) l0 else if (dy == 1) l1 else l2) + x - 1
+                    var dx = 0
+                    while (dx < 3) {
+                        val v = px[base + dx]
+                        sr += (v shr 16) and 0xFF; sg += (v shr 8) and 0xFF; sb += v and 0xFF
+                        dx++
+                    }
+                    dy++
+                }
+                val c = px[l1 + x]
+                val r = (c shr 16) and 0xFF; val g = (c shr 8) and 0xFF; val b = c and 0xFF
+                val nr = (r + K * (r - sr / 9f)).toInt().coerceIn(0, 255)
+                val ng = (g + K * (g - sg / 9f)).toInt().coerceIn(0, 255)
+                val nb = (b + K * (b - sb / 9f)).toInt().coerceIn(0, 255)
+                sortie[l1 + x] = (c and -0x1000000) or (nr shl 16) or (ng shl 8) or nb
+            }
+        }
+        val res = pool.get(w, h, src.config ?: android.graphics.Bitmap.Config.RGB_565)
+        res.setPixels(sortie, 0, w, 0, 0, w, h)
+        return res
+    }
+
+    override fun updateDiskCacheKey(messageDigest: java.security.MessageDigest) {
+        messageDigest.update(ID.toByteArray(Charsets.UTF_8))
+    }
+    override fun equals(other: Any?) = other is NetteteScan
+    override fun hashCode() = ID.hashCode()
 }
