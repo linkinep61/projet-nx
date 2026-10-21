@@ -69,7 +69,7 @@ open class FilemoonExtractor : Extractor() {
     /** Domaines dont la WebView ne peut pas résoudre le nom (blocage DNS du fournisseur) et
      *  qu'on doit donc servir nous-mêmes via OkHttp + DNS-over-HTTPS. */
     private val DOMAINES_A_SERVIR = listOf(
-        "filemoon", "bysebuho", "bysezoxexe", "bysejikuar", "q8y5z", "moflix-stream"
+        "filemoon", "bysebuho", "bysezoxexe", "bysejikuar", "q8y5z", "moflix-stream", "1day1movie"
     )
 
     /**
@@ -216,7 +216,7 @@ open class FilemoonExtractor : Extractor() {
     // 2026-06-01 : nettoyé bf0skv.org + filemoon.site (NXDOMAIN)
     // Filemoon gère ses propres domaines de secours (budget inclus) dans extract().
     override val miroirsInterchangeables = false
-    override val aliasUrls = listOf("https://bysejikuar.com","https://moflix-stream.link","https://bysezoxexe.com","https://bysebuho.com","https://bysezejataos.com","https://filemoon.sx","https://bysekoze.com","https://bysesayeveum.com","https://lukefirst.lol","https://weneverbeenfree.com","https://gn1r5n.org")
+    override val aliasUrls = listOf("https://bysejikuar.com","https://1day1movie.website","https://moflix-stream.link","https://bysezoxexe.com","https://bysebuho.com","https://bysezejataos.com","https://filemoon.sx","https://bysekoze.com","https://bysesayeveum.com","https://lukefirst.lol","https://weneverbeenfree.com","https://gn1r5n.org")
 
     /**
      * Two-tier extraction strategy:

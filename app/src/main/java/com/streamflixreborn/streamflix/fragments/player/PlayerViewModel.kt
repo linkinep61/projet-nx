@@ -2035,7 +2035,7 @@ class PlayerViewModel(
         val s = server.src.lowercase()
         val lentParNature = listOf(
             "filemoon", "lukefirst", "weneverbeenfree", "moflix-stream", "bysebuho",
-            "bysezoxexe", "bysejikuar", "bysekoze", "bysesayeveum", "gn1r5n",
+            "bysezoxexe", "bysejikuar", "bysekoze", "bysesayeveum", "gn1r5n", "1day1movie",
         ).any { s.contains(it) }
         val patienceMs = if (lentParNature) 40_000L else 12_000L
         patienceJob = viewModelScope.launch {

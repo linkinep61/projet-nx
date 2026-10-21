@@ -1586,7 +1586,25 @@ object BackupRegistry {
 
         // ── Sources AGRÉGATEURS en mode NATIF-SEUL (pas de sous-backup) ───────────
         if (!resolvedTmdbId.isNullOrBlank()) {
-            launch { emit("Movix") { MovixProvider.getServersAsBackup(resolvedTmdbId, videoType) } }
+            launch { emit("Movix") {
+                // 2026-10-21 (user, Sacrifice ouvert depuis 1Jour1Film) : le registre avait RÉSOLU le
+                //   tmdbId (137948) mais Movix lisait `tvShow.id` du videoType d'origine = le slug de
+                //   1Jour1Film → « SKIP épisode : id non numérique » → 0 à chaque série ouverte hors
+                //   TMDB. On lui passe donc un videoType bâti sur le tmdbId, comme pour Frembed.
+                val vtMovix: Video.Type = if (!resolvedTmdbId.all { it.isDigit() } || resolvedTmdbId.isEmpty()) videoType
+                    else if (key.isMovie) Video.Type.Movie(
+                        id = resolvedTmdbId, title = key.title,
+                        releaseDate = key.year?.toString() ?: "", poster = "", imdbId = null,
+                    ) else Video.Type.Episode(
+                        id = resolvedTmdbId, number = key.episode, title = null, poster = null, overview = null,
+                        tvShow = Video.Type.Episode.TvShow(
+                            id = resolvedTmdbId, title = key.title, poster = null, banner = null,
+                            releaseDate = key.year?.toString(), imdbId = null,
+                        ),
+                        season = Video.Type.Episode.Season(number = key.season, title = null),
+                    )
+                MovixProvider.getServersAsBackup(resolvedTmdbId, vtMovix)
+            } }
 
             // ── NetMirror EN ACCÈS DIRECT ────────────────────────────────────────────
             // 2026-08-08 (user : « fais en sorte que NetMirror arrive plus rapidement s'il est

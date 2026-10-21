@@ -984,6 +984,42 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         return people
     }
 
+    // ── 2026-10-21 (user : « sur 1Jour1Film… pas de serveur ») ─────────────────────────────
+    //   Le site ne met PLUS les adresses dans la page : J1F_SRV (films) et j1fEpsData (épisodes)
+    //   ne portent que label/type/flags (+ « oi » = numéro de la source). L'adresse est demandée
+    //   au clic à admin-ajax.php :
+    //     1) action=j1f_get_nonce → {success, data:{nonce}}
+    //     2) film    : action=j1f_get_source&nonce&post_id=<J1F_POST_ID>&idx=<oi>
+    //        épisode : action=j1f_get_ep_source&nonce&season_id=<J1F_SEASON_ID>&ep_id=<id>&idx=<oi>
+    //     → {success, data:{url, type}}. Vérifié sans cookie (Spider-Man, Sacrifice S1).
+    private suspend fun ajaxJ1f(corps: String): JSONObject? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        runCatching {
+            val req = okhttp3.Request.Builder()
+                .url(baseUrl.trimEnd('/') + "/wp-admin/admin-ajax.php")
+                .post(okhttp3.FormBody.Builder().apply {
+                    corps.split('&').forEach { p -> add(p.substringBefore('='), p.substringAfter('=', "")) }
+                }.build())
+                .header("User-Agent", USER_AGENT)
+                .header("Referer", baseUrl)
+                .header("X-Requested-With", "XMLHttpRequest")
+                .build()
+            NetworkClient.default.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) null else JSONObject(r.body?.string().orEmpty())
+            }
+        }.getOrNull()
+    }
+
+    private suspend fun nonceJ1f(): String? =
+        ajaxJ1f("action=j1f_get_nonce")?.takeIf { it.optBoolean("success") }?.optJSONObject("data")?.optString("nonce")?.ifBlank { null }
+
+    /** Adresse d'une source demandée au site ; null si indisponible. */
+    private suspend fun sourceJ1f(nonce: String?, params: String): String? {
+        if (nonce == null) return null
+        val res = ajaxJ1f("$params&nonce=$nonce") ?: return null
+        if (!res.optBoolean("success")) return null
+        return res.optJSONObject("data")?.optString("url")?.takeIf { it.startsWith("http", true) }
+    }
+
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         initializeService()
 
@@ -1015,6 +1051,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
                 val epsDataRegex = Regex("""j1fEpsData\s*=\s*(\[.*?]);\s*""", RegexOption.DOT_MATCHES_ALL)
                 val epsMatch = epsDataRegex.find(seasonHtml)
+                Log.i("UnJourUnFilm", "SEASON $seasonSlug ep#$epIndex : j1fEpsData=${epsMatch != null} (scripts décodés=${decodedScripts.length})")
 
                 if (epsMatch != null) {
                     try {
@@ -1022,6 +1059,10 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                         if (epIndex < jsonArray.length()) {
                             val epObj = jsonArray.getJSONObject(epIndex)
                             val epServers = epObj.optJSONArray("servers")
+                            val idSaison = Regex("""J1F_SEASON_ID\s*=\s*(\d+)""").find(seasonHtml)?.groupValues?.get(1)
+                                ?: Regex("""J1F_SEASON_ID\s*=\s*(\d+)""").find(seasonDocument.select("script:not([src])").joinToString("\n") { it.data() })?.groupValues?.get(1)
+                            val nonceEp = if (idSaison != null) nonceJ1f() else null
+                            Log.i("UnJourUnFilm", "SEASON $seasonSlug ep#$epIndex : season_id=$idSaison nonce=${nonceEp != null} sources=${epServers?.length()}")
 
                             if (epServers != null) {
                                 for (i in 0 until epServers.length()) {
@@ -1033,11 +1074,15 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                                     //   des FILMS dans J1F_SRV). Sans ça → url vide → tous les
                                     //   serveurs d'épisodes ignorés → « aucune source » (ex From).
                                     val url = srv.optString("u", "").ifBlank { srv.optString("url", "") }.let { raw ->
+                                        if (raw.isBlank()) return@let raw
                                         if (raw.startsWith("http", true)) raw
                                         else try {
                                             val d = String(android.util.Base64.decode(raw.trim(), android.util.Base64.DEFAULT))
                                             if (d.startsWith("http", true)) d else raw
                                         } catch (_: Exception) { raw }
+                                    }.ifBlank {
+                                        if (idSaison == null) "" else sourceJ1f(nonceEp,
+                                            "action=j1f_get_ep_source&season_id=$idSaison&ep_id=${epObj.optString("id")}&idx=${srv.optInt("oi", i)}") ?: ""
                                     }
                                     val flags = srv.optString("flags", "")
 
@@ -1067,7 +1112,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                                 }
                             }
                         }
-                    } catch (_: Exception) { }
+                    } catch (e: Exception) { Log.w("UnJourUnFilm", "SEASON $seasonSlug ep#$epIndex : ${e.javaClass.simpleName} ${e.message}") }
                 }
 
                 // Return early with season-based results
@@ -1099,6 +1144,9 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             try {
                 val jsonArrayStr = match.groupValues[1]
                 val jsonArray = JSONArray(jsonArrayStr)
+                val idPost = Regex("""J1F_POST_ID\s*=\s*(\d+)""").find(jsContent)?.groupValues?.get(1)
+                    ?: Regex("""J1F_POST_ID\s*=\s*(\d+)""").find(inlineScripts)?.groupValues?.get(1)
+                val nonceFilm = if (idPost != null) nonceJ1f() else null
 
                 for (i in 0 until jsonArray.length()) {
                     val serverObj = jsonArray.getJSONObject(i)
@@ -1109,11 +1157,15 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                     //   tombait en "serveur normal" et expand() (qui expose les 4
                     //   mirrors internes) n'était JAMAIS appelé.
                     val url = serverObj.optString("url", "").let { raw ->
+                        if (raw.isBlank()) return@let raw
                         if (raw.startsWith("http", true)) raw
                         else try {
                             val d = String(android.util.Base64.decode(raw.trim(), android.util.Base64.DEFAULT))
                             if (d.startsWith("http", true)) d else raw
                         } catch (_: Exception) { raw }
+                    }.ifBlank {
+                        if (idPost == null) "" else sourceJ1f(nonceFilm,
+                            "action=j1f_get_source&post_id=$idPost&idx=${serverObj.optInt("oi", i)}") ?: ""
                     }
 
                     if (url.isNotEmpty() && !ignoreSource("", url)) {

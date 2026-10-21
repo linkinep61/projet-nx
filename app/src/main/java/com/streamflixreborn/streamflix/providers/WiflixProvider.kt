@@ -365,6 +365,78 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         return@withPermit doc
     }
 
+    /**
+     * 2026-10-21 — RECHERCHE flemmix (user : « Wiflix oui, fixe »). Constaté dans le navigateur :
+     *   · l'ancienne adresse GET `index.php?do=search&…&story=` renvoie maintenant à l'ACCUEIL ;
+     *   · le formulaire du site fait un POST sur `index.php?do=search` ; SANS le cookie
+     *     `h_check=25` (posé par leur script) la réponse est vide, AVEC il rend les résultats
+     *     (« Sacrifice » en titre seul : 12 résultats) ;
+     *   · notre POST Retrofit partait sans Referer/Origin ni UA navigateur → 403 (log Oppo).
+     *   On poste donc comme le navigateur : UA du WebView, Referer, Origin, cookies du
+     *   CookieManager (h_check, PHPSESSID, cf_clearance). Un 2ᵉ essai après le 1ᵉʳ refus,
+     *   le 403 posant un PHPSESSID neuf.
+     */
+    private suspend fun posterRecherche(story: String, titreSeul: Boolean, debut: Int = 0, depuis: Int = 1): Document? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            // 2026-10-21 (3) : 403 « 13 o » aussi bien en OkHttp (UA Android) qu'en WebView, alors que
+            //   Chrome bureau passe. Essai 1 : UA Android d'origine ; essai 2 : identité Chrome BUREAU
+            //   complète, après un GET de l'accueil pour ouvrir la session (PHPSESSID).
+            val uaBureau = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            for (essai in 1..2) {
+                if (essai == 1) runCatching {
+                    bypassClient.newCall(Request.Builder().url(baseUrl).header("User-Agent", uaBureau)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .header("Accept-Language", "fr-FR,fr;q=0.9").build()).execute().close()
+                }
+                val doc = runCatching {
+                    val corps = okhttp3.FormBody.Builder()
+                        .add("do", "search").add("subaction", "search")
+                        .add("search_start", debut.toString()).add("full_search", if (titreSeul) "1" else "0")
+                        .add("result_from", depuis.toString()).add("story", story)
+                        .apply { if (titreSeul) add("titleonly", "3") }
+                        .build()
+                    val cookies = runCatching { android.webkit.CookieManager.getInstance().getCookie(baseUrl) }.getOrNull().orEmpty()
+                    val req = Request.Builder().url(baseUrl + "index.php?do=search").post(corps)
+                        .header("User-Agent", if (essai == 1) uaBureau else WebViewResolver.STEALTH_UA)
+                        .apply {
+                            if (essai == 1) {
+                                header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                                header("Accept-Language", "fr-FR,fr;q=0.9")
+                                header("Sec-Fetch-Dest", "document"); header("Sec-Fetch-Mode", "navigate")
+                                header("Sec-Fetch-Site", "same-origin"); header("Sec-Fetch-User", "?1")
+                                header("Upgrade-Insecure-Requests", "1")
+                            }
+                        }
+                        .header("Referer", baseUrl)
+                        .header("Origin", baseUrl.trimEnd('/'))
+                        .header("Cookie", if (cookies.contains("h_check=")) cookies else listOf(cookies, "h_check=25").filter { it.isNotBlank() }.joinToString("; "))
+                        .build()
+                    bypassClient.newCall(req).execute().use { r ->
+                        val html = r.body?.string().orEmpty()
+                        Log.i(TAG, "recherche POST « $story » (essai $essai) → HTTP ${r.code}, ${html.length} o" +
+                            if (html.length < 200) " : « ${html.trim()} »" else "")
+                        if (r.isSuccessful && html.isNotBlank()) Jsoup.parse(html).apply { setBaseUri(baseUrl) } else null
+                    }
+                }.getOrNull()
+                if (doc != null && !isCloudflareChallenge(doc)) return@withContext doc
+            }
+            // 2026-10-21 (2) : le POST OkHttp reste refusé (403, 13 o) alors que le même POST passe
+            //   dans Chrome → le site reconnaît un client non-navigateur. Repli : on charge
+            //   l'accueil dans la WebView (cookies h_check/PHPSESSID posés par la page) et on poste
+            //   le formulaire DEPUIS la page. « searchtable » n'existe que sur la page de résultats.
+            null
+        } ?: run {
+            val enc = { v: String -> java.net.URLEncoder.encode(v, "UTF-8") }
+            val corps = "do=search&subaction=search&search_start=$debut&full_search=${if (titreSeul) 1 else 0}" +
+                "&result_from=$depuis&story=${enc(story)}" + (if (titreSeul) "&titleonly=3" else "")
+            val html = runCatching {
+                getResolver().get(baseUrl, silent = true, contentMarker = "searchtable",
+                    rscFetchUrl = baseUrl + "index.php?do=search", fetchPostBody = corps, markerTimeoutMs = 12_000L)
+            }.getOrNull().orEmpty()
+            Log.i(TAG, "recherche WebView « $story » → ${html.length} o, résultats=${html.contains("searchtable")}")
+            if (html.contains("searchtable")) Jsoup.parse(html).apply { setBaseUri(baseUrl) } else null
+        }
+
     /** 2026-06-29 (REPAIR — recopié du décompilé v1.7.226) : true si le cookie
      *  cf_clearance est déjà présent dans le CookieManager pour ce domaine. */
     private fun hasCfClearanceCookie(): Boolean = try {
@@ -1032,7 +1104,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     private suspend fun searchNative(query: String, page: Int): List<AppAdapter.Item> {
         val searchUrl = "${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}"
         val document = try {
-            val doc = service.search(
+            val doc = posterRecherche(query, titreSeul = false, debut = page, depuis = 1 + 20 * (page - 1)) ?: service.search(
                 story = query,
                 searchStart = page,
                 resultFrom = 1 + 20 * (page - 1)
@@ -1806,7 +1878,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             //   ne remontait que des films dont le synopsis contient le mot → « 0 résultat natif ».
             //   En titre seul (full_search=1 + titleonly=3) : « Léon » → 8187-leon.html et
             //   « Obsession » → 36017-obsession-2026.html, dès la première page.
-            val doc = service.search(title, fullSearch = 1, titleOnly = 3)
+            val doc = posterRecherche(title, titreSeul = true) ?: service.search(title, fullSearch = 1, titleOnly = 3)
             if (isCloudflareChallenge(doc)) {
                 getDocument("${baseUrl}index.php?do=search&subaction=search&full_search=1&titleonly=3&story=${java.net.URLEncoder.encode(title, "UTF-8")}")
             } else doc
@@ -2103,7 +2175,16 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             val anneeSortie = Regex("(?i)date\\s+de\\s+sortie\\s*:\\s*(?:\\D{0,20})?((?:19|20)\\d{2})")
                 .find(texte)?.groupValues?.get(1)?.toIntOrNull()
             val anneePage = anneeTitreOrig ?: anneeSortie
-            if (anneePage != null && kotlin.math.abs(anneePage - anneeAttendue) > 3) {
+            // 2026-10-21 (user, Tulsa King S4) : sans « titre original (année) », la page ne donne
+            //   que la DATE DE SORTIE DE LA SAISON (2026 pour la saison 4 d'une série lancée en
+            //   2022) → écartée à tort. Dans ce cas on tolère, VERS L'AVANT seulement, 2 ans par
+            //   saison en plus des 3 ans habituels. La Quatrième Dimension (1959 vs 2020, saison 2)
+            //   reste écartée : 1959+3+2 = 1964.
+            val saisonVisee = (videoType as? Video.Type.Episode)?.season?.number ?: 1
+            val ecartRefus = if (anneeTitreOrig == null && anneePage != null && anneePage > anneeAttendue)
+                anneePage - anneeAttendue > 3 + 2 * (saisonVisee - 1)
+            else anneePage != null && kotlin.math.abs(anneePage - anneeAttendue) > 3
+            if (ecartRefus) {
                 Log.w(
                     "Wiflix",
                     "PAGE ÉCARTÉE (identité) : slug=$slug annonce $anneePage " +

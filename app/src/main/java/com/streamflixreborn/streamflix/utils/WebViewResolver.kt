@@ -69,6 +69,8 @@ class WebViewResolver(private val context: Context) {
     //   page complète. C'est le mécanisme même par lequel le player DessinAnime récupère
     //   ses sources. Escape temporel via pollStartMs pour ne jamais bloquer > 12s.
     private var rscFetchUrl: String? = null
+    /** 2026-10-21 : corps POST (form-urlencoded) du fetch same-origin ; null = GET « RSC: 1 ». */
+    private var fetchPostBody: String? = null
     private var pollStartMs: Long = 0L
     // 2026-07-04 : délai max d'attente du marker (contentMarker) avant de rendre l'innerHTML tel
     //   quel. Défaut 12s (inchangé). Les fiches DessinAnime /tv/* sur Chromecast s'hydratent en
@@ -88,9 +90,10 @@ class WebViewResolver(private val context: Context) {
     //   throttler l'IP par Cloudflare → tout en 403, jaquettes comprises).
     private val MAX_BYPASS_ATTEMPTS = 1
 
-    suspend fun get(url: String, headers: Map<String, String> = emptyMap(), silent: Boolean = false, contentMarker: String? = null, rscFetchUrl: String? = null, clearanceOnly: Boolean = false, markerTimeoutMs: Long = 12_000L, challengeTimeoutMs: Long = 13_000L): String = mutex.withLock {
+    suspend fun get(url: String, headers: Map<String, String> = emptyMap(), silent: Boolean = false, contentMarker: String? = null, rscFetchUrl: String? = null, fetchPostBody: String? = null, clearanceOnly: Boolean = false, markerTimeoutMs: Long = 12_000L, challengeTimeoutMs: Long = 13_000L): String = mutex.withLock {
         requiredMarker = contentMarker
         this.rscFetchUrl = rscFetchUrl
+        this.fetchPostBody = fetchPostBody
         this.clearanceOnly = clearanceOnly
         this.markerTimeoutMs = markerTimeoutMs
         pollStartMs = System.currentTimeMillis()
@@ -466,7 +469,11 @@ class WebViewResolver(private val context: Context) {
         val evalJs = rscFetchUrl?.let { rsc ->
             "(function(){try{" +
             "if(!window.__rscBusy&&!window.__rscDone){window.__rscBusy=true;" +
-            "fetch('" + rsc + "',{headers:{'RSC':'1'},credentials:'include'})" +
+            (fetchPostBody?.let { corps ->
+                // 2026-10-21 (Wiflix) : recherche = POST du formulaire, depuis la page (cookies,
+                //   empreinte navigateur) — le même POST en OkHttp prend un 403.
+                "fetch('" + rsc + "',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'" + corps + "',credentials:'include'})"
+            } ?: ("fetch('" + rsc + "',{headers:{'RSC':'1'},credentials:'include'})")) +
             ".then(function(r){if(r.status===200)return r.text();throw r.status;})" +
             ".then(function(t){window.__rscResult=t;window.__rscDone=true;})" +
             ".catch(function(e){window.__rscBusy=false;});}" +

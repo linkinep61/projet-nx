@@ -129,9 +129,25 @@ class VidzyExtractor : Extractor() {
     //   Une mauvaise clé donne le leurre « …/troll/master.m3u8 » : on n'accepte qu'une
     //   URL http(s) sans « /troll/ ». On essaie l'arrondi bas ET haut de BC (N impair).
     private fun dechiffrerNouveauFormat(html: String, link: String): String? {
-        val payload = Regex("""src:\s*\(function\([a-zA-Z]+\).*?\}\)\(["']([^"']+)["']\)""", RegexOption.DOT_MATCHES_ALL)
-            .find(html)?.groupValues?.get(1) ?: return null
-        val px = Regex("""width:calc\(1in\s*\+\s*(\d+)px\)""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 156
+        val fonction = Regex("""src:\s*\(function\([a-zA-Z]+\).*?\}\)\(["']([^"']+)["']\)""", RegexOption.DOT_MATCHES_ALL)
+            .find(html) ?: return null
+        val payload = fonction.groupValues[1]
+        val px = Regex("""width:calc\(1in\s*\+\s*(\d+)px\)""").find(fonction.value)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("""width:calc\(1in\s*\+\s*(\d+)px\)""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 156
+        // 2026-10-21 (user : Vidzy rouge, flux 403) : la largeur du div ENFANT a changé — avant
+        //   « 50% » (BC = (96+N)/2), maintenant « calc(100% - 11px) » (BC = 96+N-11 = 171, mesuré
+        //   dans le navigateur). On lit donc la formule de l'enfant (2ᵉ « width: » de la fonction)
+        //   au lieu de la supposer : X% du parent, ± Y px.
+        val parent = 96 + px
+        val candidatsBc = mutableListOf<Int>()
+        Regex("""width:\s*(?:calc\(\s*)?(\d+(?:\.\d+)?)%\s*(?:([+-])\s*(\d+)px)?""").findAll(fonction.value).forEach { m ->
+            val base = parent * (m.groupValues[1].toDoubleOrNull() ?: return@forEach) / 100.0
+            val dec = m.groupValues[3].toIntOrNull() ?: 0
+            val v = if (m.groupValues[2] == "-") base - dec else base + dec
+            candidatsBc += kotlin.math.floor(v).toInt()
+            candidatsBc += kotlin.math.ceil(v).toInt()
+        }
+        candidatsBc += listOf(parent / 2, (parent + 1) / 2)
         val octets = try {
             android.util.Base64.decode(payload, android.util.Base64.DEFAULT).reversedArray()
         } catch (e: Exception) { return null }
@@ -141,7 +157,7 @@ class VidzyExtractor : Extractor() {
         for (hote in hotes) {
             var h = 0
             for (c in hote) h = (h + c.code) and 255
-            for (bc in listOf((96 + px) / 2, (96 + px + 1) / 2).distinct()) {
+            for (bc in candidatsBc.distinct()) {
                 val sb = StringBuilder(octets.size)
                 for (i in octets.indices) {
                     val kk = (0x3d + i * 89 + h + bc) and 255

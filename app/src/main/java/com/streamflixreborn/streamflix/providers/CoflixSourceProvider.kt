@@ -92,7 +92,15 @@ object CoflixSourceProvider {
         "Referer" to "$lastWorkingMirror/",
     )
 
-    private val httpClient by lazy { Extractor.sharedClient }
+    // 2026-10-21 (user : « Coflix devrait l'avoir », Sacrifice) : leur API de recherche répond en
+    //   ~5 s (mesuré dans le navigateur, 200 + bons résultats) ; le délai du client partagé coupait
+    //   avant (« failed: timeout »), et on partait alors 40 s dans le résolveur anti-bot pour rien.
+    private val httpClient by lazy {
+        Extractor.sharedClient.newBuilder()
+            .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
 
     /** 2026-09-25 — Détecte l'interstitiel BotBlocker (« Checking your browser before
      *  accessing the site », « Loading… », « Connection ID »). Une réponse vide ou
@@ -177,8 +185,11 @@ object CoflixSourceProvider {
 
     private suspend fun httpGet(url: String, customReferer: String? = null): String? = withContext(Dispatchers.IO) {
         // 1) OkHttp avec cookie + UA furtive (marche si le cookie BotBlocker est déjà posé).
-        val (html1, _) = okGet(url, customReferer)
+        val (html1, code1) = okGet(url, customReferer)
         if (html1 != null && !isBotBlockerChallenge(html1)) return@withContext html1
+        // 2026-10-21 (user, film « Animals ») : un 404/410 veut dire « page inexistante », pas
+        //   « bloqué ». On lançait quand même le résolveur anti-bot → 33 s perdues, puis encore 404.
+        if (code1 == 404 || code1 == 410) return@withContext null
 
         // 2) Challenge BotBlocker (ou réponse vide) → on le franchit au WebView attaché (pose le
         //    cookie de passage, valable pour tout le domaine).
