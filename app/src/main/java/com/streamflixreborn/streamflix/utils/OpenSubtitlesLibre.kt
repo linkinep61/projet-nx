@@ -60,6 +60,42 @@ object OpenSubtitlesLibre {
      *   passe ce filtre — sert à trouver une AUTRE langue à traduire en français.
      * @param surLangue reçoit la langue (ISO 639-1) du fichier rendu.
      */
+    /**
+     * 2026-10-22 (user, Vidnest : « t'as plus qu'à activer les sous-titres comme les autres ») —
+     * l'API libre répondait 503 et le sous-titre automatique abandonnait, alors que la recherche
+     * manuelle passe alors sur l'API officielle. Même secours ici, mais SEULEMENT par identifiant
+     * IMDb : par titre, l'API officielle a rendu « Into the Spider-Verse » pour « Brand New Day »
+     * — en automatique, ce serait le sous-titre d'un autre film.
+     */
+    private suspend fun secoursOfficiel(
+        imdb: String, videoType: Video.Type, langue: String, dossier: File, cle: String,
+        surLangue: ((String) -> Unit)?,
+    ): File? {
+        if (imdb == "titre" || langue == "all") {
+            Log.d(TAG, "API libre indisponible [$langue] — pas de secours (recherche par titre)")
+            return null
+        }
+        val ep = videoType as? Video.Type.Episode
+        val liste = runCatching {
+            OpenSubtitles.search(imdbId = imdb, season = ep?.season?.number, episode = ep?.number, subLanguageId = langue)
+        }.onFailure { Log.w(TAG, "secours API officielle : ${it.message}") }.getOrNull().orEmpty()
+        Log.d(TAG, "API libre indisponible → API officielle imdb $imdb [$langue] : ${liste.size} résultat(s)")
+        for (st in liste.take(3)) {
+            val uri = runCatching { OpenSubtitles.download(st) }
+                .onFailure { Log.w(TAG, "secours, téléchargement : ${it.message}") }.getOrNull() ?: continue
+            val brut = runCatching { File(uri.path!!).readText() }.getOrNull() ?: continue
+            val ass = ConversionAss.versVtt(brut)
+            val texte = ass ?: brut
+            if (!texte.contains("-->") || texteCommentaires(texte)) continue
+            val f = File(dossier, "$cle.${if (ass != null) "vtt" else "srt"}")
+            f.writeText(texte)
+            surLangue?.invoke(when (langue) { "fre" -> "fr"; "eng" -> "en"; else -> langue })
+            Log.i(TAG, "sous-titre [$langue] retenu (API officielle) : ${st.subFileName}")
+            return f
+        }
+        return null
+    }
+
     suspend fun chercher(
         videoType: Video.Type, langue: String = "fre", nomFichierVideo: String? = null,
         filtreIso: ((String) -> Boolean)? = null, surLangue: ((String) -> Unit)? = null,
@@ -96,7 +132,7 @@ object OpenSubtitlesLibre {
                 Request.Builder().url("https://rest.opensubtitles.org/search/$chemin/sublanguageid-$langue")
                     .header("X-User-Agent", "trailers.to-UA").build()
             ).execute().use { r -> if (r.isSuccessful) r.body?.string() else null }
-        }.getOrNull() ?: return@withContext null
+        }.getOrNull() ?: return@withContext secoursOfficiel(imdb, videoType, langue, dossier, cle, surLangue)
         val liste = runCatching { JSONArray(json) }.getOrNull() ?: return@withContext null
         // Un seul fichier (pas de « CD1/CD2 »), format texte lisible, le plus téléchargé d'abord.
         val candidats = (0 until liste.length()).map { liste.getJSONObject(it) }

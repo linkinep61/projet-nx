@@ -91,6 +91,8 @@ object BackupRegistry {
         // 2026-10-22 : MoviesFree (lecteur Vidsrc de moviesfree.cv) — par TMDB, audio anglais.
         //   Nommé « MoviesFree » (user : deux serveurs « VixSrc » / « Vidsrc » se confondaient).
         "MoviesFree" to "MoviesFree (VOSTFR, par TMDB)",
+        // 2026-10-22 (user : « branche-le et on fait les tests ») : Vidnest, agrégateur VO par TMDB.
+        "Vidnest" to "Vidnest (VOSTFR, par TMDB)",
         "Movix" to "Movix",
         "Frembed" to "Frembed",
         "Vidzy" to "Vidzy (par TMDB)",
@@ -1743,6 +1745,21 @@ object BackupRegistry {
                 ))
             } }
 
+            // ── VIDNEST (agrégateur VO, par TMDB) ───────────────────────────────────
+            // 2026-10-22 (user : « branche-le et on fait les tests ») : vidnest.fun regroupe une
+            //   douzaine de sources en audio d'origine. Vérifié au navigateur : Inception (4K) et
+            //   Game of Thrones S01E01 se lancent seuls. Comme MoviesFree : jamais sur une œuvre
+            //   française, sous-titres fournis par l'appli (« #vostfr » → activation d'office).
+            if (!resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("Vidnest") {
+                val tmdb = resolvedTmdbId!!
+                listOf(Video.Server(
+                    id = "vidnest_${if (key.isMovie) "movie_$tmdb" else "tv_${tmdb}_${key.season}_${key.episode}"}",
+                    name = "[VOSTFR]",
+                    src = (if (key.isMovie) "https://vidnest.fun/movie/$tmdb"
+                           else "https://vidnest.fun/tv/$tmdb/${key.season.coerceAtLeast(1)}/${key.episode}") + "#vostfr",
+                ))
+            } }
+
             // ── KISSKH (dramas asiatiques, par titre) ───────────────────────────────
             // 2026-10-22 (user : « un serveur avec beaucoup de dramas coréens, qu'on puisse
             //   traduire nous-mêmes ») : uniquement sur un contenu asiatique (langue d'origine
@@ -2766,6 +2783,7 @@ object BackupRegistry {
             "Tokyvideo" -> TokyVideo.video(orig)
             "KissKH" -> com.streamflixreborn.streamflix.utils.KissKh.video(orig)
             "MoviesFree" -> com.streamflixreborn.streamflix.utils.Vidsrc.video(orig)
+            "Vidnest" -> com.streamflixreborn.streamflix.extractors.VidnestExtractor().extract(orig.src.substringBefore('#'))
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
                 dynamicBackups[source]?.let { dyn ->
