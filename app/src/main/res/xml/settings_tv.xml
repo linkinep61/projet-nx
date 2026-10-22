@@ -255,6 +255,15 @@
                 android:summary="Affiche automatiquement les sous-titres français quand ils sont disponibles dans le flux (dessin animé VOSTFR, etc.). Désactiver si les CC pour malentendants (HUGO! HUGO!) sont gênants."
                 android:defaultValue="false" />
 
+            <!-- 2026-10-22 : sonde de qualité des serveurs, désactivée par défaut
+                 (voir UserPreferences.sondeQualite). -->
+            <SwitchPreference
+                android:key="SONDE_QUALITE"
+                android:title="Afficher la qualité des serveurs"
+                android:summaryOn="Chaque serveur est testé pour afficher sa qualité (720p, 1080p…). Ralentit le démarrage."
+                android:summaryOff="Désactivé : démarrage plus rapide, la qualité n'est pas affichée."
+                android:defaultValue="false" />
+
             <SwitchPreference
                 android:key="AUTOPLAY"
                 android:title="@string/settings_autoplay"

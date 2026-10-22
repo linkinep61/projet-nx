@@ -93,7 +93,8 @@
                 android:textSize="16sp" />
 
             <!-- 2026-05-16 : hint clickable. Si l'extracteur galère, user
-                 peut tap pour annuler + choisir un autre lecteur. -->
+                 peut tap pour annuler + choisir un autre lecteur.
+                 2026-10-22 (user) : message masqué, le toucher ouvre toujours la liste des serveurs. -->
             <TextView
                 android:id="@+id/loading_overlay_hint"
                 android:layout_width="wrap_content"
@@ -102,6 +103,7 @@
                 android:background="#33FFFFFF"
                 android:paddingHorizontal="20dp"
                 android:paddingVertical="10dp"
+                android:visibility="gone"
                 android:text="Toucher pour changer de serveur"
                 android:textColor="#FFFFFF"
                 android:textSize="13sp"

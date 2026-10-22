@@ -121,6 +121,7 @@ open class VidMoLyExtractor : Extractor() {
         }
 
         val html = resp.body?.string() ?: return@withContext null
+        sousTitresPage = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(html, url)
         Log.d("VidMoLyExtractor", "OkHttp HTML received: ${html.length} chars")
 
         // CF challenge dans le body ?
@@ -150,10 +151,15 @@ open class VidMoLyExtractor : Extractor() {
         null
     }
 
+    // 2026-10-22 : sous-titres lus dans la page (voie OkHttp) ; vide via la WebView.
+    @Volatile private var sousTitresPage: List<Video.Subtitle> = emptyList()
+
     private fun buildVideo(hlsUrl: String, pageUrl: String): Video {
         val host = Uri.parse(pageUrl).host ?: "vidmoly.to"
+        val st = sousTitresPage.also { sousTitresPage = emptyList() }
         return Video(
             source = hlsUrl,
+            subtitles = st,
             headers = mapOf(
                 "Referer" to "https://$host/",
                 "Origin" to "https://$host",

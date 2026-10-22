@@ -914,7 +914,7 @@ object VoeLibrary {
         }.orEmpty()
         if (exacts.isNotEmpty()) {
             Log.d(TAG, "rattachement par identifiant TMDB $tmdbId : ${exacts.size}")
-            return exacts.map { serveurDe(it.code, "VOE") }
+            return exacts.map { serveurDe(it.code, "VOE" + VidaraLibrary.etiquetteLangue(it.nomBrut)) }
         }
 
         // ── EPISODE DE SERIE : le numero decide, pas le titre ────────────────
@@ -934,7 +934,7 @@ object VoeLibrary {
             if (episodes.isNotEmpty()) {
                 Log.d(TAG, "rattachement episode S${saison}E${episode} : " +
                     "${episodes.size} (${episodes.first().titre})")
-                return episodes.map { serveurDe(it.code, "VOE") }
+                return episodes.map { serveurDe(it.code, "VOE" + VidaraLibrary.etiquetteLangue(it.nomBrut)) }
             }
             Log.i(TAG, "aucun fichier pour S${saison}E${episode} de " +
                 "${titresConnus.firstOrNull()}")
@@ -979,6 +979,6 @@ object VoeLibrary {
         if (retenus.isNotEmpty()) {
             Log.d(TAG, "rattachement par titre : ${retenus.size} (${titresConnus.first()})")
         }
-        return retenus.map { serveurDe(it.code, "VOE") }
+        return retenus.map { serveurDe(it.code, "VOE" + VidaraLibrary.etiquetteLangue(it.nomBrut)) }
     }
 }

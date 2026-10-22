@@ -86,7 +86,10 @@ class SwiftFlowExtractor : Extractor() {
         //   Referer = le lecteur. Sans ce Referer, le CDN redirige vers une page Telegram.
         //   cheksum.lol, lui, répond 522 au bout de 20 s. On essaie donc d'abord l'URL directe,
         //   validée par une petite requête (2 octets) ; la signature cheksum reste en secours.
-        run {
+        // 2026-10-22 (user : « optimiser, plus de rapidité ») — l'essai DIRECT passe en SECOURS.
+        //   Sur Movix le CDN (cdnNN.zen-blk.store) refuse désormais le mp4 non signé (302) :
+        //   l'essai direct coûtait ~1 s à chaque lancement pour rien. La signature passe d'abord.
+        fun essaiDirect(): Video? {
             val dernier = filePath.lastIndexOf('/')
             val cheminEncode = if (dernier > 0) {
                 "/" + filePath.substring(1, dernier).replace("/", "%2F") + filePath.substring(dernier)
@@ -98,7 +101,7 @@ class SwiftFlowExtractor : Extractor() {
             for (direct in candidates) {
                 if (sondeVideo(direct, referer = "$base/")) {
                     Log.d(TAG, "SwiftFlow : mp4 direct OK (${cdnHost}), sans signature")
-                    return@withContext Video(
+                    return Video(
                         source = direct,
                         type = MimeTypes.VIDEO_MP4,
                         headers = mapOf(
@@ -109,25 +112,41 @@ class SwiftFlowExtractor : Extractor() {
                     )
                 }
             }
-            Log.d(TAG, "SwiftFlow : mp4 direct refusé → essai signature cheksum")
+            Log.d(TAG, "SwiftFlow : mp4 direct refusé")
+            return null
         }
 
-        // 2) cheksum → URL signée (302 Location ou dans le body). Referer swiftflow.lol OBLIGATOIRE.
-        val proxyUrl = "https://cheksum.lol/api/video_proxy.php?file=$filePath&cdn=$cdnHost"
-        val (proxyCode, proxyBody, proxyLocation) = httpGetFull(
-            proxyUrl, referer = "$base/", followRedirects = false
-        ) ?: throw Exception("SwiftFlow: cheksum fetch failed")
-
-        val signedUrl = when {
-            proxyLocation != null && proxyLocation.contains("ff=") -> proxyLocation
-            proxyCode in 200..299 && proxyBody != null -> {
-                Regex("""https?://[^\s"'<>\\]*citron[^\s"'<>\\]*ff=[^\s"'<>\\]+""")
-                    .find(proxyBody)?.value
-                    ?: throw Exception("SwiftFlow: no signed url in cheksum body (code=$proxyCode)")
+        // 2) Signature → URL signée (302 Location ou dans le body).
+        // 2026-10-22 (user : « tous les serveurs Movix sont rouges ») — le site Movix signe
+        //   désormais via falzey.lol (même API video_proxy.php, CDN cdnNN.zen-blk.store,
+        //   vérifié dans Chrome) ; cheksum.lol répond 522. falzey.lol d'abord, cheksum.lol
+        //   en secours. Referer : le lecteur, sinon le site Movix (le <video> y est intégré).
+        var signedUrl: String? = null
+        var refererOk = "$base/"
+        var dernierEchec = "aucun proxy"
+        for (proxy in PROXYS_SIGNATURE) {
+            for (ref in listOf("$base/", REFERER_MOVIX)) {
+                val proxyUrl = "$proxy/api/video_proxy.php?file=$filePath&cdn=$cdnHost"
+                val res = httpGetFull(proxyUrl, referer = ref, followRedirects = false)
+                if (res == null) { dernierEchec = "${URL(proxy).host} injoignable"; break }
+                val (proxyCode, proxyBody, proxyLocation) = res
+                val trouve = when {
+                    proxyLocation != null && proxyLocation.contains("ff=") -> proxyLocation
+                    proxyCode in 200..299 && proxyBody != null ->
+                        Regex("""https?://[^\s"'<>\\]+\.mp4\?[^\s"'<>\\]*ff=[^\s"'<>\\]+""").find(proxyBody)?.value
+                    proxyLocation != null && proxyLocation.contains(".mp4") -> proxyLocation
+                    else -> null
+                }
+                if (trouve != null) { signedUrl = trouve; refererOk = ref; break }
+                dernierEchec = "${URL(proxy).host} code=$proxyCode loc=${proxyLocation?.take(40)}"
+                Log.d(TAG, "SwiftFlow : signature refusée ($dernierEchec, Referer $ref)")
+                if (proxyCode >= 500) break  // proxy hors service : inutile de changer de Referer
             }
-            // le proxy peut aussi rediriger directement vers le mp4 sur un autre CDN
-            proxyLocation != null && (proxyLocation.contains(".mp4") || proxyLocation.contains("citron")) -> proxyLocation
-            else -> throw Exception("SwiftFlow: cheksum no signed url (code=$proxyCode, loc=${proxyLocation?.take(40)})")
+            if (signedUrl != null) break
+        }
+        if (signedUrl == null) {
+            essaiDirect()?.let { return@withContext it }
+            throw Exception("SwiftFlow: no signed url ($dernierEchec)")
         }
 
         Log.d(TAG, "SwiftFlow resolved signed mp4 (${signedUrl.take(60)}…)")
@@ -137,7 +156,7 @@ class SwiftFlowExtractor : Extractor() {
             type = MimeTypes.VIDEO_MP4,
             headers = mapOf(
                 "User-Agent" to WebViewResolver.STEALTH_UA,
-                "Referer" to "$base/",
+                "Referer" to refererOk,
             ),
         )
     }
@@ -239,5 +258,8 @@ class SwiftFlowExtractor : Extractor() {
 
     companion object {
         private const val TAG = "SwiftFlowExtractor"
+        /** Proxys de signature du mp4 (le site en change ; le 1er qui répond gagne). */
+        private val PROXYS_SIGNATURE = listOf("https://falzey.lol", "https://cheksum.lol")
+        private const val REFERER_MOVIX = "https://movix.dog/"
     }
 }

@@ -2196,11 +2196,13 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         url.contains("filemoon") -> "Filemoon"
         url.contains("minochinos") -> "Minochinos"
         url.contains("lpayer") || url.contains("embed4me") -> "Lpayer"
-        else -> {
-            try {
-                java.net.URL(url).host.substringBefore(".").replaceFirstChar { it.uppercase() }
-            } catch (_: Exception) { varName }
-        }
+        // 2026-10-22 (user : « le serveur Megankiddifference, dans AnimeSama c'est VOE ») — VOE
+        //   change de domaine sans cesse (mots anglais collés : megankiddifference.com…). Le nom
+        //   tiré du domaine affichait ce mot ; on demande d'abord aux lecteurs connus (domaines
+        //   tournants de VOE compris), le domaine ne sert plus qu'en dernier recours.
+        else -> com.streamflixreborn.streamflix.extractors.Extractor.identifyServiceName(url) ?: try {
+            java.net.URL(url).host.substringBefore(".").replaceFirstChar { it.uppercase() }
+        } catch (_: Exception) { varName }
     }
 
     // ========== VIDEO ==========

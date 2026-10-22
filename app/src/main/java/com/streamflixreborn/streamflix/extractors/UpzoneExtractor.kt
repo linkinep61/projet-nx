@@ -47,6 +47,7 @@ class UpzoneExtractor : Extractor() {
         val directSource = extractDirectSource(document, pageUrl)
         if (directSource != null) {
             return buildVideo(directSource, pageUrl)
+                .copy(subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(document.outerHtml(), pageUrl))
         }
 
         val delegatedLink = extractDelegatedLink(document, pageUrl)

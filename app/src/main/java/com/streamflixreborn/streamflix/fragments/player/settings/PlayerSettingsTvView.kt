@@ -688,10 +688,14 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             binding.ivSettingEnter.visibility = View.VISIBLE
             binding.ivSettingEnter.rotation = if (ouverte) 90f else 0f
 
-            binding.root.setOnClickListener { settingsView.lancerSource(source) }
+            // 2026-10-22 (user : « des fois quand on fait OK ça change le serveur alors qu'on a
+            //   rien demandé ») — OK sur une ligne de SOURCE lançait son 1ᵉʳ serveur. OK l'ouvre
+            //   (ou la referme) désormais, comme sur le téléphone ; le changement de serveur ne
+            //   se fait plus que sur une ligne de serveur. Appui long = lancer le 1ᵉʳ serveur.
+            binding.root.setOnClickListener { settingsView.basculerSource(source) }
             binding.root.isLongClickable = true
             binding.root.setOnLongClickListener {
-                settingsView.basculerSource(source)
+                settingsView.lancerSource(source)
                 true
             }
             binding.root.setOnKeyListener { _, keyCode, event ->
@@ -800,6 +804,19 @@ class PlayerSettingsTvView @JvmOverloads constructor(
 
                                 Settings.Subtitle.ExternalServerSubtitles -> {
                                     settingsView.onSubtitleSelected.invoke(item)
+                                    settingsView.hide()
+                                }
+
+                                Settings.Subtitle.TraductionAuto -> {
+                                    // Ligne d'information : rien à faire au clic.
+                                }
+
+                                Settings.Subtitle.Recaler -> {
+                                    com.streamflixreborn.streamflix.utils.SyncSousTitres.demandeRecalage?.invoke()
+                                    settingsView.hide()
+                                }
+                                Settings.Subtitle.Traduire -> {
+                                    com.streamflixreborn.streamflix.utils.TraductionSousTitres.demandeTraduction?.invoke()
                                     settingsView.hide()
                                 }
                             }
@@ -1098,6 +1115,9 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                             if (running) "Désactiver les sous-titres serveur"
                             else "Activer les sous-titres serveur"
                         }
+                        Settings.Subtitle.TraductionAuto -> Settings.Subtitle.TraductionAuto.libelle
+                        Settings.Subtitle.Recaler -> Settings.Subtitle.Recaler.libelle
+                        Settings.Subtitle.Traduire -> Settings.Subtitle.Traduire.libelle
                     }
 
                     is Settings.Subtitle.Style -> when (item) {
@@ -1687,6 +1707,9 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         Settings.Subtitle.OpenSubtitles -> View.VISIBLE
                         Settings.Subtitle.SubDLSubtitles -> View.VISIBLE
                         Settings.Subtitle.ExternalServerSubtitles -> View.GONE
+                        Settings.Subtitle.TraductionAuto -> View.GONE
+                        Settings.Subtitle.Recaler -> View.GONE
+                        Settings.Subtitle.Traduire -> View.GONE
                     }
 
                     is Settings.Subtitle.Style -> when (item) {

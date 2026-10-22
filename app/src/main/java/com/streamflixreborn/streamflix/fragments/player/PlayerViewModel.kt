@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.fragments.player
 
+import kotlinx.coroutines.async
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -68,6 +69,10 @@ class PlayerViewModel(
     // 2026-06-30 : qualité vidéo détectée par le probe HTTP (GET m3u8 + parse RESOLUTION).
     // Émet Unit à chaque fois qu'au moins un Settings.Server.quality a été mis à jour.
     // Les fragments collectent ce flow pour rafraîchir le picker.
+    /** 2026-10-22 : traduction terminée PENDANT la lecture → (id du serveur, fichier .vtt). */
+    private val _traductionPrete = MutableSharedFlow<Pair<String, java.io.File>>(extraBufferCapacity = 4)
+    val traductionPrete: SharedFlow<Pair<String, java.io.File>> = _traductionPrete
+
     private val _qualityUpdated = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     val qualityUpdated: SharedFlow<Unit> = _qualityUpdated
 
@@ -276,6 +281,20 @@ class PlayerViewModel(
             val jobs = mutableListOf<Job>()
             toExtract.forEachIndexed { idx, server ->
                 jobs += launch {
+                    // 2026-10-22 (user : « continue à voir si tu peux faire des trucs sans faire
+                    //   de casse ») — mesuré sur la télé : pendant que le 1ᵉʳ serveur démarrait
+                    //   (Vidara, ~15 s pour sa 1ʳᵉ image), la pré-extraction préparait AUSSI les
+                    //   suivants (SeekStreaming = page web cachée) et leur prenait réseau et
+                    //   processeur. Le 1ᵉʳ part tout de suite ; les suivants attendent que la
+                    //   lecture ait réellement démarré (12 s au plus). S'il faut changer de
+                    //   serveur avant, il est simplement préparé à la demande, comme sans cache.
+                    if (idx > 0) {
+                        var attente = 0L
+                        while (!lectureDemarree && attente < 12_000L) {
+                            kotlinx.coroutines.delay(250L)
+                            attente += 250L
+                        }
+                    }
                     // 2026-05-21 : ne PAS pré-extraire les sources natives Papadustream :
                     //   elles passent par un Cloudflare Turnstile que SEUL l'utilisateur
                     //   peut résoudre → pré-extraire en fond lancerait l'écran captcha
@@ -359,7 +378,10 @@ class PlayerViewModel(
                                         //   lue dans le même manifeste (aucune requête en plus).
                                         probeHlsQuality(extractedUrl, result.headers, server)
                                     } else null
-                                    val finalQ = q ?: inferQualityFromText(extractedUrl) ?: inferQualityFromText(server.name)
+                                    // 2026-10-22 (user : Vidzy marqué 1440p / 4K alors que le fichier est en 360p) : on ne
+                                    //   lit la qualité que dans le CHEMIN de l'adresse — la query contient des
+                                    //   jetons/délais (`e=14400` → « 1440p », « …4k… » dans un token).
+                                    val finalQ = q ?: inferQualityFromText(extractedUrl.substringBefore('?')) ?: inferQualityFromText(server.name)
                                     if (finalQ != null) {
                                         server.quality = finalQ
                                         _qualityUpdated.emit(Unit)
@@ -393,6 +415,18 @@ class PlayerViewModel(
                                 "PlayerViewModel",
                                 "Pre-extract OK [$idx] ${server.name} → cached in ${durationMs}ms",
                             )
+                            // 2026-10-22 : traduction lancée DÈS le pré-extract → souvent prête au clic.
+                            aTraduire(server, result)?.let { (st, langue) ->
+                                // 2026-10-22 : d'abord un VRAI sous-titre français (OpenSubtitles libre,
+                                //   ~1 s) ; la traduction (jusqu'à 1 min CPU sur un film) seulement à défaut.
+                                viewModelScope.launch(Dispatchers.IO) {
+                                    val vt = lastVideoType
+                                    val fr = vt?.let { runCatching { com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre.chercher(it, "fre") }.getOrNull() }
+                                    if (fr != null) { Log.d("PlayerViewModel", "pré-extract : français OpenSubtitles trouvé → pas de traduction (${server.name})"); return@launch }
+                                    Log.d("PlayerViewModel", "traduction anticipée $langue→fr (${server.name})")
+                                    com.streamflixreborn.streamflix.utils.TraductionSousTitres.lancer(st.file, result.headers, langue)
+                                }
+                            }
                         } else {
                             Log.d(
                                 "PlayerViewModel",
@@ -510,6 +544,11 @@ class PlayerViewModel(
             Log.i("QualityProbe", "mode léger : sonde de qualité désactivée")
             return
         }
+        // 2026-10-22 : désactivée par défaut, activable dans Paramètres › Lecteur.
+        if (!UserPreferences.sondeQualite) {
+            Log.i("QualityProbe", "sonde de qualité désactivée (Paramètres › Lecteur)")
+            return
+        }
 
         // Idempotent : une seule instance à la fois
         if (qualityProbeJob?.isActive == true) {
@@ -612,7 +651,9 @@ class PlayerViewModel(
             // 2026-06-30 (user "trie les serveurs par qualité au fur et à mesure,
             //   mais exclus VOSTFR et VO du tri") : re-trie les VF par résolution
             //   (desc) à chaque détection ; VOSTFR/VO gardent leur place.
-            if (isVfServer(server)) emitQualitySortedServers()
+            // 2026-10-22 (user : « le tri par qualité ne sert plus à rien et prend des ressources,
+            //   le désactiver ») : la qualité est toujours DÉTECTÉE et affichée, mais la liste
+            //   n'est plus re-triée à chaque détection.
         }
     }
 
@@ -657,22 +698,280 @@ class PlayerViewModel(
      *     dans le doute, pas de sous-titres imposés. L'utilisateur garde la main dans le
      *     menu du lecteur, et le réglage manuel reste prioritaire quand il est actif.
      */
+    /**
+     * 2026-10-22 (user : « garder les serveurs anglais sous-titrés et les convertir en français ») :
+     * serveur VO/VOSTFR SANS aucune piste française mais AVEC une anglaise → traduction automatique
+     * (TraductionSousTitres, sur l'appareil). La piste « Français (traduit) » passe en tête et est
+     * activée. Attente max 20 s (1re fois = téléchargement du modèle) ; au-delà la lecture démarre
+     * en anglais et la traduction continue en fond — prête au lancement suivant.
+     */
+    /**
+     * 2026-10-22 : serveur VO/VOSTFR sans aucune piste française → vrai sous-titre français
+     * d'OpenSubtitles (API REST libre, cf. OpenSubtitlesLibre) AVANT de traduire nous-mêmes.
+     * Attente max 8 s ; sans résultat, la traduction automatique prend le relais.
+     */
+    /**
+     * 2026-10-22 (user : « j'ai cliqué sur le sous-titre en français, il ne s'active pas ») :
+     * Cloudstream sert ses sous-titres par une adresse SANS extension ; le lecteur devine le format
+     * d'après l'adresse et, faute d'extension, le prenait pour du SRT — or c'était du WebVTT
+     * (« SubripParser: Skipping invalid index: WEBVTT » dans le journal) → aucune réplique lue.
+     * On lit donc les premiers octets de ces fichiers-là et on ajoute un fragment `#.vtt` / `#.srt`
+     * à l'adresse (jamais envoyé au serveur) : le lecteur choisit alors le bon format.
+     */
+    private suspend fun avecFormatSousTitresDevine(video: Video): Video {
+        val connus = Regex("""\.(vtt|ass|ssa|ttml|xml|dfxp)$""", RegexOption.IGNORE_CASE) // .srt aussi vérifié : certains hébergeurs servent du WebVTT sous .srt
+        val aDeviner = video.subtitles.filter {
+            it.file.startsWith("http") && !connus.containsMatchIn(it.file.substringBefore('?').substringBefore('#'))
+        }
+        Log.d("PlayerViewModel", "format sous-titres : ${video.subtitles.size} piste(s), ${aDeviner.size} à vérifier ${video.subtitles.map { it.file.substringBefore('?').takeLast(40) }}")
+        if (aDeviner.isEmpty()) return video
+        val corrections = kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+            aDeviner.map { st ->
+                async(Dispatchers.IO) {
+                    val debut = runCatching {
+                        com.streamflixreborn.streamflix.utils.NetworkClient.default.newCall(
+                            okhttp3.Request.Builder().url(st.file).header("Range", "bytes=0-63").apply {
+                                video.headers?.get("Referer")?.let { header("Referer", it) }
+                                video.headers?.get("User-Agent")?.let { header("User-Agent", it) }
+                            }.build()
+                        ).execute().use { r -> r.body?.byteStream()?.let { e -> val b = ByteArray(64); val n = e.read(b); if (n > 0) String(b, 0, n) else null } }
+                    }.getOrNull().orEmpty().trimStart('\uFEFF', ' ', '\n', '\r')
+                    val ext = when {
+                        debut.startsWith("WEBVTT") -> "vtt"
+                        Regex("""^\d+\s*\r?\n\d{2}:\d{2}""").containsMatchIn(debut) -> "srt"
+                        else -> null
+                    }
+                    st to ext
+                }
+            }.map { it.await() }
+        } ?: return video
+        val parFichier = corrections.filter { it.second != null }.associate { it.first.file to it.second!! }
+        if (parFichier.isEmpty()) return video
+        Log.d("PlayerViewModel", "format des sous-titres deviné : ${parFichier.values.joinToString()}")
+        return video.copy(subtitles = video.subtitles.map { st ->
+            parFichier[st.file]?.let { st.copy(file = st.file.substringBefore('#') + "#." + it) } ?: st
+        })
+    }
+
+    @Volatile private var prefetchOsFr: kotlinx.coroutines.Deferred<java.io.File?>? = null
+
+    private suspend fun avecOpenSubtitlesFrancais(server: Video.Server, video: Video): Video {
+        val ex = com.streamflixreborn.streamflix.extractors.Extractor
+        if (video.subtitles.any { ex.isFrenchSubtitle(it.label) }) return video
+        val langueFichier = langueDepuisNomFichier(video.fileName)
+        val vf = when (langueFichier) { "VOSTFR", "VO" -> false; "VF", "MULTI" -> true; else -> isVfServer(server) }
+        // 2026-10-22 (user : « les serveurs où les sous-titres sont déjà intégrés à l'image, l'appli ne
+        //   va pas le détecter et proposera des sous-titres par-dessus », puis « oui, sinon je lance
+        //   un VOSTFR et j'ai les sous-titres à désactiver derrière ») — un VOSTFR de site français
+        //   (AnimeSama, Wiflix, Vostfree…) a presque toujours le français GRAVÉ dans l'image. Le
+        //   français OpenSubtitles n'est donc activé d'office que sur les sources sans sous-titres
+        //   (version originale ajoutée pour la traduction) ; ailleurs il est seulement PROPOSÉ.
+        if (vf || !sourceSansSousTitres(server)) {
+            // 2026-10-22 (user : « sur un VF, ne pas l'activer, c'est normal ; mais s'il y a des scènes
+            //   pas en français, c'est bien de l'avoir ») : sur un VF, le français OpenSubtitles est
+            //   PROPOSÉ dans le menu, jamais activé d'office. On n'attend que la recherche déjà lancée
+            //   à l'ouverture (2 s max) : le démarrage d'un VF n'est pas retardé.
+            val f0 = kotlinx.coroutines.withTimeoutOrNull(2_000L) { prefetchOsFr?.await() }
+                ?: return if (vf) video else avecAutreLangueProposee(video)
+            // 2026-10-22 : recalé sur le sous-titre du serveur s'il en fournit un (RecalageAuto).
+            val f = kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+                com.streamflixreborn.streamflix.utils.RecalageAuto.recaler(f0, video)
+            } ?: f0
+            Log.d("PlayerViewModel", "sous-titres : « Français (OpenSubtitles) » proposé, non activé (${if (vf) "VF" else "VOSTFR, sous-titres sans doute gravés"}, ${server.name})")
+            return video.copy(subtitles = video.subtitles + Video.Subtitle(
+                label = "Français (OpenSubtitles)", file = android.net.Uri.fromFile(f).toString(), default = false,
+            ))
+        }
+        val vt = lastVideoType ?: return video
+        val f = kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+            com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre.chercher(vt, "fre", video.fileName)
+        }?.let { f0 ->
+            // 2026-10-22 : recalé sur le sous-titre du serveur s'il en fournit un (RecalageAuto).
+            kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+                com.streamflixreborn.streamflix.utils.RecalageAuto.recaler(f0, video)
+            } ?: f0
+        } ?: run {
+            Log.d("PlayerViewModel", "OpenSubtitles libre : pas de français (${server.name})")
+            // 2026-10-22 (user, AnimeSama + MoviesFree : « peut-être qu'il y avait une autre langue
+            //   qui aurait pu être utilisée pour la traduction ») — le serveur ne fournit aucune piste
+            //   et OpenSubtitles n'a pas de français : on prend l'ANGLAIS d'OpenSubtitles, que
+            //   avecTraductionSiBesoin (appelé juste après) traduit en français comme une piste serveur.
+            if (video.subtitles.isEmpty()) {
+                val en = kotlinx.coroutines.withTimeoutOrNull(6_000L) {
+                    com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre.chercher(vt, "eng", video.fileName)
+                }
+                if (en != null) {
+                    Log.d("PlayerViewModel", "sous-titres : anglais OpenSubtitles trouvé → à traduire (${server.name})")
+                    return video.copy(subtitles = listOf(
+                        Video.Subtitle(label = "English (OpenSubtitles)", file = android.net.Uri.fromFile(en).toString(), default = false)
+                    ))
+                }
+                // 2026-10-22 (user : « il faut que l'application récupère les autres langues, pour
+                //   espérer les convertir ») — ni français ni anglais : n'importe quelle langue que le
+                //   traducteur sait mettre en français (espagnol, portugais, italien, allemand…), la
+                //   plus téléchargée d'abord. Une seule recherche « toutes langues ».
+                val outil = com.streamflixreborn.streamflix.utils.TraductionSousTitres
+                var code: String? = null
+                val autre = kotlinx.coroutines.withTimeoutOrNull(6_000L) {
+                    com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre.chercher(
+                        vt, "all", video.fileName,
+                        filtreIso = { it != "en" && outil.traduisible(it) },
+                        surLangue = { code = it },
+                    )
+                }
+                val c = code
+                if (autre != null && c != null && outil.traduisible(c)) {
+                    val nom = java.util.Locale(c).getDisplayLanguage(java.util.Locale.FRENCH)
+                        .replaceFirstChar { it.uppercase() }.ifBlank { c }
+                    Log.d("PlayerViewModel", "sous-titres : $nom OpenSubtitles trouvé → à traduire (${server.name})")
+                    return video.copy(subtitles = listOf(
+                        Video.Subtitle(label = "$nom (OpenSubtitles)", file = android.net.Uri.fromFile(autre).toString(), default = false)
+                    ))
+                }
+            }
+            return video
+        }
+        video.subtitles.forEach { it.default = false }
+        Log.d("PlayerViewModel", "sous-titres : « Français (OpenSubtitles) » activé (${server.name})")
+        return video.copy(subtitles = listOf(
+            Video.Subtitle(label = "Français (OpenSubtitles)", file = android.net.Uri.fromFile(f).toString(), default = true)
+        ) + video.subtitles)
+    }
+
+    /**
+     * 2026-10-22 — Source SANS sous-titres gravés : version originale ajoutée pour être traduite
+     * (MoviesFree marque ses liens « #vostfr » ; KissKH, NetMirror, ok.ru, VixSrc, MegacloudX
+     * servent la VO brute), ou serveur annoncé VO. Les « VOSTFR » des sites français n'en font
+     * pas partie : leur français est presque toujours incrusté dans l'image.
+     */
+    /**
+     * 2026-10-22 (user : « garder la possibilité de l'activer s'il y en a besoin ») — VOSTFR de site
+     * français sans français sur OpenSubtitles : l'anglais (ou une autre langue traduisible) est
+     * ajouté au menu, NON activé ; « Traduire en français » apparaît alors dans le menu.
+     */
+    private suspend fun avecAutreLangueProposee(video: Video): Video {
+        if (video.subtitles.isNotEmpty()) return video
+        val vt = lastVideoType ?: return video
+        val libre = com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre
+        kotlinx.coroutines.withTimeoutOrNull(6_000L) { libre.chercher(vt, "eng", video.fileName) }?.let { en ->
+            return video.copy(subtitles = listOf(
+                Video.Subtitle(label = "English (OpenSubtitles)", file = android.net.Uri.fromFile(en).toString(), default = false)
+            ))
+        }
+        val outil = com.streamflixreborn.streamflix.utils.TraductionSousTitres
+        var code: String? = null
+        val autre = kotlinx.coroutines.withTimeoutOrNull(6_000L) {
+            libre.chercher(vt, "all", video.fileName, filtreIso = { it != "en" && outil.traduisible(it) }, surLangue = { code = it })
+        }
+        val c = code
+        if (autre == null || c == null) return video
+        val nom = java.util.Locale(c).getDisplayLanguage(java.util.Locale.FRENCH).replaceFirstChar { it.uppercase() }.ifBlank { c }
+        return video.copy(subtitles = listOf(
+            Video.Subtitle(label = "$nom (OpenSubtitles)", file = android.net.Uri.fromFile(autre).toString(), default = false)
+        ))
+    }
+
+    private fun sourceSansSousTitres(server: Video.Server): Boolean {
+        if (server.src.contains("#vostfr", ignoreCase = true)) return true
+        val source = server.id.removePrefix("bkreg::").substringBefore("::")
+        // 2026-10-22 (user : « pas que sur lui, sur tous les autres, à part les deux derniers qu'on
+        //   avait ajoutés, c'était ça le deal ») — activation d'office UNIQUEMENT sur MoviesFree et
+        //   KissKH ; partout ailleurs les sous-titres OpenSubtitles / la traduction sont proposés.
+        return server.id.startsWith("bkreg::") && source in SOURCES_VO_BRUTE
+    }
+    private val SOURCES_VO_BRUTE = setOf("MoviesFree", "KissKH")
+
+    /** Piste anglaise à traduire (serveur VO/VOSTFR sans aucun français), ou null. */
+    private fun anglaisATraduire(server: Video.Server, video: Video): Video.Subtitle? = aTraduire(server, video)?.first
+
+    /** (piste à traduire, code de sa langue) — l'anglais d'abord, sinon toute langue traduisible. */
+    private fun aTraduire(server: Video.Server, video: Video, ignorerGarde: Boolean = false): Pair<Video.Subtitle, String>? {
+        if (video.subtitles.isEmpty()) return null
+        // 2026-10-22 (user : « deux lectures de sous-titres, plus celle d'origine ça fait trois ») —
+        //   VOSTFR d'un site français : le français est gravé dans l'image, rien à traduire par-dessus.
+        if (!ignorerGarde && !sourceSansSousTitres(server)) return null
+        val ex = com.streamflixreborn.streamflix.extractors.Extractor
+        val outil = com.streamflixreborn.streamflix.utils.TraductionSousTitres
+        if (video.subtitles.any { ex.isFrenchSubtitle(it.label) }) return null
+        val choix = video.subtitles.firstOrNull { ex.isEnglishSubtitle(it.label) }?.let { it to "en" }
+            ?: video.subtitles.firstNotNullOfOrNull { s -> outil.codeDepuisLibelle(s.label)?.takeIf { outil.traduisible(it) }?.let { s to it } }
+            ?: return null
+        val langueFichier = langueDepuisNomFichier(video.fileName)
+        val vf = when (langueFichier) { "VOSTFR", "VO" -> false; "VF", "MULTI" -> true; else -> isVfServer(server) }
+        return if (vf) null else choix
+    }
+
+    private suspend fun avecTraductionSiBesoin(server: Video.Server, video: Video): Video {
+        val outil = com.streamflixreborn.streamflix.utils.TraductionSousTitres
+        outil.demandeTraduction = null
+        val (en, langue) = aTraduire(server, video) ?: run {
+            // 2026-10-22 : VOSTFR aux sous-titres gravés → traduction PROPOSÉE (menu), pas lancée.
+            aTraduire(server, video, ignorerGarde = true)?.let { (piste, code) ->
+                outil.demandeTraduction = {
+                    viewModelScope.launch {
+                        outil.suivre(piste.file, code)
+                        outil.lancer(piste.file, video.headers, code).await()?.let { _traductionPrete.emit(server.id to it) }
+                    }
+                }
+            }
+            outil.suivre(null); return video
+        }
+        outil.suivre(en.file, langue)
+        val fichier = outil.dejaTraduit(en.file, langue) ?: run {
+            Log.d("PlayerViewModel", "traduction : lancement $langue→fr (${server.name})")
+            kotlinx.coroutines.withTimeoutOrNull(12_000L) { outil.lancer(en.file, video.headers, langue).await() }
+        }
+        if (fichier == null) {
+            // 2026-10-22 (film de 2 269 répliques = 65 s) : la lecture démarre en anglais ; dès que
+            //   la traduction est prête, le lecteur l'affiche EN COURS DE LECTURE (sans recharger).
+            Log.d("PlayerViewModel", "traduction pas prête à temps → anglais pour l'instant (continue en fond)")
+            viewModelScope.launch {
+                outil.lancer(en.file, video.headers, langue).await()?.let { _traductionPrete.emit(server.id to it) }
+            }
+            return video
+        }
+        video.subtitles.forEach { it.default = false }
+        val traduit = Video.Subtitle(label = "Français (traduit)", file = android.net.Uri.fromFile(fichier).toString(), default = true)
+        Log.d("PlayerViewModel", "sous-titres : « Français (traduit) » activé (${server.name})")
+        return video.copy(subtitles = listOf(traduit) + video.subtitles)
+    }
+
     private fun reglerSousTitresSelonLangue(server: Video.Server, video: Video) {
         if (video.subtitles.isEmpty()) return
         // ⚠ On n'interroge PAS `serverAutoSubtitlesDisabled` ici : ce drapeau empêche un
         //   serveur d'imposer ses sous-titres, il ne doit pas priver le VOSTFR des siens.
         //   C'est la LANGUE qui tranche, comme demandé : « si VOSTFR tu actives, si VF tu
         //   désactives ». Cette règle passe donc en dernier et a le dernier mot.
-        if (isVfServer(server)) {
+        // 2026-10-22 (user : « pourquoi les sous-titres ne sont pas directs avec Vidara ») : le NOM
+        //   DU FICHIER fourni par l'hébergeur (Video.fileName) prime sur l'étiquette du serveur —
+        //   même règle que la correction de langue du pré-extract.
+        fun estFr(l: String) = l.lowercase().let { it.contains("fr") || it.contains("français") || it.contains("french") }
+        fun estForce(l: String) = l.lowercase().let { it.contains("forc") }
+        val langueFichier = langueDepuisNomFichier(video.fileName)
+        Log.d("PlayerViewModel", "sous-titres : fichier=« ${video.fileName} » → ${langueFichier ?: "?"} (${server.id.take(60)})")
+        val vf = when (langueFichier) {
+            "VOSTFR", "VO" -> false
+            "VF", "MULTI" -> true
+            else -> isVfServer(server)
+        }
+        if (vf) {
             video.subtitles.forEach { it.default = false }
+            // Piste FRANÇAISE « forcée » = seulement les passages en langue étrangère : c'est
+            //   précisément ce qu'on veut sur un film en VF. Jamais de sous-titres complets.
+            video.subtitles.firstOrNull { estFr(it.label) && estForce(it.label) }?.let {
+                it.default = true
+                Log.d("PlayerViewModel", "sous-titres : VF → seulement « ${it.label} » (${server.name})")
+                return
+            }
             Log.d("PlayerViewModel", "sous-titres : serveur VF → aucun par défaut (${server.name})")
             return
         }
 
-        val fr = video.subtitles.firstOrNull {
-            val l = it.label.lowercase()
-            l.contains("fr") || l.contains("français") || l.contains("french")
-        } ?: return
+        val fr = video.subtitles.firstOrNull { estFr(it.label) && !estForce(it.label) }
+            ?: video.subtitles.firstOrNull { estFr(it.label) }
+            // 2026-10-22 : pas de français du tout → l'anglais en secours (VOSTFR/VO seulement).
+            ?: video.subtitles.firstOrNull { com.streamflixreborn.streamflix.extractors.Extractor.isEnglishSubtitle(it.label) }
+            ?: return
         video.subtitles.forEach { it.default = false }
         fr.default = true
         Log.d("PlayerViewModel", "sous-titres : serveur VOSTFR/VO → « ${fr.label} » activé (${server.name})")
@@ -861,7 +1160,9 @@ class PlayerViewModel(
     /** Infère la qualité depuis n'importe quel texte (URL, nom de serveur, label).
      *  Cherche les patterns de résolution courants. */
     private fun inferQualityFromText(text: String): String? {
-        val lower = text.lowercase()
+        // 2026-10-22 : pour une adresse, la query (jetons, =14400…) est ignorée — sinon
+        //   faux « 1440p » / « 4K » (Vidzy 360p affiché 1440p).
+        val lower = (if (text.startsWith("http")) text.substringBefore('?') else text).lowercase()
         return when {
             lower.contains("2160") || lower.contains("4k") || lower.contains("uhd") -> "4K"
             lower.contains("1440") -> "1440p"
@@ -904,6 +1205,11 @@ class PlayerViewModel(
         Log.d("PlayerViewModel", "Inizio ricerca server per ID: $id")
         lastVideoType = videoType
         lastId = id
+        // 2026-10-22 : sous-titre français OpenSubtitles (API libre) préparé DÈS l'ouverture,
+        //   en parallèle des serveurs → prêt au moment de la lecture (~1 s, mis en cache).
+        prefetchOsFr = viewModelScope.async(Dispatchers.IO) {
+            runCatching { com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre.chercher(videoType, "fre") }.getOrNull()
+        }
         // 2026-07-07 (fix probable blocage aplouf/non-progressif) : mettre l'enrichment
         //   (scraping du home) en pause AUSSI ici — pas seulement dans le chemin progressif.
         //   Sinon l'enrichment tient le mutex du service du provider et getServers hangue.
@@ -1346,7 +1652,7 @@ class PlayerViewModel(
                 //   rien ne doit pas priver l'utilisateur de son cœur. Le raccourci reste donc
                 //   actif sur les lots SUIVANTS, jusqu'à la première image. Une fois que ça
                 //   joue pour de vrai, on ne coupe plus jamais.
-                if (!lectureDemarree) {
+                if (!lectureDemarree && !coeurDejaLance) {
                     val favoris = favorisDuProvider()
                     val coeur = if (favoris.isEmpty()) null else fresh.firstOrNull {
                         com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(it) in favoris
@@ -1355,6 +1661,7 @@ class PlayerViewModel(
                         // Lot tardif (un serveur a déjà été choisi) → il faut un jeton pour
                         //   que le fragment accepte de basculer malgré `initialServerPicked`.
                         if (firstEmitted) raccourciCoeurEnAttente = true
+                        coeurDejaLance = true
                         autoPlayEmitted = true
                         firstEmitted = true
                         val liste = listOf(coeur) + accumulated.filter { it.id != coeur.id }
@@ -1442,9 +1749,30 @@ class PlayerViewModel(
                             val TRANCHE_MS = 400L
                             var attendu = 0L
                             var tailleAvant = allKnownServers.size
-                            while (attendu < STABILIZE_MS) {
+                            // 2026-10-22 (user : « les films avec identifiant exact démarrent
+                            //   directement, pas besoin de 3 ou 4 secondes de débattement ») — le
+                            //   débattement sert à laisser s'évincer les FAUX MATCHS des sources
+                            //   trouvées par TITRE. Un VF trouvé par l'identifiant exact du titre
+                            //   (serveur natif du provider) ne peut pas être un faux match : dès
+                            //   qu'il est là, on lance sans attendre. Mesuré sur la télé : SwiftFlow
+                            //   (VF, Movix par tmdb) présent à 4,8 s, lancé à 7,4 s.
+                            // 2026-10-22 (user : « on ne devrait pas attendre qu'il y ait autant de
+                            //   serveurs pour démarrer, surtout sur un VOSTFR ») — sur un épisode
+                            //   VOSTFR (AnimeSama …/vostfr/2), aucun VF ne viendra : la « grâce FR »
+                            //   faisait patienter jusqu'à 12 s. Un serveur natif dans la langue de
+                            //   l'épisode compte comme un VF exact → départ immédiat.
+                            val langueEpisode = lastId?.let { com.streamflixreborn.streamflix.utils.MultiLangDetector.langOf(it) }
+                            fun langueVoulue(x: Video.Server): Boolean =
+                                isVf(x) || (langueEpisode == "vostfr" && serverLang(x) == "vostfr")
+                            var vfExact = allKnownServers.firstOrNull { langueVoulue(it) && estIdentifiantExact(it) }
+                            while (vfExact == null && attendu < STABILIZE_MS) {
                                 kotlinx.coroutines.delay(TRANCHE_MS)
                                 attendu += TRANCHE_MS
+                                vfExact = allKnownServers.firstOrNull { langueVoulue(it) && estIdentifiantExact(it) }
+                                if (vfExact != null) {
+                                    Log.i("ServDiag", "PROG VF à identifiant exact (${vfExact.name}) → lancement sans débattement à ${attendu}ms")
+                                    break
+                                }
                                 val tailleMaintenant = allKnownServers.size
                                 val listeStable = tailleMaintenant == tailleAvant
                                 tailleAvant = tailleMaintenant
@@ -1460,8 +1788,28 @@ class PlayerViewModel(
                                     break
                                 }
                             }
+                            // 2026-10-22 (user : « un démarrage sur serveur français ou le cœur qui a
+                            //   été mis, je dois démarrer direct là-dessus ») — mesuré sur la télé :
+                            //   SwiftFlow lancé à 2,5 s, puis le cœur Vidara arrivé à 5 s → bascule,
+                            //   DEUX préparations. Si l'utilisateur a des cœurs sur ce provider et
+                            //   qu'aucun n'est encore arrivé, on lui laisse jusqu'à 3 s de plus : s'il
+                            //   arrive, le RACCOURCI CŒUR le lance lui-même (autoPlayEmitted passe à
+                            //   true) ; sinon on part sur le VF prévu.
+                            if (!autoPlayEmitted && favorisDuProvider().isNotEmpty()) {
+                                val ATTENTE_COEUR_MS = 3_000L
+                                var attenteCoeur = 0L
+                                while (!autoPlayEmitted && attenteCoeur < ATTENTE_COEUR_MS) {
+                                    kotlinx.coroutines.delay(200L)
+                                    attenteCoeur += 200L
+                                }
+                                Log.i(
+                                    "ServDiag",
+                                    if (autoPlayEmitted) "PROG cœur arrivé pendant l'attente (${attenteCoeur}ms) → c'est lui qui démarre"
+                                    else "PROG aucun cœur après ${attenteCoeur}ms → démarrage sur le VF prévu",
+                                )
+                            }
                             // Puis appliquer la grâce FR si pas de VF
-                            val hasVfNow = allKnownServers.any { isVf(it) }
+                            val hasVfNow = vfExact != null || allKnownServers.any { isVf(it) }
                             if (!hasVfNow && FR_GRACE_MS > STABILIZE_MS) {
                                 // Pas de VF → attendre le reste de la grâce FR, mais par tranches de 400 ms :
                                 //   on s'arrête dès qu'un VF arrive (avant : 8 s d'un bloc, même si le VF
@@ -1475,9 +1823,17 @@ class PlayerViewModel(
                             }
                             if (!autoPlayEmitted) {
                                 autoPlayEmitted = true
-                                val reason = if (allKnownServers.any { isVf(it) }) "VF trouvé" else "timeout ${FR_GRACE_MS}ms"
+                                val reason = if (vfExact != null) "VF à identifiant exact" else if (allKnownServers.any { isVf(it) }) "VF trouvé" else "timeout ${FR_GRACE_MS}ms"
                                 Log.i("ServDiag", "PROG auto-play débloqué après stabilisation ($reason) → ${allKnownServers.size} serveurs")
-                                _state.emit(State.SuccessLoadingServers(collapseIdenticalServers(allKnownServers), autoPlay = true))
+                                // Lancement anticipé : le VF exact passe en tête, sinon l'auto-play
+                                //   pourrait partir sur un serveur de secours arrivé avant lui (trouvé
+                                //   par titre, donc pas encore « débattu »). Un cœur garde la priorité :
+                                //   il a son propre raccourci, déclenché avant ce timer.
+                                val pourLancer = vfExact?.let { e ->
+                                    val actuel = allKnownServers.firstOrNull { it.id == e.id } ?: e
+                                    listOf(actuel) + allKnownServers.filter { it.id != e.id }
+                                } ?: allKnownServers
+                                _state.emit(State.SuccessLoadingServers(collapseIdenticalServers(pourLancer), autoPlay = true))
                             }
                         }
                     }
@@ -1676,6 +2032,14 @@ class PlayerViewModel(
      */
     @Volatile private var raccourciCoeurEnAttente = false
 
+    /**
+     * 2026-10-22 — un cœur a déjà été lancé pour ce titre. Constaté sur la télé : le cœur Vidara
+     * lancé à 6 s, puis un 2ᵉ cœur (Purstream) arrivé 1 s plus tard → nouvelle bascule, nouvelle
+     * préparation. La règle d'origine était « n'importe lequel des cœurs, le premier arrivé » :
+     * une fois un cœur lancé, les suivants ne le remplacent plus.
+     */
+    @Volatile private var coeurDejaLance = false
+
     /** True UNE seule fois, si un cœur attend d'être joué. Remet le jeton à zéro. */
     fun consommerRaccourciCoeur(): Boolean {
         if (!raccourciCoeurEnAttente) return false
@@ -1687,6 +2051,7 @@ class PlayerViewModel(
     private fun reinitialiserLecture() {
         lectureDemarree = false
         raccourciCoeurEnAttente = false
+        coeurDejaLance = false
     }
 
     private fun favorisDuProvider(): Set<String> {
@@ -1695,6 +2060,16 @@ class PlayerViewModel(
             com.streamflixreborn.streamflix.utils.ExtractorToggleStore.getFavorites(providerName)
         else emptySet()
     }
+
+    /**
+     * 2026-10-22 — Serveur trouvé par l'IDENTIFIANT EXACT du titre ouvert (et non par une
+     * recherche de titre) : c'est un serveur natif du provider. Exclus : les secours du registre
+     * (`bkreg::`, recherche par titre) et deux endpoints Movix qui cherchent eux aussi par
+     * titre côté serveur — `fstream-` (copie FrenchStream, faux matchs connus) et `wiflix-`
+     * (copie CineStream).
+     */
+    private fun estIdentifiantExact(s: Video.Server): Boolean =
+        !s.id.startsWith("bkreg::") && !s.id.startsWith("fstream-") && !s.id.startsWith("wiflix-")
 
     private fun orderByFrenchBuckets(list: List<Video.Server>): List<Video.Server> {
         val _t = System.currentTimeMillis()
@@ -1855,7 +2230,8 @@ class PlayerViewModel(
         val clés = HashMap<String, IntArray>(filtered.size * 2)
         filtered.forEach { s ->
             val b = bucketsPreCalcules[s.id] ?: bucket(s)   // déjà calculé au-dessus
-            clés[s.id] = intArrayOf(b, rangSource(s), rangQualite(s), -s.debitKbps)
+            // 2026-10-22 (user) : plus de tri par définition / débit — langue puis origine seulement.
+            clés[s.id] = intArrayOf(b, rangSource(s), 0, 0)
         }
         fun clé(s: Video.Server): IntArray = clés[s.id] ?: intArrayOf(9, 9, 9, 0)
         val sorted = filtered.sortedWith { a, b ->
@@ -2084,6 +2460,7 @@ class PlayerViewModel(
         //   (preExtractTopServersInBackground L236).
         val job = viewModelScope.launch(Dispatchers.IO) {
         Log.d("PlayerViewModel", "Inizio estrazione video dal server: ${server.name}")
+        com.streamflixreborn.streamflix.utils.BackupRegistry.signalerDemarrage()
         _state.emit(State.LoadingVideo(server))
         try {
             // 2026-05-16 : timeout global 60s sur l'extraction. Sans ça,
@@ -2093,7 +2470,7 @@ class PlayerViewModel(
             // signale "ça tourne dans le vide et ne bascule pas auto". Avec
             // timeout, l'extraction throw → FailedLoadingVideo → fallback.
             val provider = UserPreferences.currentProvider ?: return@launch
-            val video = kotlinx.coroutines.withTimeoutOrNull(60_000L) {
+            var video = kotlinx.coroutines.withTimeoutOrNull(60_000L) {
                 // 2026-07-04 (registre central) : un serveur backup (id `bkreg::…`) se lit via
                 //   le registre, qui ré-aiguille vers le getVideo de la source d'origine.
                 if (server.id.startsWith(com.streamflixreborn.streamflix.utils.BackupRegistry.PREFIX))
@@ -2118,6 +2495,9 @@ class PlayerViewModel(
             }
 
             reglerSousTitresSelonLangue(server, video)
+            video = avecOpenSubtitlesFrancais(server, video)
+            video = avecTraductionSiBesoin(server, video)
+            video = avecFormatSousTitresDevine(video)
 
             Log.d("PlayerViewModel", "Estrazione video completata con successo")
             // 2026-07-04 (user "le serveur en lecture n'a même pas la qualité marquée") :
@@ -2243,7 +2623,8 @@ class PlayerViewModel(
                 val subtitles = perLang.values.flatten()
 
                 Log.d("PlayerViewModel", "OpenSubtitles: " + perLang.entries.joinToString { "${it.key}=${it.value.size}" })
-                _subtitleState.emit(SubtitleState.SuccessOpenSubtitles(subtitles))
+                listeOpenSubtitles = subtitles
+        _subtitleState.emit(SubtitleState.SuccessOpenSubtitles(subtitles))
             } catch (e: Exception) {
                 Log.e("PlayerViewModel", "Errore OpenSubtitles: ", e)
                 _subtitleState.emit(SubtitleState.FailedOpenSubtitles(e))
@@ -2287,7 +2668,43 @@ class PlayerViewModel(
         }
     }
 
-    fun downloadSubtitle(subtitle: OpenSubtitles.Subtitle) = viewModelScope.launch(Dispatchers.IO) {
+    // 2026-10-22 (user : « quand un sous-titre téléchargé ne fonctionne pas, basculer
+    //   automatiquement sur le suivant, sans message ») : refusé au téléchargement (piste de
+    //   commentaires, fichier illisible…) OU impossible à caler → le suivant de la liste, en
+    //   silence, 4 essais au plus.
+    @Volatile private var listeOpenSubtitles: List<OpenSubtitles.Subtitle> = emptyList()
+    private val dejaEssayes = java.util.Collections.synchronizedSet(HashSet<String>())
+    @Volatile private var essaisAuto = 0
+    @Volatile private var dernierTelecharge: OpenSubtitles.Subtitle? = null
+
+    private fun suivantOpenSubtitles(apres: OpenSubtitles.Subtitle): OpenSubtitles.Subtitle? {
+        val liste = listeOpenSubtitles
+        val i = liste.indexOfFirst { it.subDownloadLink == apres.subDownloadLink }
+        return liste.drop(i + 1).firstOrNull {
+            it.subDownloadLink !in dejaEssayes &&
+                it.subDownloadLink !in com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre.rejetes
+        }
+    }
+
+    /** Appelé quand le sous-titre téléchargé n'a pas pu être calé. */
+    fun sousTitreSuivant() {
+        val actuel = dernierTelecharge ?: return
+        if (essaisAuto >= 4) { Log.d("PlayerViewModel", "sous-titre suivant : 4 essais atteints"); return }
+        val suivant = suivantOpenSubtitles(actuel) ?: return
+        essaisAuto++
+        Log.i("PlayerViewModel", "sous-titre inutilisable (${actuel.subFileName}) → suivant : ${suivant.subFileName}")
+        telechargerSousTitre(suivant)
+    }
+
+    fun downloadSubtitle(subtitle: OpenSubtitles.Subtitle) {
+        essaisAuto = 0
+        dejaEssayes.clear()
+        telechargerSousTitre(subtitle)
+    }
+
+    private fun telechargerSousTitre(subtitle: OpenSubtitles.Subtitle): kotlinx.coroutines.Job = viewModelScope.launch(Dispatchers.IO) {
+        dejaEssayes.add(subtitle.subDownloadLink)
+        dernierTelecharge = subtitle
         Log.d("PlayerViewModel", "Inizio download sottotitolo OpenSubtitles: ${subtitle.subFileName}")
         _subtitleState.emit(SubtitleState.DownloadingOpenSubtitle)
         try {
@@ -2296,7 +2713,12 @@ class PlayerViewModel(
             _subtitleState.emit(SubtitleState.SuccessDownloadingOpenSubtitle(subtitle, uri))
         } catch (e: Exception) {
             Log.e("PlayerViewModel", "Errore download OpenSubtitles: ", e)
-            _subtitleState.emit(SubtitleState.FailedDownloadingOpenSubtitle(e, subtitle))
+            val suivant = if (essaisAuto < 4) suivantOpenSubtitles(subtitle) else null
+            if (suivant != null) {
+                essaisAuto++
+                Log.i("PlayerViewModel", "sous-titre refusé (${subtitle.subFileName}) → suivant : ${suivant.subFileName}")
+                telechargerSousTitre(suivant)
+            } else _subtitleState.emit(SubtitleState.FailedDownloadingOpenSubtitle(e, subtitle))
         }
     }
 

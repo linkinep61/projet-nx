@@ -288,7 +288,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     // 2026-05-11 : 4s → 2.5s. La plupart des endpoints répondent en 200-500ms ;
     // 4s c'était over-conservative et bottleneck-ait getServers via awaitAll
     // (qui attend le plus lent). 2.5s = bonne tolérance réseau sans plomber.
-    private const val ENDPOINT_TIMEOUT_MS = 2_500L
+    // 2026-10-22 (user : « tous les serveurs Movix sont rouges », « au moins 12 catégories et
+    //   une vingtaine de serveurs ») — 2,5 s ne suffisait plus : sur la télé, `links` répondait
+    //   en 1 s mais l'identification de ses 4 lecteurs (bysebuho, SeekStreaming, EmbedSeek,
+    //   Vidara) en prenait 3,5 → coupé SANS un mot, les « Lecteurs Movix » du site n'arrivaient
+    //   jamais. L'émission est progressive (chaque endpoint s'affiche dès qu'il répond) : un
+    //   délai plus long ne retarde pas les autres serveurs.
+    private const val ENDPOINT_TIMEOUT_MS = 8_000L
     private const val ENDPOINT_FAILURE_THRESHOLD = 10 // plus tolérant
     private const val ENDPOINT_DISABLED_MS = 2L * 60L * 1000L // 2 min seulement
     private data class EndpointHealth(
@@ -308,6 +314,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         // On garde juste le timeout par requête (ENDPOINT_TIMEOUT_MS).
         val result = try {
             withTimeoutOrNull(ENDPOINT_TIMEOUT_MS) { block() }
+                .also { if (it == null) Log.w("MovixProvider", "Endpoint '$endpointName' abandonné : délai de ${ENDPOINT_TIMEOUT_MS / 1000} s dépassé") }
         } catch (e: Exception) {
             Log.w("MovixProvider", "Endpoint '$endpointName' threw: ${e.message}")
             null
@@ -1962,7 +1969,32 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         }
     }
 
+    // 2026-10-22 (user : « continue à voir si tu peux faire des trucs sans faire de casse ») —
+    //   mesuré sur la télé : les appels Movix du lancement mettaient 1,6 à 3,3 s, dont l'adresse
+    //   (DNS) et l'ouverture de la connexion sécurisée, refaites à chaque fois. On les fait dès
+    //   l'ouverture de la FICHE, en arrière-plan, avec un petit appel (la liste `links` du titre) :
+    //   au clic sur Lecture, la connexion HTTP/2 est déjà ouverte et les ~10 appels passent
+    //   dessus. Sans effet sur l'affichage de la fiche ; une erreur est simplement ignorée.
+    //   Au plus une fois par minute.
+    private val porteePrechauffe = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+    @Volatile private var dernierePrechauffeMs = 0L
+
+    private fun prechaufferConnexion(appel: suspend () -> Unit) {
+        val maintenant = System.currentTimeMillis()
+        if (maintenant - dernierePrechauffeMs < 60_000L) return
+        dernierePrechauffeMs = maintenant
+        porteePrechauffe.launch {
+            runCatching {
+                initializeService()
+                val t0 = System.currentTimeMillis()
+                appel()
+                Log.d("MovixProvider", "connexion préchauffée en ${System.currentTimeMillis() - t0} ms")
+            }
+        }
+    }
+
     override suspend fun getMovie(id: String): Movie {
+        if (id.all { it.isDigit() }) prechaufferConnexion { movixServiceInstance.getLinksMovie(id) }
         val tmdb = tmdbService.getMovieDetails(
             id = id.toInt(),
             apiKey = TMDB_API_KEY,
@@ -2018,6 +2050,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     }
 
     override suspend fun getTvShow(id: String): TvShow {
+        if (id.all { it.isDigit() }) prechaufferConnexion { movixServiceInstance.getLinksTv(id, 1, 1) }
         val tmdb = tmdbService.getTvDetails(
             id = id.toInt(),
             apiKey = TMDB_API_KEY,
@@ -5034,7 +5067,16 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
     // ==================== SERVICE BUILDERS ====================
 
     private fun buildMovixService(): MovixService {
+        // 2026-10-22 (user : « on voit si on peut continuer à optimiser ») — mesuré sur la télé :
+        //   les ~10 appels Movix d'un film partent en même temps vers api.movix.dog, mais OkHttp
+        //   n'en laisse passer que 5 par hôte (réglage par défaut) : swiftflow, j1f, imdb et
+        //   fstream attendaient 2,2 s dans la file avant même de partir. On ouvre à 16.
+        val repartiteur = okhttp3.Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 16
+        }
         val client = OkHttpClient.Builder()
+            .dispatcher(repartiteur)
             .readTimeout(30, TimeUnit.SECONDS)
             .connectTimeout(30, TimeUnit.SECONDS)
             .callTimeout(45, TimeUnit.SECONDS)

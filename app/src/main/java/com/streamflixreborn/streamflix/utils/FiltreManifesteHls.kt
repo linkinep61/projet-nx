@@ -112,10 +112,14 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
      *   Sans elle le CDN refuse (403) tout segment au-delà du 9ᵉ → lecture en boucle.
      */
     private fun avecCleVidzy(dataSpec: DataSpec): DataSpec {
-        val cle = CleVidzy.cle ?: return dataSpec
         val uri = dataSpec.uri
         val hote = uri.host ?: return dataSpec
-        if (!hote.contains("vidzy", ignoreCase = true)) return dataSpec
+        // 2026-10-22 : même mécanisme chez FSVid (« FS · Premium »), avec sa propre clé.
+        val cle = when {
+            hote.contains("vidzy", ignoreCase = true) -> CleVidzy.cle
+            hote.contains("fsvid", ignoreCase = true) -> CleVidzy.cleFsvid
+            else -> null
+        } ?: return dataSpec
         if (uri.path?.endsWith(".ts", ignoreCase = true) != true) return dataSpec
         if (runCatching { uri.getQueryParameter("gk") }.getOrNull() != null) return dataSpec
         return dataSpec.withUri(uri.buildUpon().appendQueryParameter("gk", cle).build())

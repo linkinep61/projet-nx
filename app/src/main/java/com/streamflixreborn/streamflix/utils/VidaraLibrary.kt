@@ -63,10 +63,21 @@ object VidaraLibrary {
     fun sansPrefixe(titre: String): String = titre.replace(RE_ID_TETE, "").replace(RE_TV_TETE, "")
 
     /** « ONYX · Vidara » apres re-etiquetage par BackupRegistry.wrap(). */
-    fun serveurDe(code: String): Video.Server =
+    /**
+     * 2026-10-22 (user : « le serveur Vidara qui apparaît est marqué comme s'il était français ») :
+     * la langue écrite dans le NOM du fichier hébergé passe dans le nom du serveur (« Vidara
+     * [VOSTFR] ») — la liste l'affiche et le lecteur active les sous-titres français d'office.
+     * Rien d'écrit → rien d'ajouté (le serveur reste considéré VF, comme avant).
+     */
+    fun etiquetteLangue(nom: String?): String {
+        val n = nom?.lowercase() ?: return ""
+        return if (Regex("""vostfr|subfrench|sub[ ._-]?fr\b|\bvost\b""").containsMatchIn(n)) " [VOSTFR]" else ""
+    }
+
+    fun serveurDe(code: String, nomFichier: String? = null): Video.Server =
         Video.Server(
             id = "livehub::vidara::$code",
-            name = "Vidara",
+            name = "Vidara" + etiquetteLangue(nomFichier),
             src = "$EMBED/e/$code",
         )
 
@@ -138,7 +149,86 @@ object VidaraLibrary {
             o.optString(it).takeIf { s -> s.isNotBlank() }
         } ?: ""
 
+    // ─────────────────────────────────────── copie sur l'appareil (2026-10-22)
+    // User : « on voit si on peut continuer à optimiser ». Mesuré sur la télé : la liste
+    //   complète (13 pages de 100, à la suite) prenait 11,5 s à CHAQUE démarrage de l'appli,
+    //   en plein lancement de la vidéo (réseau et processeur partagés), car le cache n'était
+    //   qu'en mémoire. Désormais :
+    //     • la dernière liste est enregistrée sur l'appareil et resservie immédiatement ;
+    //     • passé 10 min, elle est rafraîchie EN ARRIÈRE-PLAN, 30 s plus tard (le temps que la
+    //       lecture démarre), une seule fois à la fois ;
+    //     • seule la toute première fois (aucune copie) attend le réseau, comme avant.
+    private const val FICHIER_DISQUE = "vidara_bibliotheque.json"
+    private const val DELAI_RAFRAICHISSEMENT_MS = 30_000L
+    private val rafraichissementEnCours = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var disqueLu = false
+
+    private fun fichierDisque(): java.io.File? = runCatching {
+        java.io.File(com.streamflixreborn.streamflix.StreamFlixApp.instance.filesDir, FICHIER_DISQUE)
+    }.getOrNull()
+
+    private fun lireDisque() {
+        if (disqueLu) return
+        disqueLu = true
+        val f = fichierDisque() ?: return
+        if (!f.exists()) return
+        runCatching {
+            val o = JSONObject(f.readText())
+            val arr = o.getJSONArray("fichiers")
+            val liste = ArrayList<Fichier>(arr.length())
+            for (i in 0 until arr.length()) {
+                val x = arr.getJSONObject(i)
+                liste += Fichier(
+                    code = x.getString("c"), nomBrut = x.getString("n"),
+                    dureeSec = x.optInt("d", 0), estClip = x.optBoolean("k", false),
+                )
+            }
+            if (liste.isNotEmpty() && cacheRapide.isEmpty()) {
+                cacheRapide = liste
+                cacheRapideTs = o.optLong("ts", 0L)
+                Log.d(TAG, "Vidara : ${liste.size} video(s) relues sur l'appareil")
+            }
+        }.onFailure { Log.w(TAG, "copie sur l'appareil illisible : ${it.message}") }
+    }
+
+    private fun ecrireDisque(liste: List<Fichier>, ts: Long) {
+        val f = fichierDisque() ?: return
+        runCatching {
+            val arr = org.json.JSONArray()
+            for (x in liste) arr.put(
+                JSONObject().put("c", x.code).put("n", x.nomBrut).put("d", x.dureeSec).put("k", x.estClip)
+            )
+            val tmp = java.io.File(f.parentFile, "$FICHIER_DISQUE.tmp")
+            tmp.writeText(JSONObject().put("ts", ts).put("fichiers", arr).toString())
+            if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+        }.onFailure { Log.w(TAG, "copie sur l'appareil non enregistrée : ${it.message}") }
+    }
+
+    private fun rafraichirEnFond() {
+        if (!rafraichissementEnCours.compareAndSet(false, true)) return
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob()).launch {
+            try {
+                kotlinx.coroutines.delay(DELAI_RAFRAICHISSEMENT_MS)
+                chargerApi()
+            } catch (t: Throwable) {
+                Log.w(TAG, "rafraîchissement en arrière-plan : ${t.message}")
+            } finally {
+                rafraichissementEnCours.set(false)
+            }
+        }
+    }
+
     private suspend fun toutRapide(): List<Fichier> = withContext(Dispatchers.IO) {
+        lireDisque()
+        val actuel = cacheRapide
+        if (actuel.isNotEmpty()) {
+            if (System.currentTimeMillis() - cacheRapideTs >= TTL_MS) rafraichirEnFond()
+            return@withContext actuel
+        }
+        chargerApi()
+    }
+
+    private suspend fun chargerApi(): List<Fichier> = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         if (cacheRapide.isNotEmpty() && now - cacheRapideTs < TTL_MS) return@withContext cacheRapide
         verrou.lock()
@@ -150,7 +240,13 @@ object VidaraLibrary {
             //    (le gros « Musique rock anime » compris). Vidara ne rend pas le
             //    chemin par video, on releve donc les codes dossier par dossier.
             val clips = HashSet<String>()
+            // 2026-10-22 — liste INCOMPLÈTE (Vidara répond 429 « trop de requêtes » et la boucle
+            //   s'arrêtait en silence) : constaté sur la télé, 500 vidéos au lieu de ~1 300 et
+            //   0 clip. Une liste incomplète ne remplace jamais une liste plus fournie et n'est
+            //   jamais enregistrée sur l'appareil.
+            var incomplet = false
             val fdl = get("/folder/list")?.optJSONObject("result")?.optJSONArray("folders")
+            if (fdl == null) incomplet = true
             val clipFolders = mutableListOf<String>()
             for (i in 0 until (fdl?.length() ?: 0)) {
                 val o = fdl?.optJSONObject(i) ?: continue
@@ -181,7 +277,8 @@ object VidaraLibrary {
             var page = 1
             while (page <= 200) {
                 val res = get("/video/list", mapOf("page" to "$page", "per_page" to "100"))
-                    ?.optJSONObject("result") ?: break
+                    ?.optJSONObject("result")
+                if (res == null) { incomplet = true; break }
                 val arr = res.optJSONArray("videos") ?: break
                 if (arr.length() == 0) break
                 for (i in 0 until arr.length()) {
@@ -204,8 +301,15 @@ object VidaraLibrary {
             }
             // Un echec (liste vide) ne doit JAMAIS ecraser un cache garni.
             if (out.isEmpty()) return@withContext cacheRapide
+            if (incomplet && cacheRapide.size >= out.size) {
+                Log.w(TAG, "Vidara : liste incomplète (${out.size}) — on garde la précédente (${cacheRapide.size})")
+                return@withContext cacheRapide
+            }
             cacheRapide = out
-            cacheRapideTs = now
+            // Incomplète : servie pour cette fois, mais redemandée au prochain usage.
+            cacheRapideTs = if (incomplet) 0L else now
+            if (!incomplet) ecrireDisque(out, now)
+            else Log.w(TAG, "Vidara : liste incomplète (${out.size}), non enregistrée")
             Log.d(TAG, "Vidara : ${out.size} video(s), dont ${clips.size} clip(s)")
             out
         } finally {
@@ -294,7 +398,7 @@ object VidaraLibrary {
         }
         if (fichiers.isEmpty()) return emptyList()
         return rattacher(fichiers, tmdbId, titresConnus, annee, estUnFilm, titrePrincipal,
-                         dureeMinSec, dureeMaxSec, saison, episode) { serveurDe(it.code) }
+                         dureeMinSec, dureeMaxSec, saison, episode) { serveurDe(it.code, it.nomBrut) }
     }
 
     /**

@@ -278,12 +278,12 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                     val src = btn.attr("data-src").takeIf { it.startsWith("http") } ?: return@forEach
                     if (!seen.add(src)) return@forEach
                     val name = btn.text().replace("▶", "").trim().ifBlank { dcHostShort(src) }
-                    list.add(Video.Server(id = "dc_$src", name = "$name (DC)", src = src))
+                    list.add(Video.Server(id = "dc_$src", name = "$name (DC) [VO]", src = src))
                 }
                 doc.select("iframe#video-frame, iframe[src]").forEach { iframe ->
                     val src = iframe.attr("src").takeIf { it.startsWith("http") } ?: return@forEach
                     if (!seen.add(src)) return@forEach
-                    list.add(Video.Server(id = "dc_$src", name = "${dcHostShort(src)} (DC)", src = src))
+                    list.add(Video.Server(id = "dc_$src", name = "${dcHostShort(src)} (DC) [VO]", src = src))
                 }
                 list
             } catch (e: Exception) {
@@ -628,7 +628,12 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
             // même série existe sur les deux sites.
             coroutineScope {
                 val voirDramaDeferred = async {
-                    try { parseSearchResults(service.search(query, page)) }
+                    try {
+                        val doc = service.search(query, page)
+                        parseSearchResults(doc).also {
+                            if (it.isEmpty()) Log.w("VoirDramaProvider", "VD search vide : titre='${doc.title()}' blocs=${doc.select(".c-tabs-item__content").size} taille=${doc.outerHtml().length}")
+                        }
+                    }
                     catch (e: Exception) {
                         Log.w("VoirDramaProvider", "VoirDrama search failed: ${e.message}")
                         emptyList()

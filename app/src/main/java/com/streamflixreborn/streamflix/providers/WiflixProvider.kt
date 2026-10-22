@@ -420,21 +420,9 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 }.getOrNull()
                 if (doc != null && !isCloudflareChallenge(doc)) return@withContext doc
             }
-            // 2026-10-21 (2) : le POST OkHttp reste refusé (403, 13 o) alors que le même POST passe
-            //   dans Chrome → le site reconnaît un client non-navigateur. Repli : on charge
-            //   l'accueil dans la WebView (cookies h_check/PHPSESSID posés par la page) et on poste
-            //   le formulaire DEPUIS la page. « searchtable » n'existe que sur la page de résultats.
+            // 2026-10-22 : repli WebView retiré — le site bloque aussi la WebView (Android) ; seule
+            //   l'identité Chrome bureau passe (essai 1). Échec → null → secours TMDB chez l'appelant.
             null
-        } ?: run {
-            val enc = { v: String -> java.net.URLEncoder.encode(v, "UTF-8") }
-            val corps = "do=search&subaction=search&search_start=$debut&full_search=${if (titreSeul) 1 else 0}" +
-                "&result_from=$depuis&story=${enc(story)}" + (if (titreSeul) "&titleonly=3" else "")
-            val html = runCatching {
-                getResolver().get(baseUrl, silent = true, contentMarker = "searchtable",
-                    rscFetchUrl = baseUrl + "index.php?do=search", fetchPostBody = corps, markerTimeoutMs = 12_000L)
-            }.getOrNull().orEmpty()
-            Log.i(TAG, "recherche WebView « $story » → ${html.length} o, résultats=${html.contains("searchtable")}")
-            if (html.contains("searchtable")) Jsoup.parse(html).apply { setBaseUri(baseUrl) } else null
         }
 
     /** 2026-06-29 (REPAIR — recopié du décompilé v1.7.226) : true si le cookie
@@ -1040,6 +1028,27 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             return genres
         }
 
+        // 2026-10-22 (user : « si la recherche Wiflix est réparée, autant passer par une vraie
+        //   recherche ») : le moteur TMDB affichait des titres que le site N'A PAS (ex. « Le jardin
+        //   des météores ») → fiche à 0 serveur. La recherche du site repasse (posterRecherche,
+        //   identité Chrome bureau) : on l'utilise en PREMIER, en titre seul. TMDB ne sert plus
+        //   qu'en secours si le site ne répond pas (posterRecherche → null).
+        // 2026-10-22 : titre sans aucune lettre latine (« 流星花园 ») → le site répond « Access
+        //   denied », et un site français n'a de toute façon pas ces titres. Rien à chercher.
+        if (!query.any { it in 'a'..'z' || it in 'A'..'Z' || it in 'À'..'ÿ' }) return emptyList()
+        run {
+            val depuis = 1 + 20 * (page - 1)
+            val docNatif = posterRecherche(query, titreSeul = true, debut = page, depuis = depuis)
+            if (docNatif != null) {
+                val total = Regex("""Trouv[ée]\s+(\d+)""").find(docNatif.text())?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                hasMore = page * 20 < total
+                val natifs = searchNative(query, page, docNatif)
+                Log.i(TAG, "recherche site « $query » p$page → ${natifs.size} (total annoncé $total)")
+                return natifs
+            }
+            Log.w(TAG, "recherche site « $query » indisponible → secours TMDB")
+        }
+
         // 2026-07-04 : MOTEUR TMDB — la recherche native flemmix est bloquée
         //   par CloudFlare (POST search → bot shield → résultats aléatoires).
         //   On utilise TMDb3.Search.multi comme moteur PRINCIPAL :
@@ -1101,9 +1110,9 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
      * 2026-07-04 : ancien moteur de recherche natif flemmix, gardé en FALLBACK
      * si TMDB est injoignable. Bloqué par CF la plupart du temps.
      */
-    private suspend fun searchNative(query: String, page: Int): List<AppAdapter.Item> {
+    private suspend fun searchNative(query: String, page: Int, docDeja: Document? = null): List<AppAdapter.Item> {
         val searchUrl = "${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}"
-        val document = try {
+        val document = docDeja ?: try {
             val doc = posterRecherche(query, titreSeul = false, debut = page, depuis = 1 + 20 * (page - 1)) ?: service.search(
                 story = query,
                 searchStart = page,

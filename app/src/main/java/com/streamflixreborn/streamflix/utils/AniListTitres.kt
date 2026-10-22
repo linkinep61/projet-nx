@@ -61,16 +61,17 @@ object AniListTitres {
         .build()
 
     private const val REQUETE =
-        "query(\$s:String){ Media(search:\$s, type:ANIME){ id title{ romaji english native } synonyms } }"
+        "query(\$s:String){ Media(search:\$s, type:ANIME){ id title{ romaji english native } synonyms startDate{ year } } }"
 
     /**
      * @return les titres connus de l'anime (romaji, anglais, natif, synonymes), ou une liste vide
      *   si AniList ne connaît pas l'œuvre ou ne répond pas. N'échoue jamais bruyamment : c'est un
      *   complément, pas une dépendance.
      */
-    suspend fun titresPour(titre: String): List<String> = withContext(Dispatchers.IO) {
+    suspend fun titresPour(titre: String, annee: Int? = null): List<String> = withContext(Dispatchers.IO) {
         if (titre.isBlank()) return@withContext emptyList()
-        cache[titre]?.let { return@withContext it }
+        val cle = if (annee != null) "$titre|$annee" else titre
+        cache[cle]?.let { return@withContext it }
 
         val resultat = runCatching {
             val corps = JSONObject()
@@ -92,6 +93,16 @@ object AniListTitres {
                     .optJSONObject("data")?.optJSONObject("Media")
                     ?: return@use emptyList<String>()
 
+                // 2026-10-22 (user : « on a des mauvais matchs, iAnime et VoirAnime ») : le drama
+                //   coréen « The Flowers of Evil (2026) » était pris pour l'anime « Aku no Hana »
+                //   (2013) — même titre anglais. AniList renvoie toujours SON meilleur résultat ;
+                //   quand on connaît l'année de l'œuvre, on refuse un anime sorti à une autre époque.
+                val anneeAnime = media.optJSONObject("startDate")?.optInt("year", 0)?.takeIf { it > 0 }
+                if (annee != null && anneeAnime != null && kotlin.math.abs(anneeAnime - annee) > 1) {
+                    Log.i(TAG, "'$titre' ($annee) ≠ anime AniList de $anneeAnime → ignoré")
+                    return@use emptyList<String>()
+                }
+
                 val titres = linkedSetOf<String>()
                 media.optJSONObject("title")?.let { t ->
                     listOf("romaji", "english", "native").forEach { cle ->
@@ -110,7 +121,7 @@ object AniListTitres {
             emptyList()
         }
 
-        cache[titre] = resultat
+        cache[cle] = resultat
         if (resultat.isNotEmpty()) Log.i(TAG, "'$titre' → ${resultat.size} titres : ${resultat.take(3)}")
         resultat
     }

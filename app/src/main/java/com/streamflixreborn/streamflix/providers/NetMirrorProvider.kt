@@ -2122,7 +2122,10 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                 sousTitres.add(Video.Subtitle(label = nomLangueSousTitre(lg, t.optString("label")), file = f, default = estFr && vostfrDemande))
             }
         }
-        if (vostfrDemande && !aDuFrancais) throw IllegalStateException("NetMirror: aucun sous-titre français pour ce contenu")
+        // 2026-10-22 (user : « réactiver tous les serveurs qui donnent de l'anglais ») : sans
+        //   français mais AVEC de l'anglais, on garde — la piste anglaise est traduite à la volée.
+        if (vostfrDemande && !aDuFrancais && sousTitres.none { com.streamflixreborn.streamflix.extractors.Extractor.isEnglishSubtitle(it.label) })
+            throw IllegalStateException("NetMirror: aucun sous-titre français ni anglais pour ce contenu")
         sousTitres.sortWith(compareBy({ if (it.default || it.label.startsWith("Français")) 0 else 1 }, { it.label }))
         Log.d(TAG, "lecture MOBILE OK : ${master.take(90)} (sous-titres ${sousTitres.size})")
         Video(
@@ -2387,7 +2390,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                     )
                 }
             }
-            if (vostfrDemande && !aDuFrancais) {
+            if (vostfrDemande && !aDuFrancais && sousTitres.none { com.streamflixreborn.streamflix.extractors.Extractor.isEnglishSubtitle(it.label) }) {
                 // Pas de piste FR ici → on échoue au lieu de servir de la VO étiquetée VOSTFR.
                 throw IllegalStateException("NetMirror: aucun sous-titre français pour ce contenu")
             }

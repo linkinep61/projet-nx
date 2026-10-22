@@ -452,6 +452,19 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                                     settingsView.onSubtitleSelected.invoke(item)
                                     settingsView.hide()
                                 }
+
+                                Settings.Subtitle.TraductionAuto -> {
+                                    // Ligne d'information : rien à faire au clic.
+                                }
+
+                                Settings.Subtitle.Recaler -> {
+                                    com.streamflixreborn.streamflix.utils.SyncSousTitres.demandeRecalage?.invoke()
+                                    settingsView.hide()
+                                }
+                                Settings.Subtitle.Traduire -> {
+                                    com.streamflixreborn.streamflix.utils.TraductionSousTitres.demandeTraduction?.invoke()
+                                    settingsView.hide()
+                                }
                             }
                         }
 
@@ -909,6 +922,9 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                             if (running) "Désactiver les sous-titres serveur"
                             else "Activer les sous-titres serveur"
                         }
+                        Settings.Subtitle.TraductionAuto -> Settings.Subtitle.TraductionAuto.libelle
+                        Settings.Subtitle.Recaler -> Settings.Subtitle.Recaler.libelle
+                        Settings.Subtitle.Traduire -> Settings.Subtitle.Traduire.libelle
                     }
 
                     is Settings.Subtitle.Style -> when (item) {
@@ -1203,6 +1219,9 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         Settings.Subtitle.OpenSubtitles -> View.VISIBLE
                         Settings.Subtitle.SubDLSubtitles -> View.VISIBLE
                         Settings.Subtitle.ExternalServerSubtitles -> View.GONE
+                        Settings.Subtitle.TraductionAuto -> View.GONE
+                        Settings.Subtitle.Recaler -> View.GONE
+                        Settings.Subtitle.Traduire -> View.GONE
                     }
 
                     is Settings.Subtitle.Style -> when (item) {

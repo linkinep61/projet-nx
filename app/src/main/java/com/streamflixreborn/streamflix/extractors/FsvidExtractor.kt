@@ -83,6 +83,35 @@ class FsvidExtractor : Extractor() {
         sb.toString().trim().takeIf { it.startsWith("http") && !it.contains("/troll/") }
     } catch (_: Throwable) { null }
 
+    /**
+     * 2026-10-22 : clé de segments FSVid (cf. utils/CleVidzy.cleFsvid). Calculée par le JS de la
+     *   page (`window.__vzgk`), introuvable dans le HTML → on exécute la page dans une WebView,
+     *   comme pour Vidzy. Gardée 30 min (même clé pour toute la séance). Sans elle : 403 au
+     *   10ᵉ segment et la vidéo repart du début.
+     */
+    private suspend fun lireCleSegments(link: String, refFs: String) {
+        val age = System.currentTimeMillis() - com.streamflixreborn.streamflix.utils.CleVidzy.cleFsvidDepuis
+        if (com.streamflixreborn.streamflix.utils.CleVidzy.cleFsvid != null && age < 30 * 60_000L) return
+        val gk = try {
+            com.streamflixreborn.streamflix.utils.WebViewStreamResolver.resolve(
+                entryUrl = link,
+                referer = refFs,
+                timeoutMs = 15_000L,
+                clickPlay = true,
+                attach = true,
+                lireJsApresCapture = "(window.__vzgk||null)",
+            )?.valeurJs
+        } catch (e: Throwable) {
+            Log.w("FsvidExtractor", "clé de segments : WebView KO (${e.message})"); null
+        }
+        if (gk != null) {
+            com.streamflixreborn.streamflix.utils.CleVidzy.memoriserFsvid(gk)
+            Log.i("FsvidExtractor", "clé de segments FSVid (gk) récupérée (${gk.length} car.)")
+        } else {
+            Log.w("FsvidExtractor", "clé de segments FSVid absente → 403 probable après ~90 s")
+        }
+    }
+
     override suspend fun extract(link: String): Video {
         val uri = Uri.parse(link)
         val host = "${uri.scheme}://${uri.host}"
@@ -237,8 +266,10 @@ class FsvidExtractor : Extractor() {
             ?.let { dechiffrerNouveauFormat(it.groupValues[1], it.groupValues[2], link) }
         (nouveau ?: dechiffrerUrl())?.let { urlClaire ->
             Log.d("FsvidExtractor", "flux FSVid trouvé (${if (nouveau != null) "nouveau format" else "XOR 8 octets"})")
+            lireCleSegments(link, refFs)
             return Video(
                 source = urlClaire,
+                subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(html + "\n" + js, link),
                 headers = mapOf(
                     "User-Agent" to DEFAULT_USER_AGENT,
                     "Referer" to refFs,
@@ -307,8 +338,10 @@ class FsvidExtractor : Extractor() {
                 throw Exception("Stream URL not found in unpacked JS")
             }
 
+        lireCleSegments(link, refFs)
         return Video(
             source = m3u8,
+            subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(html + "\n" + js, link),
             headers = mapOf(
                 "User-Agent" to DEFAULT_USER_AGENT,
                 "Referer" to refFs,

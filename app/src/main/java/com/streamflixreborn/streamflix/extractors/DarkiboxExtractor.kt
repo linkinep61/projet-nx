@@ -95,6 +95,7 @@ class DarkiboxExtractor : Extractor() {
         return Video(
             source = sourceUrl,
             type = if (isM3u8) MimeTypes.APPLICATION_M3U8 else null,
+            subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(fullHtml, link),
             headers = mapOf(
                 "Referer" to baseUrl
             )

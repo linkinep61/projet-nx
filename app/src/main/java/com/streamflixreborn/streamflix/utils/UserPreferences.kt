@@ -214,6 +214,15 @@ object UserPreferences {
             return prefs.getBoolean(KEY_MODE_LEGER, false)
         }
 
+    // 2026-10-22 (user : « dans les paramètres du lecteur, désactiver l'option Qualité de base et
+    //   pouvoir l'activer si on en a besoin ») — sonde de qualité des serveurs (QualityProbe).
+    //   Elle EXTRAIT chaque serveur de la liste (73 sur Projet Dernière Chance, 4 en parallèle,
+    //   WebView comprises) pendant le démarrage et la lecture, juste pour afficher 720p/1080p :
+    //   réseau et processeur pris à la vidéo, surtout sur la télé. Défaut : désactivée.
+    private const val KEY_SONDE_QUALITE = "SONDE_QUALITE"
+    val sondeQualite: Boolean
+        get() = ::prefs.isInitialized && prefs.getBoolean(KEY_SONDE_QUALITE, false)
+
     private const val KEY_BACKUPS_ENABLED = "pref_backups_enabled"
     val backupsEnabled: Boolean
         get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_BACKUPS_ENABLED, true) else true

@@ -22,4 +22,20 @@ object CleVidzy {
     fun memoriser(valeur: String) {
         cle = valeur
     }
+
+    // 2026-10-22 (user : « Premium VF HD recommence depuis le début au bout de quelques minutes »,
+    //   série 100 % physique sur la TV) : FSVid (« FS · Premium ») tourne sur le MÊME moteur — 403
+    //   sur seg-10 (1 min 30), puis rechargement depuis 0. Sa page pose elle aussi `window.__vzgk`
+    //   (60 car.), mais une clé DIFFÉRENTE de celle de Vidzy (vérifié dans Chrome) → clé à part.
+    @Volatile
+    var cleFsvid: String? = null
+        private set
+    @Volatile
+    var cleFsvidDepuis: Long = 0L
+        private set
+
+    fun memoriserFsvid(valeur: String) {
+        cleFsvid = valeur
+        cleFsvidDepuis = System.currentTimeMillis()
+    }
 }

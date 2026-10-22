@@ -220,6 +220,19 @@ class StreamFlixApp : Application() {
                 }
             }
         }
+        // 2026-10-22 (user : « on voit si on peut continuer à optimiser ») — mesuré sur la télé :
+        //   la toute première identification d'un lecteur (Extractor.identifyServiceName) prenait
+        //   ~3,5 s (chargement de la liste des ~80 lecteurs), en plein lancement du premier film —
+        //   au point de faire sauter les « Lecteurs Movix ». On la fait ici, en arrière-plan,
+        //   3 s après le démarrage (après la pose du ProxySelector, avant le premier film).
+        applicationScope.launch(Dispatchers.Default) {
+            kotlinx.coroutines.delay(3_000L)
+            runCatching {
+                val t0 = System.currentTimeMillis()
+                com.streamflixreborn.streamflix.extractors.Extractor.identifyServiceName("https://vidara.to/e/prechauffe")
+                android.util.Log.d("Prechauffe", "lecteurs prêts en ${System.currentTimeMillis() - t0} ms")
+            }
+        }
         // 2026-08-27 (VPN global) : le ProxySelector doit être posé AVANT que
         //   le moindre OkHttpClient ne soit construit — OkHttp capture
         //   ProxySelector.getDefault() à la construction du client, pas à

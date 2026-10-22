@@ -86,13 +86,22 @@ class MegaplayExtractor : Extractor() {
             .build()
 
         /** GET simple, en se faisant passer pour l'iframe du lecteur. */
-        suspend fun recupere(url: String, referer: String): String = withContext(Dispatchers.IO) {
+        suspend fun recupere(url: String, referer: String, commeIframe: Boolean = false): String = withContext(Dispatchers.IO) {
             val requete = Request.Builder()
                 .url(url)
                 .header("User-Agent", UA)
                 .header("Referer", referer)
                 .header("Accept", "text/html,application/json,*/*;q=0.8")
-                .header("X-Requested-With", "XMLHttpRequest")
+                .apply {
+                    // 2026-10-22 : 2e essai « comme une vraie iframe » (le serveur teste Sec-Fetch-Dest :
+                    //   `document` = 403, `iframe` = page complète).
+                    if (commeIframe) {
+                        header("Sec-Fetch-Dest", "iframe")
+                        header("Sec-Fetch-Mode", "navigate")
+                        header("Sec-Fetch-Site", "cross-site")
+                        header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                    } else header("X-Requested-With", "XMLHttpRequest")
+                }
                 .build()
             client.newCall(requete).execute().use { reponse ->
                 if (!reponse.isSuccessful) {
@@ -102,9 +111,22 @@ class MegaplayExtractor : Extractor() {
             }
         }
 
-        val html = recupere(link, "$origine/")
+        var html = recupere(link, "$origine/")
         Log.d(TAG, "HTML length=${html.length}")
+        if (PAYLOAD.find(html) == null) {
+            Log.w(TAG, "pas de payload — page reçue : ${html.take(700).replace("\n", " ")}")
+            html = recupere(link, "https://dramacool9.com.ro/", commeIframe = true)
+            Log.d(TAG, "2e essai (iframe) HTML length=${html.length}")
+        }
 
+        // 2026-10-22 : page « We're Sorry! … Error Code: 500 » = épisode cassé CHEZ L'HÉBERGEUR
+        //   (vérifié : même réponse depuis le PC, quel que soit le Referer ; l'épisode voisin
+        //   marche). « source unavailable » → classé contenu mort : l'extracteur n'est PAS
+        //   mis en panne pour les autres épisodes (il l'était après 3 échecs).
+        if (PAYLOAD.find(html) == null && html.contains("Error Code", ignoreCase = true)) {
+            val code = Regex("""Error Code:\s*<span>(\d+)""").find(html)?.groupValues?.get(1) ?: "?"
+            throw Exception("MegaPlay: source unavailable — épisode indisponible chez l'hébergeur (erreur $code)")
+        }
         val brut = PAYLOAD.find(html)?.groupValues?.get(1)?.trim()
             ?: throw Exception("MegaPlay: balise player-payload absente (page=${html.length} o)")
 

@@ -28,6 +28,7 @@ abstract class GenericPackedSourceExtractor : Extractor() {
         var currentUrl = link
         var referer = "$refererUrl/"
         var source: String? = null
+        var dernierHtml = ""
 
         for (attempt in 0 until MAX_REDIRECT_HOPS) {
             val document = service.get(
@@ -37,6 +38,7 @@ abstract class GenericPackedSourceExtractor : Extractor() {
             )
 
             val html = document.html()
+            dernierHtml = html
             source = findSource(html)
                 ?: document.select("script")
                     .asSequence()
@@ -69,6 +71,7 @@ abstract class GenericPackedSourceExtractor : Extractor() {
 
         return Video(
             source = videoSource,
+            subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(dernierHtml, currentUrl),
             headers = mapOf(
                 "Referer" to "$playbackBaseUrl/",
                 "Origin" to playbackBaseUrl,

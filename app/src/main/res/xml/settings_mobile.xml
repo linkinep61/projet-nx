@@ -320,6 +320,16 @@
                 android:defaultValue="true"
                 app:iconSpaceReserved="false" />
 
+            <!-- 2026-10-22 : sonde de qualité des serveurs, désactivée par défaut
+                 (voir UserPreferences.sondeQualite). -->
+            <SwitchPreference
+                android:key="SONDE_QUALITE"
+                android:title="Afficher la qualité des serveurs"
+                android:summaryOn="Chaque serveur est testé pour afficher sa qualité (720p, 1080p…). Ralentit le démarrage."
+                android:summaryOff="Désactivé : démarrage plus rapide, la qualité n'est pas affichée."
+                android:defaultValue="false"
+                app:iconSpaceReserved="false" />
+
             <SwitchPreference
                 android:key="PREFER_SOFTWARE_DECODER"
                 android:title="Forcer le décodeur logiciel"

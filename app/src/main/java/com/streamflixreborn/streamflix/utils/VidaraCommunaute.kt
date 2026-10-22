@@ -295,7 +295,7 @@ object VidaraCommunaute {
                                        titrePrincipal, dureeMinSec, dureeMaxSec, saison, episode) { f ->
             // (user 2026-09-05 : « on n'affiche pas les gens ») -> etiquette neutre « Vidara »,
             //   le contributeur reste dans l'index (champ lib) mais n'est pas montre.
-            Video.Server(id = "livehub::vidaracom::${f.code}", name = "Vidara", src = "$BASE/e/${f.code}")
+            Video.Server(id = "livehub::vidaracom::${f.code}", name = "Vidara" + VidaraLibrary.etiquetteLangue(f.nomBrut), src = "$BASE/e/${f.code}")
         }
     }
 

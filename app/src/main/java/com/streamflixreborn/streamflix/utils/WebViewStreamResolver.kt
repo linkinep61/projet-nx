@@ -115,9 +115,20 @@ object WebViewStreamResolver {
         //   le temps que le script de la page la fabrique ; si elle reste vide, on rend le flux
         //   quand même (valeurJs = null) → comportement identique à avant.
         lireJsApresCapture: String? = null,
+        // 2026-10-22 (Vidsrc) : le bouton play est dans un cadre d'un AUTRE site, hors de portée
+        //   du JavaScript de la page → on simule un vrai toucher au centre de la WebView.
+        toucherCentre: Boolean = false,
+        // 2026-10-22 (Vidsrc) : motifs de chemin qui désignent aussi la playlist (sans .m3u8).
+        motifsFlux: List<String> = emptyList(),
+        // 2026-10-22 (Vidsrc, user : « il arrive vite mais parfois il met du temps à se lancer, comme
+        //   s'il arrivait même sans contenu ») : si, passé [delaiAbandonMs], le titre de la page
+        //   correspond encore à ce motif (titre générique = le lecteur n'a rien trouvé), on abandonne
+        //   tout de suite au lieu d'attendre [timeoutMs].
+        abandonSiTitre: Regex? = null,
+        delaiAbandonMs: Long = 12_000L,
     ): Resolved? = withContext(Dispatchers.Main) {
         withTimeoutOrNull(timeoutMs) {
-            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture)
+            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs)
         }
     }
 
@@ -151,12 +162,17 @@ object WebViewStreamResolver {
         attach: Boolean,
         cheminsBloques: List<String> = emptyList(),
         lireJsApresCapture: String? = null,
+        toucherCentre: Boolean = false,
+        motifsFlux: List<String> = emptyList(),
+        abandonSiTitre: Regex? = null,
+        delaiAbandonMs: Long = 12_000L,
     ): Resolved? = suspendCancellableCoroutine { cont ->
         val context = StreamFlixApp.instance.applicationContext
         var resolved = false
         // Une seule capture traitée : pendant la lecture JS différée, d'autres playlists peuvent
         //   être demandées par la page — on ne relance pas une 2e lecture pour elles.
         val captureEnCours = java.util.concurrent.atomic.AtomicBoolean(false)
+        var toucherLance = false
         var attachedParent: android.view.ViewGroup? = null
 
         val webView = WebView(context).apply {
@@ -187,6 +203,18 @@ object WebViewStreamResolver {
             }
             cleanup()
         }
+        if (abandonSiTitre != null) {
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (resolved) return@postDelayed
+                val titre = runCatching { webView.title }.getOrNull().orEmpty().trim()
+                if (abandonSiTitre.matches(titre)) {
+                    android.util.Log.i("WebViewStreamResolver", "titre resté « $titre » après ${delaiAbandonMs / 1000} s → rien à lire, abandon")
+                    resolve(null)
+                } else {
+                    android.util.Log.d("WebViewStreamResolver", "titre « ${titre.take(60)} » → on continue d'attendre le flux")
+                }
+            }, delaiAbandonMs)
+        }
 
         // Attache la WebView à la fenêtre (invisible) pour que le player tourne réellement.
         if (attach) {
@@ -204,7 +232,7 @@ object WebViewStreamResolver {
                     //   La taille RÉELLE est conservée : en 1×1 les players modernes (vidstack) ne
                     //   s'initialisent pas et ne demandent jamais leur flux.
                     webView.alpha = 0.004f
-                    webView.isEnabled = false
+                    webView.isEnabled = toucherCentre
                     webView.isClickable = false
                     webView.isFocusable = false
                     val d = context.resources.displayMetrics.density
@@ -235,6 +263,14 @@ object WebViewStreamResolver {
                 // Navigation « piège » (ex. upbolt → /dl) : on la refuse pour garder le player en
                 //   vie. Sans ça, le clic play quitte la page et aucun flux n'est jamais demandé.
                 val urlNav = request?.url?.toString().orEmpty()
+                // 2026-10-22 (Vidsrc) : en mode « toucher », le toucher peut déclencher une pub qui
+                //   emmène la page ailleurs (AliExpress, YouTube…) et tue le lecteur → la page
+                //   principale ne quitte jamais le site d'entrée.
+                if (toucherCentre && request?.isForMainFrame == true &&
+                    host != (android.net.Uri.parse(entryUrl).host ?: host)) {
+                    android.util.Log.d("WebViewStreamResolver", "navigation pub bloquée : $host")
+                    return true
+                }
                 if (cheminsBloques.any { urlNav.contains(it, ignoreCase = true) }) {
                     android.util.Log.d("WebViewStreamResolver", "navigation bloquée (piège): ${urlNav.takeLast(40)}")
                     return true
@@ -255,7 +291,8 @@ object WebViewStreamResolver {
                 //   params) — sinon un tracker avec « ?t=titre.mp4 » déclenche un faux positif.
                 val exts = if (captureMp4) STREAM_EXTS + ".mp4" else STREAM_EXTS
                 val reqPath = try { android.net.Uri.parse(reqUrl).path ?: "" } catch (_: Throwable) { reqUrl.substringBefore("?") }
-                val isStream = exts.any { reqPath.contains(it, ignoreCase = true) }
+                val isStream = exts.any { reqPath.contains(it, ignoreCase = true) } ||
+                    motifsFlux.any { reqPath.contains(it) }
                 if (isStream && !POISONED_TARGET_HOSTS.any { host.contains(it) }) {
                     android.util.Log.d(
                         "WebViewStreamResolver",
@@ -312,6 +349,23 @@ object WebViewStreamResolver {
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                if (!resolved && view != null && toucherCentre && !toucherLance) {
+                    toucherLance = true
+                    var t = 0
+                    fun toucher() {
+                        if (resolved || t++ > 8) return
+                        try {
+                            val x = view.width / 2f; val y = view.height / 2f
+                            val ms = android.os.SystemClock.uptimeMillis()
+                            val bas = android.view.MotionEvent.obtain(ms, ms, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+                            val haut = android.view.MotionEvent.obtain(ms, ms + 60, android.view.MotionEvent.ACTION_UP, x, y, 0)
+                            view.dispatchTouchEvent(bas); view.dispatchTouchEvent(haut)
+                            bas.recycle(); haut.recycle()
+                        } catch (_: Throwable) {}
+                        view.postDelayed({ toucher() }, 2_000L)
+                    }
+                    view.postDelayed({ toucher() }, 2_500L)
+                }
                 if (resolved || view == null || !clickPlay) return
                 // Auto-clic play en boucle (le lecteur charge le flux seulement après un clic).
                 var n = 0

@@ -44,6 +44,7 @@ class VidzyExtractor : Extractor() {
 
     companion object {
         private const val TAG = "VidzyExtractor"
+        private const val UA_LECTEUR = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
         private val cookieStore = ConcurrentHashMap<String, List<Cookie>>()
 
@@ -174,6 +175,43 @@ class VidzyExtractor : Extractor() {
         return null
     }
 
+    /**
+     * 2026-10-22 (user : « Vidzy ne veut pas fonctionner », OK dans le navigateur) : Vidzy exige
+     * désormais une clé de session `gk` (obtenue par son lecteur auprès de v6.vidzy.cc/gate.php,
+     * contre quelques mesures du navigateur). Sans elle, seuls les ~9 premiers segments passent,
+     * tout le reste → 403. Ajoutée au master.m3u8, le CDN la recopie dans les playlists et les
+     * segments. En cas d'échec on rend l'adresse telle quelle (comportement précédent).
+     */
+    private suspend fun avecCleSession(url: String): String {
+        if (!url.contains("/hls2/") && !url.contains("/v/")) return url
+        if (url.contains("gk=")) return url
+        return withContext(Dispatchers.IO) {
+            val gate = "https://v6.vidzy.cc/gate.php?v=p1&cw=159.56&cw2=170.34&wg=1&dpr=2.625&sw=412&hw=8&ft=TOP&rf="
+            repeat(3) { essai ->
+                try {
+                    val corps = client.newCall(
+                        Request.Builder().url(gate)
+                            .header("User-Agent", UA_LECTEUR)
+                            .header("Origin", "https://vidzy.cc")
+                            .header("Referer", "https://vidzy.cc/")
+                            .header("Accept", "*/*")
+                            .build()
+                    ).execute().use { it.body?.string().orEmpty() }
+                    val gk = org.json.JSONObject(corps).optString("gk")
+                    if (gk.isNotBlank()) {
+                        Log.d(TAG, "clé de session gk obtenue (essai ${essai + 1})")
+                        return@withContext url + (if (url.contains('?')) "&" else "?") + "gk=" + java.net.URLEncoder.encode(gk, "UTF-8")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "gate.php : ${e.message}")
+                }
+                delay(800)
+            }
+            Log.w(TAG, "clé de session gk introuvable → lecture limitée aux premiers segments")
+            url
+        }
+    }
+
     override suspend fun extract(link: String): Video {
         // If already a direct HLS URL from a vidzy subdomain, use it directly
         if (link.contains(".m3u8") || link.contains("/hls")) {
@@ -188,8 +226,12 @@ class VidzyExtractor : Extractor() {
         Log.d(TAG, "Fetching embed page: $link")
 
         val html = withContext(Dispatchers.IO) {
+            // 2026-10-22 (user : Vidzy 403 dans l'appli, OK dans le navigateur) : le token `t=` du
+            //   flux est lié à l'UA qui a chargé la page. Le lecteur (Cronet) présente l'UA
+            //   Pixel 8 / Chrome 131 → la page doit être chargée avec ce MÊME UA.
             val request = Request.Builder()
                 .url(link)
+                .header("User-Agent", UA_LECTEUR)
                 .build()
 
             // First request — may return a cookie-setting landing page
@@ -229,6 +271,7 @@ class VidzyExtractor : Extractor() {
                     val request3 = Request.Builder()
                         .url(link)
                         .header("Referer", link)
+                        .header("User-Agent", UA_LECTEUR)
                         .build()
                     val response3 = client.newCall(request3).execute()
                     val body3 = response3.body?.string() ?: throw Exception("Empty response on 3rd try")
@@ -309,7 +352,7 @@ class VidzyExtractor : Extractor() {
 
         // Try multiple patterns to find the stream URL
         // 2026-10-12 : nouveau format Vidzy déchiffré d'abord (voir dechiffrerNouveauFormat).
-        val streamUrl = dechiffrerNouveauFormat(html, link) ?: listOf(
+        val streamUrlBrut = dechiffrerNouveauFormat(html, link) ?: listOf(
             Regex("""src\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']"""),
             Regex("""file\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']"""),
             Regex("""source\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']"""),
@@ -384,7 +427,8 @@ class VidzyExtractor : Extractor() {
                 throw Exception("Vidzy: flux non extractible (overlay WebView désactivé)")
             }
 
-        Log.i(TAG, "Stream URL found: $streamUrl")
+        val streamUrl = avecCleSession(streamUrlBrut)
+        Log.i(TAG, "Stream URL found: ${streamUrl.substringBefore("&gk=")}${if (streamUrl.contains("&gk=")) " (+gk)" else ""}")
 
         val isM3u8 = streamUrl.contains(".m3u8")
         val baseHost = try { URL(link).host } catch (_: Exception) { "vidzy.live" }
@@ -399,6 +443,7 @@ class VidzyExtractor : Extractor() {
         val headers = mutableMapOf(
             "Referer" to link,
             "Origin" to "https://$baseHost",
+            "User-Agent" to UA_LECTEUR,
             "Accept" to "*/*",
             "Sec-Fetch-Dest" to "empty",
             "Sec-Fetch-Mode" to "cors",

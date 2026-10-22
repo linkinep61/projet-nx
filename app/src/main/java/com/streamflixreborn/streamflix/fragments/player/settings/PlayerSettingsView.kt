@@ -204,6 +204,11 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                         .setTrackTypeDisabled(subtitle.trackGroup.type, false)
                         .build()
                     UserPreferences.subtitleName = (subtitle.language ?: subtitle.label).substringBefore(" ")
+                    // 2026-10-22 : une piste choisie à la main remplace le calque (français traduit
+                    //   affiché en cours de lecture, Vidzy…) — sinon les deux se superposent.
+                    try {
+                        com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.stopGlobal()
+                    } catch (_: Throwable) {}
                 }
 
                 Settings.Subtitle.ExternalServerSubtitles -> {
@@ -926,6 +931,18 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                     // 2026-06-09 : item "Sous-titres serveur (VOSTFR)" — ré-active
                     //   l'overlay externe Vidzy s'il existe.
                     if (ExternalServerSubtitles.isAvailable) list.add(ExternalServerSubtitles)
+                    // 2026-10-22 : état de la traduction automatique, juste sous les pistes.
+                    if (TraductionAuto.etat != null) list.add(minOf(list.size, 2 + list.count { it is TextTrackInformation }), TraductionAuto)
+                    else if (com.streamflixreborn.streamflix.utils.TraductionSousTitres.demandeTraduction != null)
+                        list.add(minOf(list.size, 2 + list.count { it is TextTrackInformation }), Traduire)
+                    // 2026-10-22 (user : « un bouton dans les sous-titres qui recale ou relance le
+                    //   recalage ») : seulement si des sous-titres sont affichés (et hors mode léger).
+                    @Suppress("UNUSED_VARIABLE") val actifs = com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.globalInstance?.isRunning() == true ||
+                        (player?.currentTracks?.groups?.any { it.type == C.TRACK_TYPE_TEXT && it.isSelected } == true)
+                    // La liste n'est pas recalculée à chaque ouverture : on n'exige pas « actifs »
+                    //   (le calque peut démarrer après) ; sans sous-titre, le clic le signale.
+                    if (!UserPreferences.modeLeger && com.streamflixreborn.streamflix.utils.SyncSousTitres.demandeRecalage != null)
+                        list.add(minOf(list.size, 2 + list.count { it is TextTrackInformation || it is TraductionAuto }), Recaler)
                 }
             }
 
@@ -1353,6 +1370,35 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
              *  pas très grave, et tu le nommes autrement") : item dédié au
              *  re-activation de l'overlay sous-titres externe (Vidzy). Ne
              *  s'affiche que si un overlay est dispo (= globalInstance != null). */
+            /** 2026-10-22 : ligne d'état de la traduction automatique (en cours / terminée). */
+            /** 2026-10-22 : « Recaler les sous-titres » (relance le calage automatique). */
+            data object Recaler : Subtitle() {
+                val libelle: String
+                    get() = if (com.streamflixreborn.streamflix.utils.EcouteVoix.enCours) "⏳ Calage des sous-titres en cours… (relancer)"
+                        else "↻ Recaler les sous-titres"
+            }
+
+            /** 2026-10-22 : « Traduire en français » à la demande (VOSTFR aux sous-titres gravés). */
+            data object Traduire : Subtitle() {
+                val libelle: String get() = "🌐 Traduire les sous-titres en français"
+            }
+
+            data object TraductionAuto : Subtitle() {
+                val etat get() = com.streamflixreborn.streamflix.utils.TraductionSousTitres.etatCourant
+                val libelle: String
+                    get() {
+                        val e = etat ?: return ""
+                        val de = when (e.langue) { "en" -> "de l'anglais"; "es" -> "de l'espagnol"; "it" -> "de l'italien"; "de" -> "de l'allemand"
+                            "ko" -> "du coréen"; "ja" -> "du japonais"; "zh" -> "du chinois"; "pt" -> "du portugais"; else -> "(${e.langue})" }
+                        return when {
+                            e.echec -> "Traduction automatique impossible"
+                            e.terminee -> "✓ Traduction automatique terminée ($de)"
+                            e.total > 0 -> "⏳ Traduction automatique en cours… ${e.faites * 100 / e.total} %"
+                            else -> "⏳ Traduction automatique en préparation…"
+                        }
+                    }
+            }
+
             data object ExternalServerSubtitles : Subtitle() {
                 val isAvailable: Boolean
                     get() = com.streamflixreborn.streamflix.utils

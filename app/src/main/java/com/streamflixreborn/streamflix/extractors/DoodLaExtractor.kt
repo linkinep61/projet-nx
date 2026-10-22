@@ -110,8 +110,17 @@ open class DoodLaExtractor : Extractor() {
                 "${sep}token=${token}&expiry=${System.currentTimeMillis()}"
         android.util.Log.d("DoodExtractor", "final video URL=${url.take(120)}")
 
+        // 2026-10-22 : DoodStream porte son sous-titre dans l'URL d'embed (`c1_file=…&c1_label=…`).
+        val sousTitresDood = listOf(rawLink, finalUrl, document.toString()).firstNotNullOfOrNull { t ->
+            Regex("""c1_file=([^&"'\s]+)""").find(t)?.groupValues?.get(1)?.let { f ->
+                val lab = Regex("""c1_label=([^&"'\s]+)""").find(t)?.groupValues?.get(1)
+                    ?.let { java.net.URLDecoder.decode(it, "UTF-8") } ?: "Inconnu"
+                Video.Subtitle(label = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.libelle(lab), file = java.net.URLDecoder.decode(f, "UTF-8"))
+            }
+        }
         return Video(
             source = url,
+            subtitles = listOfNotNull(sousTitresDood),
             headers = mapOf(
                 "Referer" to finalBaseUrl
             )

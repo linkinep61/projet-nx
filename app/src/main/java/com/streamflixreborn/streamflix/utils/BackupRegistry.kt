@@ -82,6 +82,15 @@ object BackupRegistry {
         "archive.org" to "archive.org (vieux films/séries)",
         "Moviebox" to "Moviebox",
         "NetMirror" to "NetMirror (Netflix/Prime/Hotstar)",
+        // 2026-10-22 : VixSrc (par TMDB) — audio anglais + sous-titres français intégrés = VOSTFR.
+        "VixSrc" to "VixSrc (VOSTFR, par TMDB)",
+        // 2026-10-22 : KissKH — dramas asiatiques, sous-titres FR ou traduits automatiquement.
+        "KissKH" to "KissKH (dramas asiatiques, VOSTFR)",
+        // 2026-10-22 : MegacloudX (lecteur de Cineby) — par TMDB/IMDb, sous-titres en ~17 langues.
+        "MegacloudX" to "MegacloudX (VOSTFR, par TMDB)",
+        // 2026-10-22 : MoviesFree (lecteur Vidsrc de moviesfree.cv) — par TMDB, audio anglais.
+        //   Nommé « MoviesFree » (user : deux serveurs « VixSrc » / « Vidsrc » se confondaient).
+        "MoviesFree" to "MoviesFree (VOSTFR, par TMDB)",
         "Movix" to "Movix",
         "Frembed" to "Frembed",
         "Vidzy" to "Vidzy (par TMDB)",
@@ -192,6 +201,30 @@ object BackupRegistry {
     fun signalerLecture(enCours: Boolean) {
         if (lectureEnCours != enCours) Log.i(TAG, "lecture en cours = $enCours")
         lectureEnCours = enCours
+        // Image arrivée, erreur ou sortie : le démarrage est terminé dans tous les cas.
+        demarrageDepuisMs = 0L
+    }
+
+    // 2026-10-22 (user : « tant que la première image n'est pas arrivée (15 s au plus), l'appli
+    //   ne lancerait plus de nouvelles sources de secours ; celles déjà lancées finiraient
+    //   normalement, les autres reprendraient dès que l'image apparaît ») — mesuré sur la télé :
+    //   pendant les ~20 s du démarrage de Vidara, une vingtaine de sources cherchaient le film en
+    //   même temps et lui prenaient réseau et processeur. Tous modes (pas seulement léger).
+    private const val DEMARRAGE_MAX_MS = 15_000L
+    @Volatile private var demarrageDepuisMs = 0L
+
+    /** Appelé quand un serveur est lancé : jusqu'à la 1ʳᵉ image (15 s au plus), pas de nouvelle source. */
+    fun signalerDemarrage() {
+        // Un seul délai de 15 s par lancement : une cascade de serveurs en échec ne doit pas
+        //   priver indéfiniment l'appli de ses sources de secours.
+        if (lectureEnCours || demarrageDepuisMs != 0L) return
+        demarrageDepuisMs = android.os.SystemClock.elapsedRealtime()
+    }
+
+    private fun demarrageEnCours(): Boolean {
+        val depuis = demarrageDepuisMs
+        return depuis != 0L && !lectureEnCours &&
+            android.os.SystemClock.elapsedRealtime() - depuis < DEMARRAGE_MAX_MS
     }
 
     // ── VAGUES DE LANCEMENT (2026-08-08) ────────────────────────────────────────────
@@ -745,6 +778,9 @@ object BackupRegistry {
     //   EXACTEMENT le titre qui servira ensuite à les rechercher (`key.title` passe
     //   par ici). Dupliquer cette logique ailleurs, c'est se garantir une divergence
     //   le jour où l'une des deux copies évolue.
+    private fun anneeDansTitre(t: String?): Int? =
+        t?.let { Regex("""\(((?:19|20)\d{2})\)""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+
     fun cleanTitle(raw: String): String {
         var t = raw
         // Retire les blocs entre parenthèses : (Version Couleur), (VF), (Film), (Anime), etc.
@@ -759,12 +795,14 @@ object BackupRegistry {
     private fun keyOf(videoType: Video.Type, titleHint: String?, episodeIdHint: String? = null): Key = when (videoType) {
         is Video.Type.Movie -> Key(
             title = cleanTitle(videoType.title.ifBlank { titleHint.orEmpty() }),
-            year = videoType.releaseDate.take(4).toIntOrNull(),
+            year = videoType.releaseDate.take(4).toIntOrNull() ?: anneeDansTitre(videoType.title),
             season = 0, episode = 0, isMovie = true,
         )
         is Video.Type.Episode -> Key(
             title = cleanTitle(videoType.tvShow.title.ifBlank { titleHint.orEmpty() }),
-            year = videoType.tvShow.releaseDate?.take(4)?.toIntOrNull(),
+            // 2026-10-22 : sans date (fiches Dramacool), l'année du titre « … (2026) » fait foi —
+            //   cleanTitle la retire, elle était donc perdue (→ mauvais rattachements).
+            year = videoType.tvShow.releaseDate?.take(4)?.toIntOrNull() ?: anneeDansTitre(videoType.tvShow.title),
             // 2026-07-10 (user AnimeSama : saison lue `s0` → aucun backup ne matchait) : la saison 0
             //   (non précisée, ex. anime single-saison AnimeSama) est traitée comme SAISON 1 UNIQUEMENT
             //   pour les backups. AnimeSama natif garde son `0` (il joue via son propre id d'épisode,
@@ -1052,7 +1090,7 @@ object BackupRegistry {
         //   garde-fou ici, sans attendre TMDB.
         var animeSelonAniList = false
         if (resolvedTmdbId.isNullOrBlank() && key.title.isNotBlank()) {
-            val alias = AniListTitres.titresPour(key.title)
+            val alias = AniListTitres.titresPour(key.title, key.year)
             if (alias.isNotEmpty()) {
                 alias.forEach { knownTitles.add(it) }
                 animeSelonAniList = true
@@ -1099,6 +1137,8 @@ object BackupRegistry {
         //   écarte tous les courts : mesuré, l'épisode S1E03 de 1471 s était rejeté face à un
         //   plancher de 2448 s. Plancher sur la plus COURTE, plafond sur la plus LONGUE.
         var runtimeSecondes: Int? = null
+        // 2026-10-22 : identifiant IMDb du FILM (MegacloudX l'exige dans son adresse).
+        var imdbFilm: String? = null
         var runtimeMaxSecondes: Int? = null
         if (!resolvedTmdbId.isNullOrBlank()) {
             try {
@@ -1126,6 +1166,7 @@ object BackupRegistry {
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
                         // Durée du FILM (TMDB la donne en minutes) : une seule valeur, les
                         //   deux bornes sont donc identiques.
+                        imdbFilm = d.imdbId?.takeIf { it.startsWith("tt") }
                         runtimeSecondes = d.runtime?.takeIf { it > 0 }?.times(60)
                         runtimeMaxSecondes = runtimeSecondes
                         // Année déduite si le provider n'en a pas fourni.
@@ -1209,6 +1250,25 @@ object BackupRegistry {
             } catch (e: Exception) {
                 Log.w(TAG, "titre FR de secours KO: ${e.message}")
             }
+        }
+
+        // 2026-10-22 (user : « Le jardin des météores… ou Meteor Garden ») : TMDB donne des titres
+        //   alternatifs avec l'ANNÉE collée (« Meteor Garden 2018 »). VoirDrama l'a sous
+        //   « Meteor Garden » tout court (bonne série : 2018, 50 épisodes) et sa recherche ne
+        //   trouve rien avec l'année. On ajoute donc la variante SANS l'année finale ; le gate
+        //   d'année de `workMatches` continue d'écarter les homonymes (Meteor Garden 2001…).
+        //   Placée JUSTE AVANT le titre avec année : « Meteor Garden 2018 » trouvait d'abord la copie
+        //   Dramacool (page sans épisode) et la recherche s'arrêtait là.
+        run {
+            val ordre = mutableListOf<String>()
+            for (t in knownTitles) {
+                val sansAnnee = t.replace(Regex("""\s*\(?(?:19|20)\d{2}\)?\s*$"""), "").trim()
+                if (sansAnnee.length >= 3 && sansAnnee != t &&
+                    knownTitles.none { it.equals(sansAnnee, ignoreCase = true) } &&
+                    ordre.none { it.equals(sansAnnee, ignoreCase = true) }) ordre.add(sansAnnee)
+                if (ordre.none { it.equals(t, ignoreCase = true) }) ordre.add(t)
+            }
+            knownTitles.clear(); knownTitles.addAll(ordre)
         }
 
         // 2026-07-09 : si le contenu est japonais (anime), traiter comme anime
@@ -1346,6 +1406,12 @@ object BackupRegistry {
                             withTimeoutOrNull(60_000) { fetch() } ?: emptyList()
                         }
                     }
+                }
+                // 2026-10-22 : une source pas encore partie attend la 1ʳᵉ image (cf. signalerDemarrage).
+                if (demarrageEnCours()) {
+                    Log.i(TAG, "$source → attend la première image avant de chercher")
+                    while (demarrageEnCours()) kotlinx.coroutines.delay(250L)
+                    Log.i(TAG, "$source → lancée")
                 }
                 // Mode léger : file d'attente 3 par 3 (l'attente de la place ne compte PAS dans le
                 //   délai de la source) ; les gourmandes prennent leur ticket en dernier.
@@ -1627,6 +1693,65 @@ object BackupRegistry {
                     }
                 }
             }
+
+            // ── VIXSRC (par tmdbId) ─────────────────────────────────────────────
+            // 2026-10-22 (user : « activer un ou deux gros fournisseurs TMDB anglais où ils ont
+            //   bien des sous-titres ») : vérifié sur Fight Club — audio anglais + piste de
+            //   sous-titres FRANÇAISE dans le manifeste HLS (et 6 autres langues). On ne propose
+            //   le serveur que si VixSrc CONNAÎT le titre (son API répond `src`), sinon il serait
+            //   rouge à coup sûr.
+            // 2026-10-22 : VixSrc est un site ITALIEN — un film dont l'audio n'est pas étiqueté
+            //   peut être un doublage italien (vu sur « Le Salaire de la peur »). On n'accepte que
+            //   si le manifeste DÉCLARE une piste audio anglaise ou dans la langue d'origine ; et
+            //   jamais pour une œuvre française (on l'a en VF ailleurs, VixSrc n'aurait qu'un doublage).
+            if (!resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("VixSrc") {
+                val chemin = if (key.isMovie) "movie/$resolvedTmdbId"
+                    else "tv/$resolvedTmdbId/${key.season.coerceAtLeast(1)}/${key.episode}"
+                val connu = try {
+                    com.streamflixreborn.streamflix.extractors.VixSrcExtractor.VerifAudio.audioOriginalDisponible(chemin, langueOriginale)
+                } catch (e: Exception) { Log.d(TAG, "VixSrc vérif KO : ${e.message}"); false }
+                if (!connu) emptyList()
+                else listOf(Video.Server(
+                    id = "vixsrc_${chemin.replace('/', '_')}",
+                    name = "[VOSTFR]",
+                    src = "https://vixsrc.to/api/$chemin#vostfr",
+                ))
+            } }
+
+            // ── MEGACLOUDX (lecteur de Cineby, par TMDB) ──────────────────────────────
+            // 2026-10-22 (user : « cineby… une grosse base de données, s'il a du sous-titre ») :
+            //   vérifié au navigateur — megacloudx.net/mv/{imdb}/{tmdb}/ (films) et
+            //   /pl/{tmdb}/{s}/{e}/ (séries) redirigent vers un lecteur Byse/Filemoon portant
+            //   `sub.info=<json>` : jusqu'à 17 langues dont le français. ⚠ (user) « certaines
+            //   vidéos n'ont pas de sous-titres » → on lit le JSON AVANT de proposer le serveur,
+            //   et on ne garde que s'il y a du français ou de l'anglais (traduit). Jamais sur une
+            //   œuvre française (son audio serait du VF/VO non vérifié — on l'a ailleurs en VF).
+            if (!resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr" && (!key.isMovie || imdbFilm != null)) launch { emit("MegacloudX") {
+                com.streamflixreborn.streamflix.utils.MegacloudX.serveurs(
+                    if (key.isMovie) "mv/$imdbFilm/$resolvedTmdbId" else "pl/$resolvedTmdbId/${key.season.coerceAtLeast(1)}/${key.episode}"
+                )
+            } }
+
+            // ── VIDSRC (lecteur de moviesfree.cv, par TMDB) ─────────────────────────────
+            // 2026-10-22 (user : « gros catalogue, VOSTFR traduit en plus ») : audio anglais,
+            //   sous-titres fournis par l'appli. Jamais sur une œuvre française (on l'a en VF).
+            if (!resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("MoviesFree") {
+                listOf(Video.Server(
+                    id = "vidsrc_${if (key.isMovie) "movie_$resolvedTmdbId" else "tv_${resolvedTmdbId}_${key.season}_${key.episode}"}",
+                    name = "[VOSTFR]",
+                    src = com.streamflixreborn.streamflix.utils.Vidsrc.lien(resolvedTmdbId!!, key.isMovie, key.season, key.episode) + "#vostfr",
+                ))
+            } }
+
+            // ── KISSKH (dramas asiatiques, par titre) ───────────────────────────────
+            // 2026-10-22 (user : « un serveur avec beaucoup de dramas coréens, qu'on puisse
+            //   traduire nous-mêmes ») : uniquement sur un contenu asiatique (langue d'origine
+            //   TMDB), ou inconnu (fiches VoirDrama/Dramacool sans TMDB) — jamais sur un film
+            //   occidental, où il ne trouverait que des homonymes.
+            val languesAsie = setOf("ko", "zh", "cn", "ja", "th", "tl", "vi", "id", "ms", "tw", "hi")
+            if (langueOriginale == null || langueOriginale in languesAsie) launch { emit("KissKH") {
+                com.streamflixreborn.streamflix.utils.KissKh.serveurs(knownTitles.toList(), key.isMovie, key.season, key.episode)
+            } }
 
             // 2026-10-09 : source « Embed » (Videasy) SUPPRIMÉE à la demande du user. Elle ne
             //   rendait plus rien depuis le 12/07 (neutralisée), et l'API Videasy est morte :
@@ -2639,6 +2764,8 @@ object BackupRegistry {
             "Cinélux" -> OlaVod.video(orig)
             // 2026-09-06 : Tokyvideo — page de la vidéo → MP4 signé (cf. TokyVideo.video).
             "Tokyvideo" -> TokyVideo.video(orig)
+            "KissKH" -> com.streamflixreborn.streamflix.utils.KissKh.video(orig)
+            "MoviesFree" -> com.streamflixreborn.streamflix.utils.Vidsrc.video(orig)
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
                 dynamicBackups[source]?.let { dyn ->

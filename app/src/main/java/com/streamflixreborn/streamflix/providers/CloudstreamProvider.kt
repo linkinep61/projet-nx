@@ -2506,7 +2506,11 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
 
         val getRespFinal = getRespD.await()
         val hasFrDub = getRespFinal?.let { hasFrenchDub(it) } == true
-        val hasFrCaptions = frenchCaps.isNotEmpty()
+        // 2026-10-22 (user : « Le jardin des météores », aucun serveur) : le flux web (h5) apportait
+        //   1 sous-titre FR, mais seul /get-ext-captions comptait ici → tag [VO] → caché par le
+        //   réglage « masquer la VO ». Les sous-titres FR du flux web comptent aussi.
+        val hasFrCaptions = frenchCaps.isNotEmpty() ||
+            (!subjectId.isNullOrBlank() && !h5CaptionsCache[subjectId!!].isNullOrEmpty())
         // 2026-05-21 (user "surtout les serveurs de Cloudstream lui-même") : on ne
         // SUPPRIME plus les sources Cloudstream natives quand le dub FR n'est pas
         // confirmé — on les GARDE et on les TAGUE honnêtement par langue :

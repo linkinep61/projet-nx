@@ -409,6 +409,11 @@ object OkRuProvider {
             if (pistes.any { it.first.startsWith("fr", ignoreCase = true) }) {
                 Log.i(TAG, "sondé « ${c.titre} » → VOSTFR (piste FR au manifeste)")
                 "VOSTFR"
+            } else if (pistes.any { it.first.startsWith("en", ignoreCase = true) }) {
+                // 2026-10-22 (user : « réactiver les serveurs qui donnent de l'anglais ») : la piste
+                //   anglaise est traduite en français à la lecture (TraductionSousTitres).
+                Log.i(TAG, "sondé « ${c.titre} » → VO + sous-titres anglais (traduits à la lecture)")
+                "VO"
             } else {
                 Log.i(
                     TAG,

@@ -57,8 +57,8 @@ android {
         //   la balance sera alors differente parce qu'il y aura quelque chose en face.
         minSdk 23
         targetSdk 35
-        versionCode 108002
-        versionName "1.8.2"
+        versionCode 108003
+        versionName "1.8.3"
 
         // ABI pilotÃ©e par la propriÃ©tÃ© ABI_TARGET (local.properties, posÃ©e par la CI).
         //   APK par dÃ©faut = ARM (armeabi-v7a + arm64-v8a).
@@ -176,6 +176,13 @@ dependencies {
     ksp 'com.github.bumptech.glide:ksp:5.0.5'
     implementation 'com.github.bumptech.glide:okhttp3-integration:5.0.5'
 
+    // 2026-10-22 : traduction automatique des sous-titres anglais → français, sur l'appareil.
+    implementation 'com.google.mlkit:translate:17.0.3'
+    // 2026-10-22 : détecteur de voix Silero (recalage des sous-titres à l'écoute des voix).
+    //   WebRTC essayé d'abord : prenait la musique pour de la voix.
+    implementation 'com.github.gkonovalov.android-vad:silero:2.0.10'
+    // 2026-10-22 : YAMNet (TensorFlow Lite) pour les appareils ARM 32 bits, où Silero plante.
+    implementation 'com.github.gkonovalov.android-vad:yamnet:2.0.10'
     implementation 'androidx.media3:media3-exoplayer:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-dash:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-hls:1.8.0'

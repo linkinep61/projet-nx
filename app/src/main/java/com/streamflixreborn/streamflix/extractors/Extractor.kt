@@ -1074,7 +1074,7 @@ abstract class Extractor {
                             recordSuccess(name)
                             // Même traitement final que les autres chemins de succès :
                             //   filtrage des sous-titres puis mise en cache.
-                            val filtree = enforceFrenchSubtitlesOnly(videoRejouee)
+                            val filtree = enforceFrenchSubtitlesOnly(com.streamflixreborn.streamflix.utils.SousTitresHebergeur.completer(videoRejouee, link, finalLink))
                             if (foundExtractor.cacheTtlMs > 0L) {
                                 extractionCache[link] = CachedExtraction(
                                     video = filtree,
@@ -1118,7 +1118,7 @@ abstract class Extractor {
                                         .recordExtraction(name, altDuration)
                                     Log.i("StreamFlixES", "[VIDEO] -> Extracted via fallback ($altHost): ${altVideo.source}")
                                     recordSuccess(name)
-                                    val filtered = enforceFrenchSubtitlesOnly(altVideo)
+                                    val filtered = enforceFrenchSubtitlesOnly(com.streamflixreborn.streamflix.utils.SousTitresHebergeur.completer(altVideo, link, finalLink))
                                     if (foundExtractor.cacheTtlMs > 0L) {
                                         extractionCache[link] = CachedExtraction(
                                             video = filtered,
@@ -1151,7 +1151,8 @@ abstract class Extractor {
                 recordSuccess(name)
 
                 // App-wide subtitle filter (French only).
-                val filtered = enforceFrenchSubtitlesOnly(video)
+                // 2026-10-22 : + sous-titres passés dans l'adresse du lecteur (c1_file, subtitle_json, sub.info).
+                val filtered = enforceFrenchSubtitlesOnly(com.streamflixreborn.streamflix.utils.SousTitresHebergeur.completer(video, link, finalLink))
 
                 // A: stash the resolved video so the next click on the same server is instant.
                 // Cached against the original link (pre-bridge resolution) so the lookup at the
@@ -1263,6 +1264,21 @@ abstract class Extractor {
         private fun enforceFrenchSubtitlesOnly(video: Video): Video {
             if (video.subtitles.isEmpty()) return video
             val frenchSubs = video.subtitles.filter { isFrenchSubtitle(it.label) }
+            // 2026-10-22 (user : « on devrait quand même activer les sous-titres anglais, au pire
+            //   des cas, s'il n'y a pas du tout de français ») : aucune piste française → on garde
+            //   les pistes ANGLAISES (et seulement elles), sans les activer ici — c'est
+            //   PlayerViewModel.reglerSousTitresSelonLangue qui décide selon la langue du serveur.
+            if (frenchSubs.isEmpty()) {
+                val anglais = video.subtitles.filter { isEnglishSubtitle(it.label) }
+                // Ni français ni anglais → la 1re autre langue que le traducteur sait traiter.
+                val gardes = anglais.ifEmpty {
+                    video.subtitles.firstOrNull {
+                        com.streamflixreborn.streamflix.utils.TraductionSousTitres.run { traduisible(codeDepuisLibelle(it.label)) }
+                    }?.let { listOf(it) }.orEmpty()
+                }
+                Log.d("Extractor", "Subtitle filter — aucun FR → ${gardes.size} piste(s) gardée(s) en secours (${gardes.joinToString { it.label }})")
+                return video.copy(subtitles = gardes.map { it.copy(default = false) })
+            }
             if (frenchSubs.size == video.subtitles.size) {
                 // already French-only, nothing to change
                 return video
@@ -1283,6 +1299,12 @@ abstract class Extractor {
          * Matches: fr, fre, fra, fr-FR, fr-CA, french, français, francais, vf, vff, etc.
          * Case-insensitive, accent-tolerant.
          */
+        fun isEnglishSubtitle(label: String): Boolean {
+            val l = label.lowercase().trim()
+            return l in setOf("en", "eng", "en-us", "en-gb", "en_us", "en_gb") ||
+                l.contains("english") || l.contains("anglais") || l.startsWith("en-") || l.startsWith("en_")
+        }
+
         fun isFrenchSubtitle(label: String): Boolean {
             val lower = label.lowercase().trim()
             if (lower.isEmpty()) return false
@@ -1342,41 +1364,44 @@ abstract class Extractor {
             return result
         }
 
-        private fun identifyServiceNameUncached(url: String): String? {
-            val urlRegex = URL_PREFIX_REGEX
-            val compareUrl = url.lowercase().replace(urlRegex, "")
+        // 2026-10-22 (user : « on voit si on peut continuer à optimiser ») — mesuré sur la télé :
+        //   la 1ʳᵉ passe ci-dessous refaisait, à CHAQUE adresse inconnue, un remplacement par
+        //   expression régulière sur le domaine principal ET chaque alias des ~80 lecteurs :
+        //   0,4 s par adresse sur le fil de l'écran, 3 à 4 s quand l'appli est chargée (la
+        //   reconnaissance de « SeekStreaming » retardait de 3,9 s les Lecteurs Movix, donc le
+        //   cœur Vidara). Ces préfixes ne changent jamais : calculés UNE fois, dans le même ordre
+        //   (domaine principal puis alias, lecteur par lecteur) → même résultat, en quelques µs.
+        private val prefixesIdentification: List<Pair<String, String>> = run {
+            val out = ArrayList<Pair<String, String>>()
+            for (e in extractors) {
+                out += e.mainUrl.replace(URL_PREFIX_REGEX, "") to e.name
+                for (a in e.aliasUrls) out += a.lowercase().replace(URL_PREFIX_REGEX, "") to e.name
+            }
+            out
+        }
+        private val racinesIdentification: List<Pair<String, String>> =
+            extractors.map { it.mainUrl.replace(BASE_NAME_REGEX, "$3") to it.name }
 
-            for (extractor in extractors) {
-                if (compareUrl.startsWith(extractor.mainUrl.replace(urlRegex, ""))) {
-                    return extractor.name
-                }
-                for (aliasUrl in extractor.aliasUrls) {
-                    if (compareUrl.startsWith(aliasUrl.lowercase().replace(urlRegex, ""))) {
-                        return extractor.name
-                    }
-                }
+        private fun identifyServiceNameUncached(url: String): String? {
+            val compareUrl = url.lowercase().replace(URL_PREFIX_REGEX, "")
+
+            for ((prefixe, nom) in prefixesIdentification) {
+                if (compareUrl.startsWith(prefixe)) return nom
             }
             // 2026-06-13 (user "Frembed mapping richardquestionbuilding→voe") :
             //   2e passe via `rotatingDomain` regex pour capter automatiquement
             //   les domaines rotatifs (Voe utilise des noms aléatoires comme
             //   richardquestionbuilding.com, jessicayeahcatch.com…). Sans ce
             //   check, le picker affichait "Richardquestionbuilding" au lieu
-            //   de "VOE" (la lecture marchait déjà via rotatingDomain dans le
-            //   matching d'extractor — c'est juste l'AFFICHAGE qui était
-            //   cassé). Maintenant ce check résout TOUS les futurs domaines
-            //   rotatifs sans avoir à les hardcoder dans une map (= mieux que
-            //   l'approche upstream qui ajoute juste 1 mapping spécifique).
+            //   de "VOE".
             for (extractor in extractors) {
                 if (extractor.rotatingDomain.any { it.containsMatchIn(compareUrl) }) {
                     return extractor.name
                 }
             }
             // Fallback: match base domain name without TLD
-            for (extractor in extractors) {
-                val baseName = extractor.mainUrl.replace(BASE_NAME_REGEX, "$3")
-                if (compareUrl.startsWith(baseName)) {
-                    return extractor.name
-                }
+            for ((racine, nom) in racinesIdentification) {
+                if (compareUrl.startsWith(racine)) return nom
             }
             return null
         }

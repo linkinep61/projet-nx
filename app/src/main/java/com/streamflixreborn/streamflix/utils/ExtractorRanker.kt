@@ -547,11 +547,18 @@ object ExtractorRanker {
     }.getOrDefault(false)
 
     /** Construit la clé favori langue-aware depuis un nom de serveur. */
-    fun favKeyFor(serverName: String): String {
-        val parts = serverName.split(Regex("\\s[—–·-]\\s"), limit = 2)
+    // 2026-10-22 (user : « on voit si on peut continuer à optimiser ») — la clé ne dépend QUE
+    //   du nom, mais elle était recalculée (expressions régulières comprises) pour chaque serveur
+    //   à chaque lot, plusieurs fois par tri : 0,3 s pour 6 serveurs, plus d'1 s pour 35 sur la
+    //   télé. Mise en mémoire par nom : chaque nom n'est calculé qu'une fois.
+    private val cacheFavKey = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val RE_WRAPPER = Regex("\\s[—–·-]\\s")
+
+    fun favKeyFor(serverName: String): String = cacheFavKey.getOrPut(serverName) {
+        val parts = serverName.split(RE_WRAPPER, limit = 2)
         val wrapperPrefix = if (parts.size == 2) parts[0].trim().lowercase() + "·" else ""
         val lang = serverLangBucket(serverName)
-        return "$wrapperPrefix${libelleFavori(serverName)}:$lang"
+        "$wrapperPrefix${libelleFavori(serverName)}:$lang"
     }
 
     /**

@@ -80,6 +80,8 @@ class VidaraExtractor : Extractor() {
         //   coup, une fois des lectures tombees en « HOTE NON COUVERT ». Celui-ci est pose
         //   d'avance : un domaine qui n'apparait jamais n'est jamais teste, cout nul.
         "https://vidar.cc",
+        // 2026-10-22 : front vers lequel vidara.to/e/<id> redirige (vérifié dans Chrome).
+        "https://gaqghe.com",
     )
 
     /**
@@ -113,29 +115,48 @@ class VidaraExtractor : Extractor() {
             throw Exception("Vidara: filecode introuvable dans $link")
         }
 
-        val payload = JSONObject()
-            .put("filecode", filecode)
-            .put("device", "android")
-            .toString()
-            .toRequestBody("application/json".toMediaType())
-
-        val request = Request.Builder()
-            .url("$origin/api/stream")
-            .post(payload)
-            .header("User-Agent", userAgent)
-            .header("Referer", "$origin/")
-            .header("Origin", origin)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Accept-Language", "fr-FR,fr;q=0.9")
-            .header("X-Requested-With", "XMLHttpRequest")
-            .build()
-
-        val body = sharedClient.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                throw Exception("Vidara: /api/stream HTTP ${resp.code}")
+        fun appelStream(front: String): Pair<Int, String> {
+            val payload = JSONObject()
+                .put("filecode", filecode)
+                .put("device", "android")
+                .toString()
+                .toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("$front/api/stream")
+                .post(payload)
+                .header("User-Agent", userAgent)
+                .header("Referer", "$front/")
+                .header("Origin", front)
+                .header("Accept", "application/json, text/plain, */*")
+                .header("Accept-Language", "fr-FR,fr;q=0.9")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .build()
+            return sharedClient.newCall(request).execute().use { resp ->
+                resp.code to (if (resp.isSuccessful) resp.body?.string().orEmpty() else "")
             }
-            resp.body?.string().orEmpty()
         }
+
+        var (code, body) = appelStream(origin)
+        // 2026-10-22 (user : « on est censé avoir ce serveur là aussi mais il fonctionne pas »,
+        //   Lecteur Movix 4 = vidara.to) — vidara.to/e/<id> REDIRIGE désormais vers un autre
+        //   front (vérifié dans Chrome : gaqghe.com/e/<id>, dont le lecteur appelle
+        //   gaqghe.com/api/stream). L'API de vidara.to répond alors 404 ou 504. On suit la
+        //   redirection de la page /e/ et on rappelle /api/stream sur le front d'arrivée.
+        if (code !in 200..299) {
+            val front = runCatching {
+                sharedClient.newCall(
+                    Request.Builder().url(link).header("User-Agent", userAgent).build()
+                ).execute().use { r ->
+                    Regex("^(https?://[^/]+)").find(r.request.url.toString())?.groupValues?.get(1)
+                }
+            }.getOrNull()
+            if (front != null && !front.equals(origin, ignoreCase = true)) {
+                android.util.Log.d("VidaraExtractor", "/api/stream HTTP $code sur $origin → front redirigé $front")
+                val r2 = appelStream(front)
+                code = r2.first; body = r2.second
+            }
+        }
+        if (code !in 200..299) throw Exception("Vidara: /api/stream HTTP $code")
         if (body.isBlank()) throw Exception("Vidara: réponse /api/stream vide")
 
         val json = runCatching { JSONObject(body) }.getOrNull()
@@ -180,8 +201,40 @@ class VidaraExtractor : Extractor() {
 
         Log.d("VidaraExtractor", "resolved $filecode → m3u8 (${streamUrl.length} chars)")
 
+        // 2026-10-22 (user : « pourquoi les sous-titres ne sont pas directs avec Vidara ») : Vidara
+        //   extrait à l'envoi les pistes de sous-titres du fichier et les sert en .vtt dans
+        //   `subtitles` [{language, file_path, status}] — on les ignorait. Ordre : français complet,
+        //   français « forcé », puis le reste. Aucun activé ici : c'est la LANGUE du fichier qui
+        //   décide (PlayerViewModel.reglerSousTitresSelonLangue). `default_sub_lang` n'aide pas :
+        //   c'est un réglage du COMPTE (« French » sur tous les fichiers, VF compris).
+        //   Le titre sert de nom de fichier : « … VOSTFR » → sous-titres français activés.
+        val sousTitres = json.optJSONArray("subtitles")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                if (o.optInt("status", 1) != 1) return@mapNotNull null
+                val url = o.optString("file_path").takeIf { it.startsWith("http") } ?: return@mapNotNull null
+                val langue = o.optString("language").ifBlank { "Inconnu" }
+                val label = when {
+                    langue.startsWith("French", true) && langue.contains("FORCED", true) -> "Français (forcé)"
+                    langue.startsWith("French", true) -> "Français"
+                    langue.startsWith("English", true) -> langue.replace("English", "Anglais")
+                    else -> langue
+                }
+                Video.Subtitle(label = label, file = url)
+            }
+        }.orEmpty().sortedBy {
+            when {
+                it.label == "Français" -> 0
+                it.label.startsWith("Français") -> 1
+                else -> 2
+            }
+        }
+        if (sousTitres.isNotEmpty()) Log.d("VidaraExtractor", "$filecode : ${sousTitres.size} sous-titre(s) — ${sousTitres.joinToString { it.label }}")
+
         Video(
             source = streamUrl,
+            subtitles = sousTitres,
+            fileName = json.optString("title").takeIf { it.isNotBlank() },
             type = MimeTypes.APPLICATION_M3U8,
             headers = mapOf(
                 "Referer" to "$origin/",

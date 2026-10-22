@@ -122,7 +122,7 @@ class VidHideExtractor: Extractor() {
         }
         Log.d(TAG, "Final URL: $completeUrl")
 
-        return Video(source = completeUrl)
+        return Video(source = completeUrl, subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(unPacked, link))
     }
 
     private interface Service {

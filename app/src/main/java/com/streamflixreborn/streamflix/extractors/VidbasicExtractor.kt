@@ -42,6 +42,43 @@ import java.util.concurrent.TimeUnit
  */
 class VidbasicExtractor : Extractor() {
 
+    private fun dechiffrer(b64: String): String? = runCatching {
+        val c = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
+        c.init(
+            javax.crypto.Cipher.DECRYPT_MODE,
+            javax.crypto.spec.SecretKeySpec(CLE.toByteArray(Charsets.UTF_8), "AES"),
+            javax.crypto.spec.IvParameterSpec(IV.toByteArray(Charsets.UTF_8)),
+        )
+        String(c.doFinal(android.util.Base64.decode(b64, android.util.Base64.DEFAULT)), Charsets.UTF_8).trim()
+    }.getOrNull()
+
+    private suspend fun lecteurInterne(html: String, link: String, origine: String, client: OkHttpClient): Video? {
+        val chemin = Regex("""data-video=["'](/3rdplayer\.html\?[^"']+)["']""").find(html)
+            ?.groupValues?.get(1)?.replace("&amp;", "&") ?: return null
+        val url = origine + chemin
+        val page = withContext(Dispatchers.IO) {
+            client.newCall(
+                Request.Builder().url(url).header("User-Agent", UA).header("Referer", link).build()
+            ).execute().use { r -> if (r.isSuccessful) r.body?.string().orEmpty() else "" }
+        }
+        val chiffre = Regex("""data-name=["']crypto["'][^>]*data-value=["']([^"']+)["']""").find(page)?.groupValues?.get(1)
+            ?: Regex("""data-value=["']([^"']+)["'][^>]*data-name=["']crypto["']""").find(page)?.groupValues?.get(1)
+            ?: run { Log.w(TAG, "lecteur interne : données chiffrées absentes (${page.length} o)"); return null }
+        val flux = dechiffrer(chiffre)?.takeIf { it.startsWith("http") }
+            ?: run { Log.w(TAG, "lecteur interne : déchiffrement KO (clé changée ?)"); return null }
+        val sousTitres = Regex("""[?&]sub=([^&]+)""").find(chemin)?.groupValues?.get(1)
+            ?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+            ?.let { dechiffrer(it) }?.takeIf { it.startsWith("http") }
+            ?.let { listOf(Video.Subtitle(label = "Anglais", file = it)) }.orEmpty()
+        Log.d(TAG, "lecteur interne OK (${if (flux.contains(".m3u8")) "hls" else "mp4"}), sous-titres=${sousTitres.size}")
+        return Video(
+            source = flux,
+            subtitles = sousTitres,
+            type = if (flux.contains(".m3u8")) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null,
+            headers = mapOf("Referer" to "$origine/", "Origin" to origine, "User-Agent" to UA),
+        )
+    }
+
     override val name = "Vidbasic"
     override val mainUrl = "https://vidbasic.top"
 
@@ -59,6 +96,10 @@ class VidbasicExtractor : Extractor() {
 
         /** Du plus fiable au moins fiable, mesuré en direct. Le reste passe après. */
         private val PRIORITE = listOf("vidhide", "streamwish", "mixdrop", "upnshare")
+
+        /** Clé / IV du lecteur interne (écrits en clair dans 3rdplayer.html, relevés le 2026-10-22). */
+        private const val CLE = "94588293375053432799222445521289"
+        private const val IV = "5259228356829423"
     }
 
     override suspend fun extract(link: String): Video {
@@ -97,7 +138,14 @@ class VidbasicExtractor : Extractor() {
             .toList()
 
         if (miroirs.isEmpty()) {
-            throw Exception("Vidbasic: aucun miroir dans la page (${html.length} o)")
+            // 2026-10-22 (user : « Standard Server (DC) » rouge) : Vidbasic a retiré ses miroirs
+            //   externes, il ne reste que son lecteur interne `/3rdplayer.html?key=…&id=…&sub=…`.
+            //   Relevé dans le navigateur : la page porte le flux CHIFFRÉ dans
+            //   `<script data-name="crypto" data-value="…">`, déchiffré par CryptoJS en AES-CBC
+            //   (clé et IV écrits en clair dans le script, PKCS7). Le sous-titre est le paramètre
+            //   `sub`, chiffré pareil. On refait le déchiffrement ici — aucune WebView.
+            return lecteurInterne(html, link, origine, client)
+                ?: throw Exception("Vidbasic: aucun miroir dans la page (${html.length} o)")
         }
         Log.d(TAG, "miroirs=${miroirs.map { it.first }}")
 
@@ -117,6 +165,7 @@ class VidbasicExtractor : Extractor() {
             }
         }
 
+        lecteurInterne(html, link, origine, client)?.let { return it }
         throw Exception(
             "Vidbasic: les ${ordonnes.size} miroirs ont échoué " +
                 "(${ordonnes.joinToString { it.first }}) — dernier: ${derniereErreur?.message}"

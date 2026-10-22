@@ -31,6 +31,14 @@ import androidx.media3.exoplayer.text.TextRenderer
 @UnstableApi
 class SousTitresExternesRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
 
+    // 2026-10-22 : AudioSink de Media3 + recopie du son pour EcouteVoix (recalage sur les voix).
+    override fun buildAudioSink(
+        context: Context,
+        enableFloatOutput: Boolean,
+        enableAudioTrackPlaybackParams: Boolean,
+    ): androidx.media3.exoplayer.audio.AudioSink? =
+        EcouteVoix.audioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
+
     override fun buildTextRenderers(
         context: Context,
         output: TextOutput,
@@ -46,8 +54,31 @@ class SousTitresExternesRenderersFactory(context: Context) : DefaultRenderersFac
 
 /** Partagé avec [Av1RenderersFactory] : même correctif, deux hiérarchies de fabriques. */
 @UnstableApi
-internal fun activerDecodageHeriteSurTextRenderers(out: ArrayList<Renderer>, depuis: Int) {
+fun activerDecodageHeriteSurTextRenderers(out: ArrayList<Renderer>, depuis: Int) {
     for (i in depuis until out.size) {
         (out[i] as? TextRenderer)?.experimentalSetLegacyDecodingEnabled(true)
     }
+}
+
+/**
+ * 2026-10-22 (user : « si je vais dans sous-titres, j'ai que télécharger… ce n'est pas les
+ * sous-titres intégrés », Vidara VOSTFR sur téléphone) : `HlsMediaSource` / `DashMediaSource`
+ * construits à la main IGNORENT `MediaItem.subtitleConfigurations`. Le TV le savait déjà
+ * (fusion faite dans PlayerTvFragment) ; le lecteur mobile, non → les .vtt Vidara (et toute
+ * piste externe greffée sur un HLS : VOE, NetMirror…) n'arrivaient jamais dans le menu.
+ * On fusionne donc la source avec une source par sous-titre. Le renderer doit accepter le
+ * décodage hérité (cf. [activerDecodageHeriteSurTextRenderers]).
+ */
+@UnstableApi
+fun avecSousTitresExternes(
+    source: androidx.media3.exoplayer.source.MediaSource,
+    mediaItem: androidx.media3.common.MediaItem,
+    fabrique: androidx.media3.datasource.DataSource.Factory,
+): androidx.media3.exoplayer.source.MediaSource {
+    val confs = mediaItem.localConfiguration?.subtitleConfigurations.orEmpty()
+    if (confs.isEmpty()) return source
+    val f = androidx.media3.exoplayer.source.SingleSampleMediaSource.Factory(fabrique)
+    val pistes = confs.map { f.createMediaSource(it, androidx.media3.common.C.TIME_UNSET) }
+    android.util.Log.d("PlayerDebug", "sous-titres externes fusionnés : ${pistes.size}")
+    return androidx.media3.exoplayer.source.MergingMediaSource(source, *pistes.toTypedArray())
 }

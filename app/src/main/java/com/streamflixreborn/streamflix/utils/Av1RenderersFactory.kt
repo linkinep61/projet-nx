@@ -22,6 +22,14 @@ import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 @UnstableApi
 class Av1RenderersFactory(context: Context) : NextRenderersFactory(context) {
 
+    // 2026-10-22 : AudioSink de Media3 + recopie du son pour EcouteVoix (recalage sur les voix).
+    override fun buildAudioSink(
+        context: Context,
+        enableFloatOutput: Boolean,
+        enableAudioTrackPlaybackParams: Boolean,
+    ): androidx.media3.exoplayer.audio.AudioSink? =
+        EcouteVoix.audioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
+
     /**
      * 2026-08-08 : autorise le décodage « hérité » des sous-titres EXTERNES (.srt greffés sur
      * un flux HLS, cf. NetMirror VOSTFR). Détail du pourquoi dans

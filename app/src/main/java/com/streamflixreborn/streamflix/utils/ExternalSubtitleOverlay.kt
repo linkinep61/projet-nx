@@ -88,7 +88,10 @@ class ExternalSubtitleOverlay(
                 Log.w(TAG, "VTT fetch error: ${t.message}")
                 null
             } ?: return@launch
-            cues = parseVtt(vtt)
+            // 2026-10-22 : un .srt en ligne (virgules dans les heures) est aussi accepté.
+            cues = withContext(Dispatchers.Default) {
+                parseVtt((ConversionAss.versVtt(vtt) ?: vtt).lines().joinToString("\n") { l -> if (l.contains("-->")) l.replace(',', '.') else l })
+            }
             Log.d(TAG, "Parsed ${cues.size} cues from $vttUrl")
             startTicking()
         }
@@ -124,22 +127,43 @@ class ExternalSubtitleOverlay(
                 null
             } ?: return@launch
             // SRT → VTT : « 00:01:02,345 --> 00:01:04,000 » devient « 00:01:02.345 --> 00:01:04.000 ».
-            val normalise = texte.lines().joinToString("\n") { l ->
-                if (l.contains("-->")) l.replace(',', '.') else l
+            //   2026-10-22 : un .ass/.ssa est d'abord converti (cf. assVersVtt).
+            // 2026-10-22 (mesuré sur la télé : « Slow dispatch 3,7 à 4,4 s » sur le fil de l'écran au
+            //   chargement d'un sous-titre) — conversion et lecture des répliques hors du fil de l'écran.
+            cues = withContext(Dispatchers.Default) {
+                parseVtt((ConversionAss.versVtt(texte) ?: texte).lines().joinToString("\n") { l ->
+                    if (l.contains("-->")) l.replace(',', '.') else l
+                })
             }
-            cues = parseVtt(normalise)
             Log.d(TAG, "Parsed ${cues.size} cues from local $path")
             startTicking()
+            // 2026-10-22 : sous-titre ajouté (téléchargé…) sans sous-titre serveur pour le recaler
+            //   → calage automatique à l'écoute des voix (s'arrête une fois calé).
+            try {
+                val refs = withContext(Dispatchers.IO) { RecalageAuto.references(SyncSousTitres.videoCourante, sauf = path) }
+                if (refs.isEmpty()) {
+                    EcouteVoix.lancer(context, player, repliques(), path) { msg ->
+                        android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (t: Throwable) { Log.w(TAG, "écoute des voix : ${t.message}") }
         }
     }
     private var lastLocalPath: String? = null
 
+    /** Heures des répliques chargées (recalage automatique). */
+    fun repliques(): List<RecalageAuto.Replique> = cues.map { RecalageAuto.Replique(it.startMs, it.endMs) }
+
     fun stop() {
+        EcouteVoix.arreter()
         tickJob?.cancel(); tickJob = null
         fetchJob?.cancel(); fetchJob = null
         cues = emptyList()
         try { subtitleView.setCues(emptyList()) } catch (_: Throwable) {}
     }
+
+    /** Fichier / adresse du sous-titre affiché (recalage automatique), null si arrêté. */
+    fun sourceCourante(): String? = if (isRunning()) (lastLocalPath ?: lastVttUrl) else null
 
     /** True si l'overlay est en cours d'affichage des cues. */
     fun isRunning(): Boolean = tickJob?.isActive == true
@@ -161,6 +185,16 @@ class ExternalSubtitleOverlay(
 
     /** Réapplique les prefs subtitle (taille, couleur/style, marge). Appeler
      *  si les prefs changent en cours de lecture. */
+    /** 2026-10-22 : hauteur ajoutée sous les sous-titres pendant que la barre de contrôle est affichée. */
+    @Volatile private var leveePx = 0
+
+    /** 2026-10-22 — remonte les sous-titres au-dessus de la barre de contrôle (0 = en bas). */
+    fun lever(px: Int) {
+        if (leveePx == px) return
+        leveePx = px
+        applyPrefs()
+    }
+
     fun applyPrefs() {
         try {
             subtitleView.setFractionalTextSize(
@@ -169,7 +203,7 @@ class ExternalSubtitleOverlay(
             subtitleView.setStyle(UserPreferences.captionStyle)
             (subtitleView.layoutParams as? FrameLayout.LayoutParams)?.apply {
                 bottomMargin = UserPreferences.captionMargin
-                    .let { dp -> (context.resources.displayMetrics.density * dp).toInt() }
+                    .let { dp -> (context.resources.displayMetrics.density * dp).toInt() } + leveePx
             }?.let { subtitleView.layoutParams = it }
         } catch (_: Throwable) {}
     }
@@ -184,8 +218,10 @@ class ExternalSubtitleOverlay(
                 //   couleur/marge dans le menu Style s'appliquent live.
                 tickCount++
                 if (tickCount % 10 == 1) applyPrefs()
-                val pos = try { player.currentPosition } catch (_: Throwable) { 0L }
-                val active = cues.filter { it.startMs <= pos && pos <= it.endMs }
+                // 2026-10-22 : décalage / dérive réglés dans « Synchroniser les sous-titres ».
+                val pos = SyncSousTitres.tempsSousTitre(try { player.currentPosition } catch (_: Throwable) { 0L })
+                val active = if (SyncSousTitres.enAttenteCalage) emptyList()
+                    else cues.filter { it.startMs <= pos && pos <= it.endMs }
                 // 2026-06-09 (user "parfois plusieurs écritures s'empilent") :
                 //   plusieurs cues simultanées sont COMBINÉES en un seul bloc
                 //   avec retours ligne, au lieu d'envoyer plusieurs Cue à
@@ -216,6 +252,10 @@ class ExternalSubtitleOverlay(
     }
 
     private fun createSubtitleView(): SubtitleView = SubtitleView(context).apply {
+        // 2026-10-22 (user : « la marge des sous-titres est à 0 mais sur la télé ils ne sont pas tout à
+        //   fait en bas ») — SubtitleView garde par défaut 8 % de la hauteur sous le texte, EN PLUS de la
+        //   marge réglée. On le ramène à 0 : la marge choisie est désormais la seule distance au bas.
+        setBottomPaddingFraction(0f)
         // L'utilisateur règle taille / couleur / marge via Paramètres
         //   → Sous-titres. Ces valeurs sont appliquées via applyPrefs() au
         //   start (ne pas reproduire ici).

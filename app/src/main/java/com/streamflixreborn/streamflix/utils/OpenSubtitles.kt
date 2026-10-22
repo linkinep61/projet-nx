@@ -112,13 +112,25 @@ object OpenSubtitles {
             ?: throw Exception("No download link available (fileId=${subtitle.fileId})")
 
         android.util.Log.d("OpenSubtitles", "download() — realUrl=$realUrl")
-        val ext = File(realUrl.substringBefore("?")).extension.ifBlank { "srt" }
         val baseName = File(subtitle.subFileName.ifBlank { "subtitle" }).nameWithoutExtension
-        val file = File.createTempFile("$baseName-", ".$ext")
-
-        URL(realUrl).openStream().use { input ->
-            FileOutputStream(file).use { output -> input.copyTo(output) }
+        val octets = URL(realUrl).openStream().use { it.readBytes() }
+        // 2026-10-22 : l'API REST libre sert les fichiers en .gz (dl.opensubtitles.org) -> décompression.
+        val estGzip = octets.size > 2 && octets[0] == 0x1f.toByte() && octets[1] == 0x8b.toByte()
+        val contenu = if (estGzip) java.util.zip.GZIPInputStream(octets.inputStream()).readBytes() else octets
+        val ext = if (estGzip) subtitle.subFormat?.lowercase()?.takeIf { it in setOf("srt", "vtt", "ssa", "ass") } ?: "srt"
+            else File(realUrl.substringBefore("?")).extension.ifBlank { "srt" }
+        // 2026-10-22 : piste de commentaires du DVD → refusée (pas les dialogues du film).
+        val apercu = String(contenu, runCatching { charset(subtitle.subEncoding ?: "UTF-8") }.getOrDefault(Charsets.UTF_8))
+        if (OpenSubtitlesLibre.texteCommentaires(apercu)) {
+            OpenSubtitlesLibre.rejetes.add(subtitle.subDownloadLink)
+            throw Exception("Piste de commentaires du DVD (pas les dialogues du film) : choisis-en un autre")
         }
+        val file = File.createTempFile("$baseName-", ".$ext")
+        // Les .srt de l'API libre sont souvent en Windows-1252 : on réécrit en UTF-8 pour le lecteur.
+        if (estGzip) {
+            val jeu = runCatching { charset(subtitle.subEncoding ?: "UTF-8") }.getOrDefault(Charsets.UTF_8)
+            file.writeText(String(contenu, jeu))
+        } else FileOutputStream(file).use { it.write(contenu) }
 
         file.toUri()
     }
@@ -156,6 +168,13 @@ object OpenSubtitles {
         episode: Int? = null,
         subLanguageId: String? = null,
     ): List<Subtitle> {
+        // 2026-10-22 (user : « j'en mettrais une de base, et si elle ne marche pas les gens mettent
+        //   leur clé ») : D'ABORD l'API REST libre (rest.opensubtitles.org — sans clé ni quota,
+        //   celle du lecteur Vidsrc ; vérifié : 22 FR pour Fight Club, 12 téléchargements d'affilée
+        //   sans refus). L'API officielle (clés embarquées ou clé perso) ne sert plus qu'en SECOURS,
+        //   si l'API libre ne répond pas.
+        rechercheLibre(imdbId, query, season, episode, subLanguageId)?.let { return it }
+
         // 2026-10-16 : plus de liste vide silencieuse — le lecteur affiche la cause.
         if (keysPool.isEmpty()) throw AucuneCleException()
 
@@ -197,6 +216,51 @@ object OpenSubtitles {
         }
         // Toutes les clés essayées ont répondu 406/429 → quota du jour épuisé.
         throw QuotaDepasseException()
+    }
+
+    private val gson = com.google.gson.Gson()
+
+    /** Recherche via l'API REST libre. null = l'API n'a pas répondu (-> API officielle). */
+    private suspend fun rechercheLibre(
+        imdbId: String?, query: String?, season: Int?, episode: Int?, subLanguageId: String?,
+    ): List<Subtitle>? = withContext(Dispatchers.IO) {
+        val lang = when (subLanguageId?.lowercase()) {
+            "fr", "fra" -> "fre"; "en" -> "eng"; "es" -> "spa"; "de", "deu" -> "ger"; "it" -> "ita"
+            null, "" -> "all"; else -> subLanguageId.lowercase()
+        }
+        val imdb = imdbId?.removePrefix("tt")?.trimStart('0')?.takeIf { it.isNotBlank() && it.all(Char::isDigit) }
+        val chemin = when {
+            imdb != null && season != null && episode != null -> "episode-$episode/imdbid-$imdb/season-$season"
+            imdb != null -> "imdbid-$imdb"
+            !query.isNullOrBlank() -> buildString {
+                if (season != null && episode != null) append("episode-$episode/")
+                append("query-").append(java.net.URLEncoder.encode(query.lowercase(), "UTF-8").replace("+", "%20"))
+                if (season != null && episode != null) append("/season-$season")
+            }
+            else -> return@withContext null
+        }
+        try {
+            val client = OkHttpClient.Builder().callTimeout(15, java.util.concurrent.TimeUnit.SECONDS).build()
+            client.newCall(
+                okhttp3.Request.Builder().url("https://rest.opensubtitles.org/search/$chemin/sublanguageid-$lang")
+                    .header("X-User-Agent", USER_AGENT).build()
+            ).execute().use { r ->
+                if (!r.isSuccessful) {
+                    android.util.Log.w("OpenSubtitles", "API libre HTTP ${r.code} -> API officielle")
+                    return@withContext null
+                }
+                val liste = gson.fromJson(r.body?.string().orEmpty(), Array<Subtitle>::class.java)?.toList().orEmpty()
+                android.util.Log.d("OpenSubtitles", "API libre $chemin [$lang] -> ${liste.size} résultat(s)")
+                // 2026-10-22 : pistes de commentaires du DVD écartées (cf. OpenSubtitlesLibre).
+                liste.filter {
+                    it.subDownloadLink.isNotBlank() && it.subDownloadLink !in OpenSubtitlesLibre.rejetes &&
+                        !OpenSubtitlesLibre.nomCommentaires(it.subFileName)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("OpenSubtitles", "API libre KO (${e.message}) -> API officielle")
+            null
+        }
     }
 
     private interface Service {

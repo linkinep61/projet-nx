@@ -2045,6 +2045,19 @@ class PlayerMobileFragment : Fragment() {
         }
 
         // 2026-06-30 : rafraîchir la qualité affichée quand le probe background termine
+        // 2026-10-22 : traduction anglaise → française terminée pendant la lecture : on l'affiche
+        //   par l'overlay (sans recharger la vidéo) et on coupe la piste anglaise du lecteur.
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewModel.traductionPrete.collect { (idServeur, fichier) ->
+                if (currentServer?.id != idServeur || _binding == null) return@collect
+                try {
+                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build()
+                } catch (_: Exception) {}
+                Log.d("PlayerMobileFragment", "traduction prête en cours de lecture → affichée")
+                appliquerSousTitreTelecharge(android.net.Uri.fromFile(fichier), "Français (traduit)")
+            }
+        }
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.qualityUpdated.collect {
                 val knownServers = servers
@@ -2085,6 +2098,7 @@ class PlayerMobileFragment : Fragment() {
                         // 2026-10-16 : via l'overlay isolé (plus de setMediaItem → plus de
                         //   re-préparation → plus de 403 « serveur rouge » sur les URL signées).
                         val fileName = state.uri.getFileName(requireContext()) ?: state.uri.toString()
+                        com.streamflixreborn.streamflix.utils.SyncSousTitres.surCalageEchoue = { viewModel.sousTitreSuivant() }
                         appliquerSousTitreTelecharge(state.uri, state.subtitle.subFileName ?: fileName)
                         UserPreferences.subtitleName = (state.subtitle.languageName ?: fileName).substringBefore(" ")
                     }
@@ -2382,9 +2396,25 @@ class PlayerMobileFragment : Fragment() {
             //   la barre") : padding bas user + 32dp pour dégager la zone
             //   du progress bar + time labels (qui sont collés à 0dp en bas).
             //   Avant : sub overlappait avec "00:07 · 22:52".
-            val extraBottom = (32 * context.resources.displayMetrics.density).toInt()
-            setPadding(0, 0, 0, UserPreferences.captionMargin.dp(context) + extraBottom)
+            // 2026-10-22 (user : « la marge des sous-titres, ils devraient être en bas
+            //   normalement ») : les +32 dp étaient appliqués EN PERMANENCE à l'ouverture, mais plus
+            //   après un changement de marge dans le menu → hauteur incohérente. Désormais : la marge
+            //   choisie, et les +32 dp UNIQUEMENT pendant que la barre de contrôle est affichée.
+            // 2026-10-22 (user : « la marge des sous-titres est à 0 mais sur la télé ils ne sont pas tout à
+            //   fait en bas ») — SubtitleView garde par défaut 8 % de la hauteur sous le texte, EN PLUS de la
+            //   marge réglée. On le ramène à 0 : la marge choisie est désormais la seule distance au bas.
+            setBottomPaddingFraction(0f)
+            setPadding(0, 0, 0, UserPreferences.captionMargin.dp(context))
         }
+        binding.pvPlayer.setControllerVisibilityListener(
+            androidx.media3.ui.PlayerView.ControllerVisibilityListener { visibilite ->
+                val sv = _binding?.pvPlayer?.subtitleView ?: return@ControllerVisibilityListener
+                val extra = if (visibilite == View.VISIBLE) (32 * sv.context.resources.displayMetrics.density).toInt() else 0
+                sv.setPadding(0, 0, 0, UserPreferences.captionMargin.dp(sv.context) + extra)
+                // 2026-10-22 : le calque des sous-titres téléchargés suit aussi la barre.
+                com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.globalInstance?.lever(extra)
+            }
+        )
         setupEpisodeNavigationButtons()
 
         // 2026-08-02 (user : « le bouton quitter est trop radical, des gens appuient sans faire
@@ -3052,6 +3082,114 @@ class PlayerMobileFragment : Fragment() {
     //   externe » reste en dernier comme décidé le 2026-06-29.
     //   ⚠ Les actions sont INCHANGÉES, seule la présentation bouge.
     // ──────────────────────────────────────────────────────────────────
+    // 2026-10-22 (user : « le menu pour recaler les sous-titres doit apparaître dans les trois
+    //   petits points, juste en dessous de Sous-titres, idem TV, et seulement si on a activé
+    //   les sous-titres ») — cf. SyncSousTitres / PanneauSyncSousTitres.
+    // 2026-10-22 (user : « mettre le recalage automatiquement, pas de menu ni rien ») : tout
+    //   sous-titre qui ne vient PAS du serveur (OpenSubtitles) est vérifié tout seul — recalé sur
+    //   le sous-titre du serveur s'il y en a un (déjà fait à l'extraction), sinon sur les voix.
+    private var dernierCalageAuto: String? = null
+    private var joueurCalage: Player? = null
+    private val ecouteurCalageAuto = object : Player.Listener {
+        override fun onTracksChanged(tracks: androidx.media3.common.Tracks) { calageAutoSiBesoin(tracks) }
+    }
+
+    // 2026-10-22 (user : « un bouton dans les sous-titres qui recale ou relance le recalage »).
+    private fun recalerMaintenant() {
+        val ctx = context ?: return
+        val outils = com.streamflixreborn.streamflix.utils.SyncSousTitres
+        outils.masquerProchainCalage = false
+        if (com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.globalInstance?.isRunning() != true &&
+            !basculerSousTitresSurCalque()) {
+            Toast.makeText(ctx, "Cette piste de sous-titres ne peut pas être recalée", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(ctx, "Recalage des sous-titres en cours…", Toast.LENGTH_SHORT).show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val calque = com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.globalInstance ?: return@launch
+            var rep = calque.repliques()
+            var n = 0
+            while (rep.size < 30 && n++ < 10) { kotlinx.coroutines.delay(500); rep = calque.repliques() }
+            val source = calque.sourceCourante() ?: return@launch
+            if (com.streamflixreborn.streamflix.utils.RecalageAuto.references(currentVideo, sauf = source).isNotEmpty()) {
+                val msg = com.streamflixreborn.streamflix.utils.RecalageAuto.reglerSurReference(source, currentVideo)
+                if (_binding != null) Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+            } else {
+                outils.reinitialiser()
+                outils.masquerProchainCalage = false
+                com.streamflixreborn.streamflix.utils.EcouteVoix.lancer(ctx, player, rep, source) { msg ->
+                    if (_binding != null) Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun installerCalageAuto() {
+        com.streamflixreborn.streamflix.utils.SyncSousTitres.demandeRecalage = { recalerMaintenant() }
+        try {
+            if (joueurCalage !== player) {
+                joueurCalage?.removeListener(ecouteurCalageAuto)
+                player.addListener(ecouteurCalageAuto)
+                joueurCalage = player
+            }
+            // Les pistes peuvent déjà être choisies avant l'écouteur : on vérifie tout de suite.
+            calageAutoSiBesoin(player.currentTracks)
+        } catch (_: Throwable) {}
+    }
+
+    private fun calageAutoSiBesoin(tracks: androidx.media3.common.Tracks) {
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) return
+        if (com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.globalInstance?.isRunning() == true) return
+        val g = tracks.groups.firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.isSelected } ?: return
+        val label = (0 until g.length).firstOrNull { g.isTrackSelected(it) }?.let { g.getTrackFormat(it).label } ?: return
+        if (!label.contains("OpenSubtitles", true)) return
+        val st = currentVideo?.subtitles?.firstOrNull { it.label == label } ?: return
+        if (com.streamflixreborn.streamflix.utils.RecalageAuto.references(currentVideo, sauf = st.file).isNotEmpty()) return
+        if (dernierCalageAuto == st.file) return
+        dernierCalageAuto = st.file
+        Log.d("SyncSousTitres", "« $label » sans sous-titre serveur → calage automatique sur les voix")
+        binding.root.post {
+            if (_binding != null) {
+                com.streamflixreborn.streamflix.utils.SyncSousTitres.masquerProchainCalage = false
+                basculerSousTitresSurCalque()
+            }
+        }
+    }
+
+    private fun sousTitresActifs(): Boolean {
+        if (com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.globalInstance?.isRunning() == true) return true
+        return try {
+            player.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
+        } catch (_: Throwable) { false }
+    }
+
+    private fun ouvrirSyncSousTitres() {
+        com.streamflixreborn.streamflix.utils.PanneauSyncSousTitres.afficher(requireContext(), player, currentVideo) {
+            basculerSousTitresSurCalque()
+        }
+    }
+
+    /** Le décalage ne s'applique que dans le calque : une piste du lecteur (fichier externe
+     *  connu) y est donc basculée, à l'identique, avant de régler. */
+    private fun basculerSousTitresSurCalque(): Boolean {
+        if (com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.globalInstance?.isRunning() == true) return true
+        val groupe = player.currentTracks.groups.firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.isSelected } ?: return false
+        val format = (0 until groupe.length).firstOrNull { groupe.isTrackSelected(it) }?.let { groupe.getTrackFormat(it) } ?: return false
+        val st = currentVideo?.subtitles?.firstOrNull { it.label == format.label } ?: run {
+            Log.d("SyncSousTitres", "piste « ${format.label} » intégrée au flux → pas de fichier à décaler")
+            return false
+        }
+        val calque = overlaySousTitresTelecharges ?: com.streamflixreborn.streamflix.utils
+            .ExternalSubtitleOverlay(requireContext(), binding.pvPlayer, player).also { overlaySousTitresTelecharges = it }
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+        val fichier = st.file.substringBefore('#')
+        if (fichier.startsWith("http")) calque.start(fichier, currentVideo?.headers?.get("Referer") ?: "https://vidzy.live/")
+        else calque.startLocal(fichier)
+        Log.d("SyncSousTitres", "« ${st.label} » basculé sur le calque pour le réglage")
+        return true
+    }
+
     private fun showPlayerOverflowMenu(anchor: android.view.View) {
         val ctx = requireContext()
         val dp = { v: Int -> (v * ctx.resources.displayMetrics.density).toInt() }
@@ -3059,7 +3197,7 @@ class PlayerMobileFragment : Fragment() {
         val enregistreEnCours = com.streamflixreborn.streamflix.download.LiveRecorder.isRecording
 
         // (icône, libellé, action) — l'ordre de cette liste EST l'ordre affiché.
-        val entrees = listOf<Triple<Int, String, () -> Unit>>(
+        val entrees = listOfNotNull<Triple<Int, String, () -> Unit>>(
             Triple(R.drawable.exo_styled_controls_settings, "Paramètres") {
                 binding.settings.show()
             },
@@ -4918,6 +5056,18 @@ class PlayerMobileFragment : Fragment() {
      * « Désactivé » dans le menu Sous-titres arrête l'overlay (stopGlobal), comme pour Vidzy.
      */
     private fun appliquerSousTitreTelecharge(uri: android.net.Uri, nom: String) {
+        // 2026-10-22 : recalé d'abord sur le sous-titre du serveur s'il en fournit un (RecalageAuto).
+        viewLifecycleOwner.lifecycleScope.launch {
+            val f = uri.path?.let { java.io.File(it) }
+            val u = if (f != null && f.exists())
+                android.net.Uri.fromFile(com.streamflixreborn.streamflix.utils.RecalageAuto.recaler(f, currentVideo))
+            else uri
+            if (_binding == null) return@launch
+            appliquerSousTitreTelechargeDirect(u, nom)
+        }
+    }
+
+    private fun appliquerSousTitreTelechargeDirect(uri: android.net.Uri, nom: String) {
         try {
             if (overlaySousTitresTelecharges == null) {
                 overlaySousTitresTelecharges = com.streamflixreborn.streamflix.utils
@@ -4961,6 +5111,13 @@ class PlayerMobileFragment : Fragment() {
 
     private fun displayVideo(video: Video, server: Video.Server) {
         currentVideo = video
+        com.streamflixreborn.streamflix.utils.SyncSousTitres.reinitialiser()
+        com.streamflixreborn.streamflix.utils.SyncSousTitres.videoCourante = video
+        com.streamflixreborn.streamflix.utils.EcouteVoix.oublier()
+        dernierCalageAuto = null
+        installerCalageAuto()
+        binding.root.postDelayed({ if (_binding != null) installerCalageAuto() }, 1500)
+        binding.root.postDelayed({ if (_binding != null) installerCalageAuto() }, 4000)
         sansSousTitresSignale = false
 
         // 2026-07-11 : si le mode « toujours lecteur externe » est actif,
@@ -5182,13 +5339,17 @@ class PlayerMobileFragment : Fragment() {
             .setUri(video.source.toUri())
             .setMimeType(video.type)
             .setSubtitleConfigurations(video.subtitles.mapIndexed { idx, subtitle ->
-                val isDefault = subtitle.default || (noDefaultSub && idx == 0)
+                val isDefault = subtitle.default || (noDefaultSub && idx == 0 && !subtitle.label.contains("(OpenSubtitles)"))
                 MediaItem.SubtitleConfiguration.Builder(subtitle.file.toUri())
                     .setMimeType(subtitle.file.toSubtitleMimeType())
                     .setLabel(subtitle.label)
                     .apply {
                         val lower = subtitle.label.lowercase()
-                        if (lower.contains("fr") || lower.contains("français") ||
+                        // 2026-10-22 (user : « il doit être désactivé par défaut ») — piste OpenSubtitles
+                        //   seulement PROPOSÉE → langue « zxx » : jamais choisie automatiquement.
+                        if (!subtitle.default && subtitle.label.contains("(OpenSubtitles)")) {
+                            setLanguage("zxx")
+                        } else if (lower.contains("fr") || lower.contains("français") ||
                             lower.contains("francais") || lower.contains("vostfr") ||
                             lower.contains("vf")) {
                             setLanguage("fr")
@@ -5359,7 +5520,7 @@ class PlayerMobileFragment : Fragment() {
                     override fun getRetryDelayMsFor(info: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo): Long {
                         val ex = info.exception
                         if (ex is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException && ex.responseCode == 403) {
-                            Log.d("PlayerMobileFragment", "HLS 403 → retry 1.5s (manifest refresh)")
+                            Log.d("PlayerMobileFragment", "HLS 403 → retry 1.5s (manifest refresh) : ${ex.dataSpec.uri.toString().substringBefore('?').takeLast(60)}")
                             return 1500L
                         }
                         return super.getRetryDelayMsFor(info)
@@ -5376,7 +5537,9 @@ class PlayerMobileFragment : Fragment() {
                     .setExtractorFactory(com.streamflixreborn.streamflix.utils.media3.HlsExtractorFactoryAud(0, true))
                     .setLoadErrorHandlingPolicy(errorPolicy)
                     .createMediaSource(mediaItem)
-                player.setMediaSource(hlsSource)
+                player.setMediaSource(
+                    com.streamflixreborn.streamflix.utils.avecSousTitresExternes(hlsSource, mediaItem, dataSourceFactory)
+                )
                 Log.d("PlayerDebug", "HLS v23: TeeDataSource + retry-403 policy + H264ReaderAud")
             } else if (isDash) {
                 // DASH (.mpd) — utilisé par les flux live français (TF1, France TV, etc.)
@@ -5457,7 +5620,9 @@ class PlayerMobileFragment : Fragment() {
                     dashFactory.setDrmSessionManagerProvider { drmSessionManager }
                 }
                 val dashSource = dashFactory.createMediaSource(mediaItem)
-                player.setMediaSource(dashSource)
+                player.setMediaSource(
+                    com.streamflixreborn.streamflix.utils.avecSousTitresExternes(dashSource, mediaItem, dataSourceFactory)
+                )
                 Log.d("PlayerDebug", "DASH: DashMediaSource + TeeDataSource (DRM=${widevineUrl != null})")
             } else {
                 // Non-HLS / Non-DASH (mp4 progressive). Wrap with TeeDataSource for REC.
@@ -5668,7 +5833,24 @@ class PlayerMobileFragment : Fragment() {
                                 }
                             } else {
                                 // (B) Post-READY : 15s puis super-buffer OU swap si déjà tenté
-                                kotlinx.coroutines.delay(15_000L)
+                                // 2026-10-22 (user : « au bout de 3 ou 4 moulinages d'affilée la mise en cache
+                                //   supplémentaire n'est pas censée s'activer ? », « 15 secondes, c'est peut-être ça le
+                                //   problème ») — le tampon étendu ne s'activait qu'après UN blocage continu de 15 s
+                                //   (téléphone) / 25 s (télé). Des coupures courtes en série (Vidara sur la télé : 3 s de
+                                //   lecture, 4 s de chargement, en boucle) ne le déclenchaient jamais. Désormais :
+                                //     • blocage de 6 s → tampon étendu ;
+                                //     • 3 coupures en moins d'une minute → tampon étendu tout de suite ;
+                                //   le changement de serveur (tampon déjà étendu ET toujours bloqué) garde son délai long.
+                                val delaiCoupure = if (currentExtraBuffering || com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger || com.streamflixreborn.streamflix.utils.TamponLeger.appareilFaible /* tampon étendu ignoré en mode léger : pas de relance inutile */) 15_000L else {
+                                    val maintenant = android.os.SystemClock.elapsedRealtime()
+                                    coupuresRecentes.addLast(maintenant)
+                                    while (coupuresRecentes.isNotEmpty() && maintenant - coupuresRecentes.first() > 60_000L) coupuresRecentes.removeFirst()
+                                    if (coupuresRecentes.size >= 3) {
+                                        Log.w("PlayerNetwork", "${coupuresRecentes.size} coupures en moins d'une minute → tampon étendu")
+                                        0L
+                                    } else 6_000L
+                                }
+                                kotlinx.coroutines.delay(delaiCoupure)
                                 if (player.playbackState == Player.STATE_BUFFERING &&
                                     player.currentPosition == initialPosition) {
                                     if (!currentExtraBuffering) {
@@ -7395,6 +7577,8 @@ class PlayerMobileFragment : Fragment() {
     }
 
     private var currentExtraBuffering = false
+    /** 2026-10-22 : instants des dernières coupures (lecture déjà démarrée). */
+    private val coupuresRecentes = ArrayDeque<Long>()
     private var currentSoftwareDecoder = false
 
     private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
@@ -7456,7 +7640,7 @@ class PlayerMobileFragment : Fragment() {
         }
 
         val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {
-            ExoPlayer.Builder(requireContext())
+            ExoPlayer.Builder(requireContext(), com.streamflixreborn.streamflix.utils.SousTitresExternesRenderersFactory(requireContext()))
         } else {
             // 2026-06-10 : respecte le toggle Settings "Forcer le décodeur logiciel".
             //   OFF par défaut = HW prioritaire. ON = software FFmpeg.
@@ -7468,7 +7652,29 @@ class PlayerMobileFragment : Fragment() {
             Log.d("PlayerMobileFragment",
                 "NextRenderersFactory mode=$mode (prefSw=$prefSw, swDec=$currentSoftwareDecoder, isLiveIptv=$isLiveIptv)")
             val renderersFactory = io.github.anilbeesetti.nextlib.media3ext.ffdecoder
-                .NextRenderersFactory(requireContext()).apply {
+                .NextRenderersFactory(requireContext()).let {
+                    // 2026-10-22 : sous-titres externes greffés (HLS Vidara…) → décodage hérité.
+                    object : io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory(requireContext()) {
+                        // 2026-10-22 : recopie du son pour EcouteVoix (recalage des sous-titres sur les voix).
+                        override fun buildAudioSink(
+                            context: android.content.Context,
+                            enableFloatOutput: Boolean,
+                            enableAudioTrackPlaybackParams: Boolean,
+                        ): androidx.media3.exoplayer.audio.AudioSink? =
+                            com.streamflixreborn.streamflix.utils.EcouteVoix.audioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
+                        override fun buildTextRenderers(
+                            context: android.content.Context,
+                            output: androidx.media3.exoplayer.text.TextOutput,
+                            outputLooper: android.os.Looper,
+                            extensionRendererMode: Int,
+                            out: java.util.ArrayList<androidx.media3.exoplayer.Renderer>,
+                        ) {
+                            val avant = out.size
+                            super.buildTextRenderers(context, output, outputLooper, extensionRendererMode, out)
+                            com.streamflixreborn.streamflix.utils.activerDecodageHeriteSurTextRenderers(out, avant)
+                        }
+                    }
+                }.apply {
                     setEnableDecoderFallback(true)
                     setExtensionRendererMode(mode)
                 }
@@ -7564,6 +7770,12 @@ class PlayerMobileFragment : Fragment() {
             //   strict. DefaultHttpDataSource (TLS Java) → redirect Telegram (anti-hotlink).
             //   Cronet (TLS Chrome) + Referer nakios.store → 206 OK.
             || url.contains("citron-edge", ignoreCase = true)
+            // 2026-10-22 (user : Vidara « peine à monter en mémoire tampon » sur la télé, « alors
+            //   que pas sur le PC ») — CDN de Vidara (sNN-sNNNNNN.97bf1.com) : une seule qualité,
+            //   1080p à ~5-8 Mb/s, servie à peine plus vite que la lecture (mesuré dans Chrome :
+            //   6 à 11 Mb/s par segment). La pile réseau Chrome (Cronet) tient ce débit, celle
+            //   d'Android non : la télé passait 3 s en lecture, 4 s en chargement.
+            || url.contains("97bf1.com", ignoreCase = true)
     }
 
     private fun needsDoH(url: String): Boolean {
