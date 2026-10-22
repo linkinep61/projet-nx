@@ -1728,7 +1728,7 @@ object BackupRegistry {
             //   vidéos n'ont pas de sous-titres » → on lit le JSON AVANT de proposer le serveur,
             //   et on ne garde que s'il y a du français ou de l'anglais (traduit). Jamais sur une
             //   œuvre française (son audio serait du VF/VO non vérifié — on l'a ailleurs en VF).
-            if (!resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr" && (!key.isMovie || imdbFilm != null)) launch { emit("MegacloudX") {
+            if (!UserPreferences.modeLeger && !resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr" && (!key.isMovie || imdbFilm != null)) launch { emit("MegacloudX") {
                 com.streamflixreborn.streamflix.utils.MegacloudX.serveurs(
                     if (key.isMovie) "mv/$imdbFilm/$resolvedTmdbId" else "pl/$resolvedTmdbId/${key.season.coerceAtLeast(1)}/${key.episode}"
                 )
@@ -1737,7 +1737,10 @@ object BackupRegistry {
             // ── VIDSRC (lecteur de moviesfree.cv, par TMDB) ─────────────────────────────
             // 2026-10-22 (user : « gros catalogue, VOSTFR traduit en plus ») : audio anglais,
             //   sous-titres fournis par l'appli. Jamais sur une œuvre française (on l'a en VF).
-            if (!resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("MoviesFree") {
+            // 2026-10-23 (user : « en mode léger, on devrait les désactiver, pour être sûr de ne pas
+            //   faire de bêtises ») : page web cachée à la lecture + VO qui compte sur les sous-titres
+            //   automatiques / la traduction, coupés en mode léger → source absente en mode léger.
+            if (!UserPreferences.modeLeger && !resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("MoviesFree") {
                 listOf(Video.Server(
                     id = "vidsrc_${if (key.isMovie) "movie_$resolvedTmdbId" else "tv_${resolvedTmdbId}_${key.season}_${key.episode}"}",
                     name = "[VOSTFR]",
@@ -1750,7 +1753,10 @@ object BackupRegistry {
             //   douzaine de sources en audio d'origine. Vérifié au navigateur : Inception (4K) et
             //   Game of Thrones S01E01 se lancent seuls. Comme MoviesFree : jamais sur une œuvre
             //   française, sous-titres fournis par l'appli (« #vostfr » → activation d'office).
-            if (!resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("Vidnest") {
+            // 2026-10-23 (user : « en mode léger, on devrait les désactiver, pour être sûr de ne pas
+            //   faire de bêtises ») : page web cachée à la lecture + VO qui compte sur les sous-titres
+            //   automatiques / la traduction, coupés en mode léger → source absente en mode léger.
+            if (!UserPreferences.modeLeger && !resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("Vidnest") {
                 val tmdb = resolvedTmdbId!!
                 listOf(Video.Server(
                     id = "vidnest_${if (key.isMovie) "movie_$tmdb" else "tv_${tmdb}_${key.season}_${key.episode}"}",
@@ -1766,7 +1772,10 @@ object BackupRegistry {
             //   TMDB), ou inconnu (fiches VoirDrama/Dramacool sans TMDB) — jamais sur un film
             //   occidental, où il ne trouverait que des homonymes.
             val languesAsie = setOf("ko", "zh", "cn", "ja", "th", "tl", "vi", "id", "ms", "tw", "hi")
-            if (langueOriginale == null || langueOriginale in languesAsie) launch { emit("KissKH") {
+            // 2026-10-23 (user : « en mode léger, on devrait les désactiver, pour être sûr de ne pas
+            //   faire de bêtises ») : page web cachée à la lecture + VO qui compte sur les sous-titres
+            //   automatiques / la traduction, coupés en mode léger → source absente en mode léger.
+            if (!UserPreferences.modeLeger && (langueOriginale == null || langueOriginale in languesAsie)) launch { emit("KissKH") {
                 com.streamflixreborn.streamflix.utils.KissKh.serveurs(knownTitles.toList(), key.isMovie, key.season, key.episode)
             } }
 

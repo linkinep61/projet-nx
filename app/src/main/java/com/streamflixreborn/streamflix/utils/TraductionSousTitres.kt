@@ -103,7 +103,9 @@ object TraductionSousTitres {
 
     /** Lance (ou rejoint) la traduction de [url]. Le résultat est un .vtt local, ou null si échec. */
     fun lancer(url: String, entetes: Map<String, String>?, langue: String = "en"): Deferred<File?> =
-        enCours.getOrPut("$langue|$url") {
+        // 2026-10-23 : jamais en mode léger (ML Kit en mémoire).
+        if (UserPreferences.modeLeger) kotlinx.coroutines.CompletableDeferred(null)
+        else enCours.getOrPut("$langue|$url") {
             portee.async {
                 try { traduire(url, entetes, langue) } catch (e: Exception) {
                     Log.w(TAG, "traduction KO : ${e.message}"); null

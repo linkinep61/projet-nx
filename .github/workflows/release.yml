@@ -131,7 +131,7 @@ jobs:
         run: |
           sed -i '/APP_LAYOUT/d;/ABI_TARGET/d' local.properties
           echo APP_LAYOUT=tv >> local.properties
-          echo ABI_TARGET=arm >> local.properties
+          echo ABI_TARGET=arm32 >> local.properties
 
       # Nettoyage ciblé : supprime les outputs/manifestes/libs natifs mais
       # GARDE les classes compilées (identiques entre les 3 variantes).

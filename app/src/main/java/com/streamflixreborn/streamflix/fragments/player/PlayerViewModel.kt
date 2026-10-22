@@ -2495,8 +2495,18 @@ class PlayerViewModel(
             }
 
             reglerSousTitresSelonLangue(server, video)
-            video = avecOpenSubtitlesFrancais(server, video)
-            video = avecTraductionSiBesoin(server, video)
+            // 2026-10-23 (user, TV Android qui plante même en mode léger : « en mode léger,
+            //   l'application redevient comme elle était avant, sans les sous-titres ») — en mode
+            //   léger ni sous-titres OpenSubtitles ajoutés
+            //   d'office, ni traduction (ML Kit + modèle de langue en mémoire). Recherche manuelle
+            //   des sous-titres toujours possible dans le menu.
+            if (UserPreferences.modeLeger) {
+                com.streamflixreborn.streamflix.utils.TraductionSousTitres.demandeTraduction = null
+                com.streamflixreborn.streamflix.utils.TraductionSousTitres.suivre(null)
+            } else {
+                video = avecOpenSubtitlesFrancais(server, video)
+                video = avecTraductionSiBesoin(server, video)
+            }
             video = avecFormatSousTitresDevine(video)
 
             Log.d("PlayerViewModel", "Estrazione video completata con successo")

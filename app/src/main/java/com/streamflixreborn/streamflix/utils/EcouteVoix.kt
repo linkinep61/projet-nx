@@ -178,6 +178,7 @@ object EcouteVoix {
         //   JAMAIS rester masqué « en attente du calage ». Il ne l'est que si l'écoute part vraiment.
         SyncSousTitres.enAttenteCalage = false
         if (!ACTIF_GLOBAL) { Log.d(TAG, "écoute des voix désactivée (détecteur pas assez fiable)"); return }
+        // 2026-10-23 : mode léger seulement (une TV ordinaire, 192 Mo par appli, garde le calage).
         if (UserPreferences.modeLeger) { Log.d(TAG, "mode léger : écoute désactivée"); return }
         // Silero exige Android 7 (l'appli démarre dès Android 6 : rien sur les plus anciens).
         if (android.os.Build.VERSION.SDK_INT < 24) return
