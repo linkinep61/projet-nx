@@ -3537,7 +3537,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
 
             // ── URL directe (pas html.bet) : LG Channels, Sony One, Plex, Rakuten ──
-            val isHls = src.contains(".m3u8", ignoreCase = true)
+            // 2026-10-22 (Zone 18@, chaînes en direct) : certaines playlists HLS n'ont pas
+            //   d'extension (stream.xlivetv.com/s/<jeton>) → étiquetées « TS », illisibles.
+            //   Et un .mp4 n'est pas un flux TS : pas d'étiquette, Media3 reconnaît le conteneur.
+            val hoteSrc = src.substringAfter("://").substringBefore('/').lowercase()
+            val isHls = src.contains(".m3u8", ignoreCase = true) ||
+                (hoteSrc == "stream.xlivetv.com" && src.contains("/s/"))
+            val estFichier = listOf(".mp4", ".mkv", ".webm", ".mov").any { cheminSrc.endsWith(it) }
             // 2026-06-27 : Mix FR (data.m3u) → headers spécifiques (UA/Referer/Origin)
             //   captés des #EXTVLCOPT, sinon UA Chrome par défaut.
             val mixHeaders = fastChannelHeaders[server.id]
@@ -3548,7 +3554,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
             return Video(
                 source = src,
                 subtitles = emptyList(),
-                type = if (isHls) "application/vnd.apple.mpegurl" else "video/mp2t",
+                type = when {
+                    isHls -> "application/vnd.apple.mpegurl"
+                    estFichier -> null
+                    else -> "video/mp2t"
+                },
                 headers = headers,
             )
         }
