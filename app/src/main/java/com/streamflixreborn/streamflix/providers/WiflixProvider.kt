@@ -88,7 +88,9 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     //   "Redirection sécurisée vers flemmix.garden"). Nouveau domaine actif.
     // 2026-10-16 : flemmix.garden → neufneuf.space (« Accès sécurisé », plus de catalogue).
     //   Le portail redirige désormais en JS vers flemmix.land (voir onChangeUrl).
-    override val defaultBaseUrl: String = "https://flemmix.land/"
+    // 2026-10-23 (user : VOE / Vidara rouges sur mobile) : flemmix.land redirige à son tour vers
+    //   neufneuf.space ; le portail désigne flemmix.studio (vérifié au navigateur : catalogue OK).
+    override val defaultBaseUrl: String = "https://flemmix.studio/"
     // Liste des domaines morts/bloqués connus. Si le cache PROVIDER_URL est sur
     // un de ceux-ci, on force un refresh au prochain initializeService() au lieu
     // de rester coincé dessus à vie. Mettre à jour quand le portail évolue.
@@ -102,7 +104,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         "flemmix.city", "flemmix.fast", "flemmix.cafe", "flemmix.gold",
         // 2026-10-16 : flemmix.garden redirige vers neufneuf.space (page « Accès
         //   sécurisé » sans catalogue) → les caches coincés dessus doivent se rafraîchir.
-        "flemmix.garden", "neufneuf.space",
+        "flemmix.garden", "neufneuf.space", "flemmix.land",
     )
     override val baseUrl: String = defaultBaseUrl
         get() {

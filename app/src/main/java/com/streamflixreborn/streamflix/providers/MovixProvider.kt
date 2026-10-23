@@ -2522,7 +2522,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     //   faisait perdre des lecteurs : sur Léon (tmdb 101), le Wiflix direct rendait 0 (délai
     //   dépassé) quand CineStream, via Movix, en avait 13 — tous écartés. On ajoute en plus un
     //   CONTRÔLE D'IDENTITÉ sur la fiche servie (`wiflix_url`), cf. slugWiflixCorrespond.
-    private const val MOVIX_WIFLIX_ACTIF = true
+    // 2026-10-23 (user : « il ne devrait même pas être proposé, sur Wiflix il n'y en a qu'un et il
+    //   fonctionne ») — COUPÉ de nouveau. Wiflix sert maintenant de FAUX liens à la copie Movix
+    //   (Spider-Man Brand New Day : Movix → voe.sx/e/2dqtfqzv5gna, 404 ; le site → …/e/iyrah7mc89vs,
+    //   qui joue). La source Wiflix directe (domaine flemmix.studio) rend les vrais.
+    private const val MOVIX_WIFLIX_ACTIF = false
 
     /**
      * 2026-08-16, SOIR — l'endpoint `fstream` de Movix est bridé lui aussi, pour la même raison
