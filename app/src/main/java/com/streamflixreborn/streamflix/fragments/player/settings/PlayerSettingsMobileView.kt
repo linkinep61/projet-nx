@@ -162,6 +162,17 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
         displaySettings(Setting.SUBTITLES)
     }
 
+    /** 2026-10-23 : accès direct depuis le menu ⋮ de Mini Drama. */
+    fun showQuality() {
+        this.visibility = View.VISIBLE
+        displaySettings(Setting.QUALITY)
+    }
+
+    fun showSpeed() {
+        this.visibility = View.VISIBLE
+        displaySettings(Setting.SPEED)
+    }
+
     private fun displaySettings(setting: Setting) {
         currentSettings = setting
 

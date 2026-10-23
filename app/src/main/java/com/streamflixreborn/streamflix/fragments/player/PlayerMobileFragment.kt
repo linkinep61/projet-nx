@@ -3190,6 +3190,42 @@ class PlayerMobileFragment : Fragment() {
         return true
     }
 
+    /**
+     * 2026-10-23 (user : « un lecteur spécialement pour les mini dramas ») : menu ⋮ propre à Mini Drama.
+     * Ses réglages (format, enchaînement, écran allumé) sont enregistrés à part et ne touchent pas
+     * le reste de l'appli. Pas de « Paramètres » complet (serveurs, audio, tampon… inutiles ici).
+     */
+    private fun entreesMiniDrama(ctx: android.content.Context): List<Triple<Int, String, () -> Unit>> = listOf(
+        Triple(R.drawable.exo_styled_controls_aspect_ratio, "Ratio d'affichage : ${getString(UserPreferences.playerResize.stringRes)}") {
+            val nouveau = UserPreferences.playerResize.next()
+            zoomToast?.cancel()
+            zoomToast = Toast.makeText(ctx, nouveau.stringRes, Toast.LENGTH_SHORT)
+            zoomToast?.show()
+            UserPreferences.reglerResizeHebergeurSeul(nouveau)
+            updatePlayerScale()
+        },
+        Triple(R.drawable.ic_next, "Enchaînement automatique : ${if (UserPreferences.miniDramaEnchainement) "activé" else "désactivé"}") {
+            UserPreferences.miniDramaEnchainement = !UserPreferences.miniDramaEnchainement
+            Toast.makeText(ctx, if (UserPreferences.miniDramaEnchainement) "Enchaînement automatique activé"
+                else "Enchaînement automatique désactivé", Toast.LENGTH_SHORT).show()
+        },
+        Triple(R.drawable.ic_player_settings_subtitle_on, "Sous-titres") {
+            binding.settings.showSubtitles()
+        },
+        Triple(R.drawable.ic_player_settings_quality, "Qualité") {
+            binding.settings.showQuality()
+        },
+        Triple(R.drawable.ic_player_settings_playback_speed, "Vitesse de lecture") {
+            binding.settings.showSpeed()
+        },
+        Triple(R.drawable.ic_brightness, "Écran allumé en pause : ${if (UserPreferences.miniDramaEcranAllume) "oui" else "non"}") {
+            UserPreferences.miniDramaEcranAllume = !UserPreferences.miniDramaEcranAllume
+            binding.pvPlayer.keepScreenOn = player.isPlaying || ecranAllumeEnPause()
+            Toast.makeText(ctx, if (UserPreferences.miniDramaEcranAllume) "Écran toujours allumé en pause"
+                else "L'écran pourra s'éteindre en pause", Toast.LENGTH_SHORT).show()
+        },
+    )
+
     private fun showPlayerOverflowMenu(anchor: android.view.View) {
         val ctx = requireContext()
         val dp = { v: Int -> (v * ctx.resources.displayMetrics.density).toInt() }
@@ -3197,7 +3233,7 @@ class PlayerMobileFragment : Fragment() {
         val enregistreEnCours = com.streamflixreborn.streamflix.download.LiveRecorder.isRecording
 
         // (icône, libellé, action) — l'ordre de cette liste EST l'ordre affiché.
-        val entrees = listOfNotNull<Triple<Int, String, () -> Unit>>(
+        val entrees = if (estMiniDrama()) entreesMiniDrama(ctx) else listOfNotNull<Triple<Int, String, () -> Unit>>(
             Triple(R.drawable.exo_styled_controls_settings, "Paramètres") {
                 binding.settings.show()
             },
@@ -4896,7 +4932,7 @@ class PlayerMobileFragment : Fragment() {
                 Log.w("AutoplayDiag", "  ↳ pas d'épisode suivant")
                 return@launch
             }
-            if (autoplay && !UserPreferences.autoplay) {
+            if (autoplay && !enchainementActif()) {
                 Log.w("AutoplayDiag", "  ↳ autoplay pref off")
                 return@launch
             }
@@ -5169,8 +5205,11 @@ class PlayerMobileFragment : Fragment() {
         // 2026-08-02 (« chaque hébergeur a son propre format ») : on identifie l'hébergeur de ce
         //   flux AVANT d'appliquer l'échelle, pour que `UserPreferences.playerResize` renvoie le
         //   format mémorisé pour lui (et non le dernier format utilisé, tous serveurs confondus).
+        // 2026-10-23 : Mini Drama a SON format d'image (une seule clé pour tout le mode), et ni bouton
+        //   Serveur ni « Passer l'intro » (épisodes d'1 min 30).
         UserPreferences.currentPlayerHost =
-            UserPreferences.hebergeurDe(server.name, video.source)
+            if (estMiniDrama()) "minidrama" else UserPreferences.hebergeurDe(server.name, video.source)
+        binding.pvPlayer.controller.binding.btnExoServer.isGone = estMiniDrama()
         Log.d("PlayerMobileFragment", "format d'image → hébergeur=${UserPreferences.currentPlayerHost} mode=${UserPreferences.playerResize.name}")
         updatePlayerScale()
         updatePlayerHeader()
@@ -6060,7 +6099,7 @@ class PlayerMobileFragment : Fragment() {
 
                 if (!isLiveIptvStream && playbackState == Player.STATE_ENDED
                     && args.videoType is Video.Type.Episode
-                    && UserPreferences.autoplay
+                    && enchainementActif()
                 ) {
                     Log.w("AutoplayDiag", "[TRIGGER A] STATE_ENDED VOD ep=${(args.videoType as? Video.Type.Episode)?.id} → playNextEpisodeAcrossSeasons(autoplay=true)")
                     playNextEpisodeAcrossSeasons(autoplay = true)
@@ -6105,7 +6144,7 @@ class PlayerMobileFragment : Fragment() {
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 super.onIsPlayingChanged(isPlaying)
-                binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
+                binding.pvPlayer.keepScreenOn = isPlaying || ecranAllumeEnPause()
                 // 2026-10-04 : mode léger → la recherche de serveurs se met en pause pendant la lecture.
                 if (isPlaying) com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(true)
 
@@ -6224,7 +6263,9 @@ class PlayerMobileFragment : Fragment() {
                         if (UserPreferences.autoplay) lireFichierSuivantDuDossier()
                         return
                     }
-                    if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
+                    // 2026-10-23 (user, Mini Drama : « enchaîner sans fenêtre mais bien attendre la fin ») :
+                    //   épisodes d'1 min 30 → pas d'enchaînement anticipé ; seul STATE_ENDED (TRIGGER A) passe.
+                    if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip && !estMiniDrama()) {
                         if (UserPreferences.autoplay) {
                             Log.w("AutoplayDiag", "[TRIGGER B] hasReallyFinished ep=${(args.videoType as? Video.Type.Episode)?.id} pos=${player.currentPosition} dur=${player.duration} → playNextEpisodeAcrossSeasons(autoplay=true)")
                             playNextEpisodeAcrossSeasons(autoplay = true)
@@ -7066,6 +7107,16 @@ class PlayerMobileFragment : Fragment() {
         return (this.currentPosition > (this.duration * 0.90))
     }
 
+    private fun estMiniDrama(): Boolean =
+        UserPreferences.currentProvider?.name == "Mini Drama"
+
+    /** Enchaînement auto : réglage propre à Mini Drama, sinon la « Lecture automatique » générale. */
+    private fun enchainementActif(): Boolean =
+        if (estMiniDrama()) UserPreferences.miniDramaEnchainement else UserPreferences.autoplay
+
+    private fun ecranAllumeEnPause(): Boolean =
+        if (estMiniDrama()) UserPreferences.miniDramaEcranAllume else UserPreferences.keepScreenOnWhenPaused
+
     private fun ExoPlayer.hasReallyFinished(): Boolean {
         return this.duration > 0 &&
                 this.currentPosition >= (this.duration - UserPreferences.autoplayBuffer * 1000)
@@ -7449,6 +7500,13 @@ class PlayerMobileFragment : Fragment() {
             ensureNextEpisodePrepared(currentEpisode)
         }
 
+        // 2026-10-23 (user) : Mini Drama → pas de fenêtre « Épisode suivant ». L'épisode suivant est
+        //   préparé quand même ; il démarre seul à la vraie fin si « Lecture automatique » est activée.
+        if (estMiniDrama()) {
+            hideNextEpisodeOverlay()
+            return
+        }
+
         val nextEpisode = EpisodeManager.peekNextEpisode()
         val overlayThresholdMs = maxOf(
             NEXT_EPISODE_OVERLAY_MIN_THRESHOLD_MS,
@@ -7524,6 +7582,7 @@ class PlayerMobileFragment : Fragment() {
     }
 
     private fun showSkipIntroButton(show: Boolean) {
+        if (show && estMiniDrama()) { showSkipIntroButton(false); return }
         val btnSkipIntro = binding.pvPlayer.controller.binding.btnSkipIntro
         val c = binding.pvPlayer.controller.binding
         if (show && btnSkipIntro.isGone) {

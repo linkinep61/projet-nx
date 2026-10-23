@@ -622,6 +622,65 @@ object MiniDramaProvider : Provider {
     private fun decodeHtml(s: String) = s.replace("&amp;", "&").replace("&#039;", "'").replace("&#x27;", "'").replace("&#39;", "'")
         .replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").trim()
 
+    // ───────────────────────── DramaExpress (dramaexpress.net/fr) ─────────────────────────
+    // 2026-10-23 : sous-source, voir DramaExpress.kt. Ids « minidrama-de-<slug> », épisodes « …:<n> ».
+
+    private fun deTvShow(s: DramaExpress.Serie) = TvShow(id = DramaExpress.PREFIX + s.slug, title = s.titre, poster = s.cover)
+
+    private fun deSlug(id: String) = id.removePrefix(DramaExpress.PREFIX).substringBefore(":")
+
+    private suspend fun deGetTvShow(id: String): TvShow {
+        val slug = deSlug(id)
+        val f = DramaExpress.fetchEpisodes(slug)
+        val n = f.episodes.size
+        val recos: List<Show> = DramaExpress.series.values.filter { it.slug != slug }.shuffled().take(16).map { deTvShow(it) }
+        return TvShow(
+            id = DramaExpress.PREFIX + slug,
+            title = f.serie.titre,
+            overview = f.resume,
+            poster = f.serie.cover,
+            banner = f.serie.cover,
+            seasons = listOf(Season(id = DramaExpress.PREFIX + slug, number = 1, title = if (n > 0) "$n épisodes" else "Épisodes", poster = f.serie.cover)),
+            recommendations = recos,
+        )
+    }
+
+    private suspend fun deEpisodes(seasonId: String): List<Episode> {
+        val slug = deSlug(seasonId)
+        val f = runCatching { DramaExpress.fetchEpisodes(slug) }.onFailure { Log.w(TAG, "DramaExpress épisodes : ${it.message}") }.getOrNull()
+            ?: return emptyList()
+        return f.episodes.map { n -> Episode(id = "${DramaExpress.PREFIX}$slug:$n", number = n, title = "Épisode $n", poster = f.serie.cover) }
+    }
+
+    private suspend fun deServers(id: String, videoType: Video.Type): List<Video.Server> {
+        val slug = deSlug(id)
+        val n = id.substringAfterLast(":", "").toIntOrNull() ?: (videoType as? Video.Type.Episode)?.number ?: return emptyList()
+        val fx = runCatching { DramaExpress.fetchStreamUrl(slug, n) }.onFailure { Log.w(TAG, "DramaExpress flux : ${it.message}") }.getOrNull()
+        val out = ArrayList<Video.Server>()
+        fx?.liens?.forEachIndexed { i, l ->
+            val q = Regex("""[_/](\d{3,4})p?[/._]""").find(l.url.substringBefore('?'))?.groupValues?.get(1)
+                ?: Regex("""[?&]q=(\d{3,4})p""").find(l.url)?.groupValues?.get(1)
+            out.add(Video.Server(id = "dex|$slug|$n|$i", name = "DramaExpress · ${l.source}" + (if (DramaExpress.estMp4(l)) " MP4" else ""), src = l.url)
+                .also { s -> s.quality = q?.let { "${it}p" } })
+        }
+        out.add(Video.Server(id = "dex|$slug|$n|web", name = "DramaExpress · lecteur du site", src = DramaExpress.episodeUrl(slug, n)))
+        if (DramaExpress.estDouble(DramaExpress.series[slug]?.titre)) out.forEach { it.language = "VF" }
+        // Épisode suivant préparé pendant qu'on regarde celui-ci.
+        DramaExpress.prechauffer(slug, n + 1)
+        return out
+    }
+
+    private suspend fun deVideo(server: Video.Server): Video {
+        val p = server.id.split("|")
+        val slug = p.getOrNull(1).orEmpty(); val n = p.getOrNull(2)?.toIntOrNull() ?: 1
+        if (p.getOrNull(3) == "web") return DramaExpress.videoParLecteur(slug, n) ?: throw Exception("DramaExpress : le lecteur du site n'a rien chargé")
+        val fx = DramaExpress.fetchStreamUrl(slug, n)
+        val l = fx.liens.firstOrNull { it.url == server.src } ?: fx.liens.getOrNull(p.getOrNull(3)?.toIntOrNull() ?: 0)
+            ?: throw Exception("DramaExpress : lien introuvable")
+        return DramaExpress.video(l, fx.sousTitre) ?: DramaExpress.videoParLecteur(slug, n)
+            ?: throw Exception("DramaExpress : flux refusé")
+    }
+
     // ───────────────────────── Provider ─────────────────────────
 
     override suspend fun getHome(): List<Category> {
@@ -630,8 +689,10 @@ object MiniDramaProvider : Provider {
         //   parallèle, cache 1 h) pour composer un accueil riche, façon TMDB.
         runCatching { ensureFullCatalog() }.onFailure { Log.w(TAG, "catalogue complet : ${it.message}") }
         if (shows.isEmpty()) ensureHome()
+        var deRangees: List<Pair<String, List<String>>> = emptyList()
         coroutineScope {
             listOf(
+                async { runCatching { deRangees = DramaExpress.rangeesAccueil() }.onFailure { Log.w(TAG, "DramaExpress : ${it.message}") } },
                 async { runCatching { ensureDm() }.onFailure { Log.w(TAG, "Dailymotion : ${it.message}") } },
                 async { runCatching { ensureYt() }.onFailure { Log.w(TAG, "YouTube : ${it.message}") } },
             ).awaitAll()
@@ -653,6 +714,13 @@ object MiniDramaProvider : Provider {
         val ytCarrousel = ytToutes().take(20).shuffled().take(6)
         val itemsCarrousel: List<Show> = carrousel.map { it.toTvShow() } + dmCarrousel.map { it.toMovie() } + ytCarrousel.map { it.toMovie() }
         if (itemsCarrousel.isNotEmpty()) out.add(Category(Category.FEATURED, itemsCarrousel.shuffled()))
+
+        // 2026-10-23 (user : « sa catégorie arrive un peu en tête, avant la partie YouTube,
+        //   Dailymotion ») : les rangées DramaExpress juste après le carrousel.
+        for ((nom, slugs) in deRangees) {
+            val l = slugs.mapNotNull { DramaExpress.series[it] }.take(30)
+            if (l.size >= 4) out.add(Category("$nom · DramaExpress", l.map { deTvShow(it) }))
+        }
 
         // 2) Dailymotion : les grandes rangées VF en tête (le plus gros du catalogue).
         fun rangeeDm(nom: String, cles: List<String>) {
@@ -704,7 +772,8 @@ object MiniDramaProvider : Provider {
         if (query.isBlank()) {
             // Écran de recherche vide → thèmes VF (Dailymotion) + catégories du site minutedrama.
             val dm = DM_THEMES.mapIndexed { i, (nom, _) -> Genre(id = "dm:$i", name = "$nom · VF") }
-            return dm + categoryNames.entries.sortedBy { it.value }.map { Genre(id = it.key.toString(), name = it.value) }
+            val de = DramaExpress.GENRES.map { (slug, nom) -> Genre(id = "de:$slug", name = "$nom · DramaExpress") }
+            return de + dm + categoryNames.entries.sortedBy { it.value }.map { Genre(id = it.key.toString(), name = it.value) }
         }
         // Dailymotion : recherche en ligne + séries déjà connues dont le titre correspond.
         val qn = normalize(query)
@@ -721,6 +790,8 @@ object MiniDramaProvider : Provider {
                 .map { v -> ytSeries.getOrPut(v.videoId) { YtSerie(v.videoId, nettoyerTitreYt(v.title), v.author, v.durationS) } }
         }.getOrDefault(emptyList())
         val ytItems = (ytLocal + ytEnLigne).distinctBy { it.vid }.map { it.toMovie() }
+        val deItems = runCatching { DramaExpress.search(query) }.onFailure { Log.w(TAG, "DramaExpress recherche : ${it.message}") }
+            .getOrDefault(emptyList()).map { deTvShow(it) }
         val q = normalize(query)
         val words = q.split(" ").filter { it.length > 1 }
         val scored = shows.values.mapNotNull { tv ->
@@ -737,7 +808,7 @@ object MiniDramaProvider : Provider {
             }
             if (score > 0) score to tv else null
         }
-        return scored.sortedByDescending { it.first }.map { it.second.toTvShow() } + ytItems + dmItems
+        return scored.sortedByDescending { it.first }.map { it.second.toTvShow() } + deItems + ytItems + dmItems
     }
 
     /** Onglet Films = séries complètes VF de Dailymotion, des plus récentes aux plus anciennes. */
@@ -765,11 +836,22 @@ object MiniDramaProvider : Provider {
     }
     private val filmsDejaDonnes = java.util.Collections.synchronizedSet(HashSet<String>())
 
+    /**
+     * Onglet « Épisodes » = les séries découpées en épisodes : DramaExpress d'abord (29 par page,
+     * page du site = page de l'onglet), puis minutedrama. YouTube / Dailymotion (une vidéo = une
+     * série complète) restent dans l'onglet « Séries complètes » (getMovies).
+     */
     override suspend fun getTvShows(page: Int): List<TvShow> {
-        ensureFullCatalog()
-        val pageSize = 30
-        val all = shows.values.sortedByDescending { it.id ?: 0 }
-        return all.drop((page - 1) * pageSize).take(pageSize).map { it.toTvShow() }
+        val de = runCatching { DramaExpress.fetchCatalog(page) }
+            .onFailure { Log.w(TAG, "DramaExpress liste p$page : ${it.message}") }
+            .getOrDefault(emptyList()).map { deTvShow(it) }
+        val md = runCatching {
+            ensureFullCatalog()
+            val pageSize = 30
+            val all = shows.values.sortedByDescending { it.id ?: 0 }
+            all.drop((page - 1) * pageSize).take(pageSize).map { it.toTvShow() }
+        }.getOrDefault(emptyList())
+        return de + md
     }
 
     override suspend fun getMovie(id: String): Movie =
@@ -778,6 +860,7 @@ object MiniDramaProvider : Provider {
         else Movie(id = id, title = "")
 
     override suspend fun getTvShow(id: String): TvShow {
+        if (id.startsWith(DramaExpress.PREFIX)) return deGetTvShow(id)
         val tvId = idOf(id) ?: return TvShow(id = id)
         val tv = showOf(tvId) ?: return TvShow(id = id)
 
@@ -848,6 +931,7 @@ object MiniDramaProvider : Provider {
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
+        if (seasonId.startsWith(DramaExpress.PREFIX)) return deEpisodes(seasonId)
         val tvId = idOf(seasonId) ?: return emptyList()
         val tv = showOf(tvId)
         val banner = tv?.coverHoriUrl ?: tv?.coverUrl
@@ -864,6 +948,12 @@ object MiniDramaProvider : Provider {
     }
 
     override suspend fun getGenre(id: String, page: Int): Genre {
+        if (id.startsWith("de:")) {
+            val slug = id.removePrefix("de:")
+            val nom = "${DramaExpress.GENRES[slug] ?: slug} · DramaExpress"
+            val items = runCatching { DramaExpress.fetchCategory(slug, page) }.getOrDefault(emptyList()).map { deTvShow(it) }
+            return Genre(id = id, name = nom, shows = items)
+        }
         if (id.startsWith("dm:")) {
             val (nom, q) = DM_THEMES.getOrNull(id.removePrefix("dm:").toIntOrNull() ?: -1) ?: return Genre(id = id, name = id)
             val items = dmRanger(dmSearch(q, "relevance", page)).mapNotNull { dmSeries[it]?.toMovie() }
@@ -878,6 +968,7 @@ object MiniDramaProvider : Provider {
     override suspend fun getPeople(id: String, page: Int): People = People(id = id, name = "")
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        if (id.startsWith(DramaExpress.PREFIX)) return deServers(id, videoType)
         if (id.startsWith(DM_PREFIX)) return dmServers(id)
         if (id.startsWith(YT_PREFIX)) {
             val vid = id.removePrefix(YT_PREFIX)
@@ -905,6 +996,7 @@ object MiniDramaProvider : Provider {
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
+        if (server.id.startsWith("dex|")) return deVideo(server)
         if (server.id.startsWith("dmv|")) return DailymotionExtractor().extract(server.src)
         if (server.id.startsWith("ytv|")) return ytVideo(server.id.removePrefix("ytv|"))
         val parts = server.id.split("|")

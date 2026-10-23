@@ -669,6 +669,19 @@ object UserPreferences {
             Key.AUTOPLAY.setBoolean(value)
         }
 
+    /** 2026-10-23 (user : « un lecteur spécialement pour les mini dramas… il ne faut pas que ça
+     *  interfère sur le reste de l'application ») : réglages PROPRES au menu ⋮ de Mini Drama. */
+    var miniDramaEnchainement: Boolean
+        get() = Key.MINI_DRAMA_ENCHAINEMENT.getBoolean() ?: true
+        set(value) {
+            Key.MINI_DRAMA_ENCHAINEMENT.setBoolean(value)
+        }
+    var miniDramaEcranAllume: Boolean
+        get() = Key.MINI_DRAMA_ECRAN_ALLUME.getBoolean() ?: true
+        set(value) {
+            Key.MINI_DRAMA_ECRAN_ALLUME.setBoolean(value)
+        }
+
     // 2026-05-15 (user "je voudrais ajouter une option sur l'application pour
     // éviter que les écrans mettre en veille tous les 5 minutes") : flag global
     // pour garder l'écran allumé pendant l'utilisation de l'app (navigation
@@ -1218,6 +1231,16 @@ object UserPreferences {
             }
         }
 
+    /** 2026-10-23 (Mini Drama) : format mémorisé pour l'hébergeur courant SEULEMENT — le format
+     *  global (celui des autres providers) ne bouge pas. */
+    fun reglerResizeHebergeurSeul(value: PlayerResize) {
+        val hote = currentPlayerHost
+        if (hote.isNullOrBlank()) return
+        val m = resizeParHote()
+        m[hote] = value.name
+        enregistrerResizeParHote(m)
+    }
+
     /**
      * Identifiant d'hébergeur déduit d'un serveur et de l'URL réellement lue.
      *
@@ -1488,6 +1511,8 @@ object UserPreferences {
         POSEIDON_DOMAIN,
         DOH_PROVIDER_URL, // Removed STREAMINGCOMMUNITY_DNS_OVER_HTTPS, added DOH_PROVIDER_URL
         AUTOPLAY,
+        MINI_DRAMA_ENCHAINEMENT,
+        MINI_DRAMA_ECRAN_ALLUME,
         PROVIDER_CACHE,
         KEEP_SCREEN_ON_WHEN_PAUSED,
         PIP_ON_EXIT,

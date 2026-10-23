@@ -590,6 +590,9 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 return true
             }
             fun listMobileForCurrentProvider(): List<Item> {
+                // 2026-10-23 (user) : Mini Drama → menu réduit (le reste est dans son menu ⋮).
+                if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name == "Mini Drama")
+                    return listOf(Subtitle, Quality, Speed)
                 return if (shouldShowChannelVariant()) listMobile else listMobile.filter { it != ChannelVariant }
             }
             fun listTvForCurrentProvider(): List<Item> {

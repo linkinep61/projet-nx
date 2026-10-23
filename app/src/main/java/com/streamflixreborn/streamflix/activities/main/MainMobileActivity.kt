@@ -553,12 +553,17 @@ class MainMobileActivity : FragmentActivity() {
 
         binding.bnvMain.menu.findItem(R.id.movies)?.apply {
             isVisible = supportsMovies
+            // 2026-10-23 (user) : Mini Drama n'a que des séries → « Séries complètes » (YouTube +
+            //   Dailymotion, une vidéo par série) et « Épisodes » (DramaExpress + minutedrama).
+            val miniDrama = provider.name == "Mini Drama"
             title = if (isAnimeOnly) {
                 getString(R.string.main_menu_series_fr)
+            } else if (miniDrama) {
+                "Séries complètes"
             } else {
                 getString(R.string.main_menu_movies)
             }
-            setIcon(if (isAnimeOnly) R.drawable.ic_menu_tv else R.drawable.ic_menu_movie)
+            setIcon(if (isAnimeOnly || miniDrama) R.drawable.ic_menu_tv else R.drawable.ic_menu_movie)
         }
         binding.bnvMain.menu.findItem(R.id.tv_shows)?.apply {
             isVisible = supportsTvShows
@@ -571,6 +576,7 @@ class MainMobileActivity : FragmentActivity() {
                     getString(R.string.main_menu_series)  // "VOSTFR"
                 provider.name == "DessinAnime" ->
                     getString(R.string.main_menu_series_tab)
+                provider.name == "Mini Drama" -> "Épisodes"
                 else -> getString(R.string.main_menu_tv_shows)
             }
             if (provider.name == "DessinAnime") {
