@@ -247,7 +247,8 @@ open class FilemoonExtractor : Extractor() {
             // supprimée côté Filemoon → inutile d'essayer ailleurs, même ID = même réponse).
             val msg = e.message.orEmpty()
             if (msg.contains("link rot", ignoreCase = true) ||
-                msg.contains("video expired", ignoreCase = true)
+                msg.contains("video expired", ignoreCase = true) ||
+                msg.contains("lecture refusee", ignoreCase = true)
             ) {
                 throw e // Vraiment mort, pas la peine de retenter ailleurs
             }
@@ -310,7 +311,8 @@ open class FilemoonExtractor : Extractor() {
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
             if (msg.contains("link rot", ignoreCase = true) ||
-                msg.contains("video expired", ignoreCase = true)
+                msg.contains("video expired", ignoreCase = true) ||
+                msg.contains("lecture refusee", ignoreCase = true)
             ) {
                 Log.w(TAG, "[Filemoon] Link rot detected — failing fast: $msg")
                 throw e
@@ -616,6 +618,13 @@ open class FilemoonExtractor : Extractor() {
             val body = try { e.response()?.errorBody()?.string() } catch (_: Throwable) { null }
             if (e.code() == 404 && body?.contains("video not found", ignoreCase = true) == true) {
                 throw Exception("Filemoon: video expired (link rot) — $videoId")
+            }
+            // 2026-10-23 (user : « Filemoon, regarde le temps qu'on perd ») : `details` passé
+            //   via l'intégrateur autorisé, mais `playback` refusé en 403. Le repli WebView
+            //   retombait sur la page « Intégration bloquée » et expirait après 15 s, à
+            //   chaque fois (The Ark S1E12). Échec immédiat, sans WebView.
+            if (e.code() == 403 && parentDebloque != null) {
+                throw Exception("Filemoon: lecture refusee (playback 403) — $videoId")
             }
             if (e.code() != 428) throw e
             Log.w(TAG, "[Filemoon] playback 428 (${body?.take(60)}) — on attend la preuve puis on rejoue")

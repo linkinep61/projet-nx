@@ -946,8 +946,19 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     data class TmdbMovixPlayerLink(
         val decoded_url: String?,
         val quality: String?,
-        val language: String?
-    )
+        val language: String?,
+        // 2026-10-23 (user : « on les répare », The Ark S1E12) : lien MIROIR du même
+        //   fichier chez l'hébergeur. Sur cet épisode, uqload.cx était supprimé mais le
+        //   miroir uqload.is jouait l'épisode entier. Ignoré jusqu'ici.
+        val clone_url: String? = null,
+    ) {
+        /** Le lien principal, puis son miroir s'il est différent (libellé « miroir »). */
+        fun avecMiroir(): List<TmdbMovixPlayerLink> = listOfNotNull(
+            this,
+            clone_url?.takeIf { it.isNotBlank() && it != decoded_url }
+                ?.let { copy(decoded_url = it, quality = (quality?.substringBefore("/")?.trim() ?: "HD") + " miroir", clone_url = null) },
+        )
+    }
 
     data class TmdbMovixEpisode(
         val season_number: Int?,
@@ -2848,7 +2859,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         runEndpoint("tmdb-movie") {
                             val tmdbMovix = movixServiceInstance.getTmdbMovixMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
-                            tmdbMovix.player_links?.forEach { link ->
+                            tmdbMovix.player_links?.flatMap { it.avecMiroir() }?.forEach { link ->
                                 val url = link.decoded_url ?: return@forEach
                                 if (url.isBlank()) return@forEach
                                 val lang = if (link.language?.lowercase()?.contains("french") == true) "VF"
@@ -3236,7 +3247,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                 )
                                 return@runEndpoint list
                             }
-                            tmdbMovix.current_episode?.player_links?.forEach { link ->
+                            tmdbMovix.current_episode?.player_links?.flatMap { it.avecMiroir() }?.forEach { link ->
                                 val url = link.decoded_url ?: return@forEach
                                 if (url.isBlank()) return@forEach
                                 val lang = if (link.language?.lowercase()?.contains("french") == true) "VF"
@@ -4219,6 +4230,12 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
                 // 2026-07-07 : chaque endpoint Movix émet DÈS qu'il répond (onPartial → emitDeduped),
                 //   plus d'attente du plus lent. Le lot complet n'est plus ré-émis (déjà envoyé).
                 val native = fetchNativeMovixServers(id, videoType) { batch -> emitDeduped(batch) }
+                // 2026-10-23 (user : « Movix me propose 12 serveurs sur TV, 1 seul sur
+                //   téléphone ») : le REPLI TIERS est ajouté à la liste FINALE, après les
+                //   onPartial — en mode progressif il n'atteignait jamais l'écran. On renvoie
+                //   la liste finale : emitDeduped écarte ce qui a déjà été affiché (même src)
+                //   et n'émet que les sources restées en route (dont les tiers).
+                emitDeduped(native)
                 Log.w("MovixProvider", "[NATIF_PROGRESSIF] Movix a émis ${native.size} sources au fil de l'eau")
             } catch (e: Exception) {
                 Log.w("MovixProvider", "Progressive native failed: ${e.message}")

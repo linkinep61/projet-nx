@@ -3220,6 +3220,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
     private val famillesMultiLiveOk = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-10-23 : chaînes Zone 18@ `adulttv://<chemin>` → lien demandé à la lecture,
+        //   depuis l'IP de l'utilisateur (les liens xlivetv sont liés à l'IP du demandeur).
+        if (com.streamflixreborn.streamflix.utils.AdultTvResolver.isAdultTvUrl(server.src)) {
+            return com.streamflixreborn.streamflix.utils.AdultTvResolver.resolve(server.src)
+                ?: throw Exception("AdultTV resolver failed for ${server.src}")
+        }
         // 2026-09-26 : film Ciné Films servi par un portail OLA (handshake + create_link).
         if (server.id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_SRC)) {
             return com.streamflixreborn.streamflix.utils.OlaVod.video(server)
@@ -4996,7 +5002,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                         "http-origin" -> pendingHeaders["Origin"] = v
                     }
                 }
-                pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://") || t.startsWith("brightcove://")) -> {
+                pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://") || t.startsWith("brightcove://") || t.startsWith("adulttv://")) -> {
                     val ext = pendingExtinf!!
                     val url = t
                     val title = ext.substringAfterLast(",").trim()

@@ -63,7 +63,9 @@ open class VidMoLyExtractor : Extractor() {
         //   de WebView si CF ne challenge pas. Sur Chromecast le WebView headless crash/
         //   timeout en <300ms (coroutine cancelled + main thread busy). L'OkHttp avec
         //   DoH et UA Chrome passe dans ~90% des cas. Fallback WebView seulement si CF.
-        val fastResult = try { extractViaOkHttp(target) } catch (e: Exception) {
+        val fastResult = try { extractViaOkHttp(target) } catch (e: VideoSupprimee) {
+            throw e
+        } catch (e: Exception) {
             Log.d("VidMoLyExtractor", "OkHttp fast-path failed: ${e.message?.take(100)}")
             null
         }
@@ -115,6 +117,13 @@ open class VidMoLyExtractor : Extractor() {
             resp.close()
             return@withContext null
         }
+        // 2026-10-23 : fichier supprimé = 404 + « Désolé Vidéo introuvable ! » (mesuré sur
+        //   The Ark S1E12). Avant, on partait quand même 25 s en WebView.
+        if (code == 404 || code == 410) {
+            resp.close()
+            Log.d("VidMoLyExtractor", "OkHttp: HTTP $code → vidéo supprimée, échec immédiat")
+            throw VideoSupprimee("VidMoLy: video not found — HTTP $code ($url)")
+        }
         if (code != 200) {
             resp.close()
             return@withContext null
@@ -130,6 +139,15 @@ open class VidMoLyExtractor : Extractor() {
             html.contains("cf-turnstile")) {
             Log.d("VidMoLyExtractor", "OkHttp: CF challenge detected in body → fallback WebView")
             return@withContext null
+        }
+
+        // 2026-10-23 (user : « le temps qu'ils ont mis à répondre échec ») : page « Désolé
+        //   Vidéo introuvable ! » sur The Ark S1E12 → on lançait quand même la WebView et on
+        //   attendait 25 s pour rien. Fichier supprimé = échec IMMÉDIAT, sans WebView.
+        if (html.length < 20_000 && !html.contains(".m3u8") &&
+            RE_VIDEO_SUPPRIMEE.containsMatchIn(html)) {
+            Log.d("VidMoLyExtractor", "OkHttp: vidéo supprimée chez l'hébergeur → échec immédiat")
+            throw VideoSupprimee("VidMoLy: video not found — file removed ($url)")
         }
 
         // Regex m3u8 — mêmes patterns que EXTRACT_M3U8_JS
@@ -413,6 +431,9 @@ open class VidMoLyExtractor : Extractor() {
         }, delay)
     }
 
+    /** Fichier supprimé chez l'hébergeur : échec définitif, sans repli WebView. */
+    private class VideoSupprimee(message: String) : Exception(message)
+
     class ToDomain : VidMoLyExtractor() {
         override val mainUrl: String = "https://vidmoly.to/"
     }
@@ -421,6 +442,13 @@ open class VidMoLyExtractor : Extractor() {
         // 2026-08-07 : hôte canonique Vidmoly. Seul point à changer le jour où
         //   `.biz` tombe — toutes les URL entrantes y sont réécrites (cf. extract()).
         private const val HOTE_CANONIQUE = "vidmoly.biz"
+
+        /** Pages « fichier supprimé » de Vidmoly (FR/EN) : inutile de lancer la WebView. */
+        private val RE_VIDEO_SUPPRIMEE = Regex(
+            "Vid[ée]o introuvable|File (?:was )?(?:not found|deleted|removed)|" +
+                "no longer available|has been (?:deleted|removed)",
+            RegexOption.IGNORE_CASE,
+        )
 
         // UA Android Chrome — matche le runtime de la WebView Android, donc
         // moins de chance que Cloudflare le flag comme bot vs un UA Windows
