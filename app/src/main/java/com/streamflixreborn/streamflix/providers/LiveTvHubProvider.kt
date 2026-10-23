@@ -5714,7 +5714,45 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  fournir le bon lineup, le dossier Plex passe par ici au lieu de data-fast.m3u.
      *  Émet des chaînes `livehub::fast::plex_<id>` dont le src = `plex://<id>`,
      *  résolu à la lecture par PlexTvResolver (token frais + master m3u8). */
-    suspend fun fetchPlexLineupCategoryPublic(): List<Category> {
+    suspend fun fetchPlexLineupCategoryPublic(): List<Category> =
+        fetchPlexLivePublic() + fetchPlexFilmsPublic() + fetchPlexSeriesPublic()
+
+    // 2026-10-23 (user : « le dossier Plex met 10 ans à s'ouvrir », « les dossiers se chargent
+    //   quand on clique dessus », comme Autres Replay) : avant, l'ouverture attendait chaînes +
+    //   films (vérification VF titre par titre, 10-15 s) + séries. Désormais le dossier n'attend
+    //   que les chaînes ; 🎬 Films et 📺 Séries se chargent à leur clic, chacun avec son cache
+    //   (même durée qu'avant) et un verrou : deux clics ne lancent pas deux chargements.
+    @Volatile private var plexFilmsCache: List<Category> = emptyList()
+    @Volatile private var plexFilmsTs = 0L
+    @Volatile private var plexSeriesCache: List<Category> = emptyList()
+    @Volatile private var plexSeriesTs = 0L
+    private val plexFilmsVerrou = kotlinx.coroutines.sync.Mutex()
+    private val plexSeriesVerrou = kotlinx.coroutines.sync.Mutex()
+
+    /** Films / séries Plex déjà en cache (frais), sans rien charger — pour la recherche. */
+    fun plexFilmsEnCache(): List<Category> =
+        plexFilmsCache.takeIf { System.currentTimeMillis() - plexFilmsTs < MIX_FR_TTL_MS }.orEmpty()
+    fun plexSeriesEnCache(): List<Category> =
+        plexSeriesCache.takeIf { System.currentTimeMillis() - plexSeriesTs < MIX_FR_TTL_MS }.orEmpty()
+
+    suspend fun fetchPlexFilmsPublic(): List<Category> = plexFilmsVerrou.withLock {
+        plexFilmsEnCache().takeIf { it.isNotEmpty() }?.let { return@withLock it }
+        val t0 = System.currentTimeMillis()
+        val l = try { fetchPlexVodCategories() } catch (e: Throwable) { Log.w(TAG, "Plex VOD failed: ${e.message}"); emptyList() }
+        Log.i(TAG, "Plex films : ${l.size} rayons en ${System.currentTimeMillis() - t0} ms")
+        if (l.isNotEmpty()) { plexFilmsCache = l; plexFilmsTs = System.currentTimeMillis(); l } else plexFilmsCache
+    }
+
+    suspend fun fetchPlexSeriesPublic(): List<Category> = plexSeriesVerrou.withLock {
+        plexSeriesEnCache().takeIf { it.isNotEmpty() }?.let { return@withLock it }
+        val t0 = System.currentTimeMillis()
+        val l = try { fetchPlexShowCategories() } catch (e: Throwable) { Log.w(TAG, "Plex shows failed: ${e.message}"); emptyList() }
+        Log.i(TAG, "Plex séries : ${l.size} rayons en ${System.currentTimeMillis() - t0} ms")
+        if (l.isNotEmpty()) { plexSeriesCache = l; plexSeriesTs = System.currentTimeMillis(); l } else plexSeriesCache
+    }
+
+    /** Chaînes en direct Plex seulement (ce que l'ouverture du dossier attend). */
+    suspend fun fetchPlexLivePublic(): List<Category> {
         val now = System.currentTimeMillis()
         // Fail-safe (pattern Stream4Free) : cache frais → retour direct.
         if (plexFolderCacheSections.isNotEmpty() && now - plexFolderCacheTs < MIX_FR_TTL_MS) {
@@ -5742,13 +5780,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
             out.add(Category(name = "Chaînes en direct", list = shows))
         }
-        // 2026-06-27 (user "t'as oublié les films et séries de plex, un seul dossier
-        //   live+films+séries en FR") : ajoute les catégories VOD (films par genre).
-        //   Catalogue géo-FR (device en France via VPN). Items = `plexvod://<id>`.
-        out.addAll(try { fetchPlexVodCategories() } catch (e: Throwable) { Log.w(TAG, "Plex VOD failed: ${e.message}"); emptyList() })
-        // 2026-06-27 (user "on n'a pas oublié les séries ?") : OUI il y a des séries
-        //   Plex on-demand → catégories séries (hubs _tv + éditoriaux séries).
-        out.addAll(try { fetchPlexShowCategories() } catch (e: Throwable) { Log.w(TAG, "Plex shows failed: ${e.message}"); emptyList() })
+        // Films (catégories « Films — … », items plexvod://) et séries (« Séries — … ») :
+        //   fetchPlexFilmsPublic / fetchPlexSeriesPublic, chargés au clic de leur sous-dossier.
         // Fail-safe : cache QUE si contenu, sinon dernier cache connu.
         return if (out.isNotEmpty()) { plexFolderCacheSections = out; plexFolderCacheTs = now; out }
         else plexFolderCacheSections
@@ -5962,7 +5995,15 @@ object LiveTvHubProvider : Provider, IptvProvider {
         val genres = listOf(
             "action" to "Action", "comedy" to "Comédie", "drama" to "Drame",
             "sci-fi" to "Science-fiction", "horror" to "Horreur", "adventure" to "Aventure",
-            "documentary" to "Documentaires", "western" to "Western", "war-films" to "Guerre",
+            "documentary" to "Documentaires", "western" to "Western",
+            // 2026-10-23 (user : « on veut énormément de trucs ») : rayons Plex France qu'on n'utilisait pas
+            //   (56 existent ; chacun plafonné à 50 titres côté Plex, passés au même filtre VF). « Guerre »
+            //   (war-films) retiré : vide. « Populaires en France » : 18 films VF sur 20 testés.
+            "trending" to "Populaires en France", "plex-picks-france" to "Sélection Plex",
+            "recentlyAdded" to "Ajouts récents", "recommended" to "Recommandés",
+            "based-on-a-true-story" to "Histoires vraies", "thats-so-nineties" to "Années 90",
+            "totally-eighties" to "Années 80", "screen-legends" to "Légendes du cinéma",
+            "family-fun-night" to "En famille", "take-me-to-your-leader" to "Extraterrestres",
         )
         genres.map { (slug, label) ->
             async {

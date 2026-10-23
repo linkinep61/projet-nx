@@ -1831,6 +1831,16 @@ object BackupRegistry {
                 )
             } }
 
+            // ── PLUTO / PLEX (2026-10-23) — catalogues gratuits à la demande, VF uniquement ──
+            //   Recherche par titre (comme Wiflix), titre exact + année ±1, VF confirmée.
+            //   Lecture : PlutoTvResolver / PlexTvResolver (cf. getVideo plus bas).
+            launch { emit("Pluto") {
+                PlexPlutoBackup.pluto(knownTitles.toList(), effectiveYear, key.isMovie, key.season, key.episode)
+            } }
+            launch { emit("Plex") {
+                PlexPlutoBackup.plex(knownTitles.toList(), effectiveYear, key.isMovie, key.season, key.episode)
+            } }
+
             // ── AFTERDARK — RETIRÉ le 2026-08-01 ────────────────────────────────────
             // DÉCISION user : « dorénavant on garde que les serveurs VF HD, il nous faut
             //   vraiment que ceux qui sont notifiés VF, pas de VOSTFR dans du VF » — après
@@ -2790,6 +2800,11 @@ object BackupRegistry {
             "Cinélux" -> OlaVod.video(orig)
             // 2026-09-06 : Tokyvideo — page de la vidéo → MP4 signé (cf. TokyVideo.video).
             "Tokyvideo" -> TokyVideo.video(orig)
+            // 2026-10-23 : Pluto / Plex à la demande — mêmes résolveurs que le TV Hub.
+            "Pluto" -> PlutoTvResolver.resolveVod(orig.src)
+                ?: throw Exception("Pluto VOD : flux introuvable (${orig.src})")
+            "Plex" -> PlexTvResolver.resolveVod(orig.src)
+                ?: throw Exception("Plex VOD : flux introuvable (${orig.src})")
             "KissKH" -> com.streamflixreborn.streamflix.utils.KissKh.video(orig)
             "MoviesFree" -> com.streamflixreborn.streamflix.utils.Vidsrc.video(orig)
             "Vidnest" -> com.streamflixreborn.streamflix.extractors.VidnestExtractor().extract(orig.src.substringBefore('#'))

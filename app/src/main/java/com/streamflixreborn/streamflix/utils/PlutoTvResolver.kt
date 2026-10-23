@@ -51,6 +51,7 @@ object PlutoTvResolver {
     @Volatile private var catTs: Long = 0L
     @Volatile private var channelsHost: String = DEFAULT_CHANNELS
     @Volatile private var vodHost: String = DEFAULT_VOD
+    @Volatile private var searchHost: String = "https://service-media-search.clusters.pluto.tv"
     @Volatile private var strToken: String? = null
     @Volatile private var strSid: String = ""
     @Volatile private var strTs: Long = 0L
@@ -113,6 +114,7 @@ object PlutoTvResolver {
                 val servers = j.optJSONObject("servers")
                 channelsHost = servers?.optString("channels").orEmpty().ifBlank { DEFAULT_CHANNELS }.trimEnd('/')
                 vodHost = servers?.optString("vod").orEmpty().ifBlank { DEFAULT_VOD }.trimEnd('/')
+                searchHost = servers?.optString("search").orEmpty().ifBlank { searchHost }.trimEnd('/')
                 catTs = now
                 Log.d(TAG, "cat boot OK (FR)")
                 true
@@ -240,7 +242,18 @@ object PlutoTvResolver {
             val name = cat.optString("name").trim()
             // skip carrousels génériques
             if (name.isBlank() || name.equals("Hero Carousel", true)) continue
-            val items = cat.optJSONArray("items") ?: continue
+            var items = cat.optJSONArray("items") ?: continue
+            // 2026-10-23 (user : « on veut énormément de trucs sur Pluto ») : l'appel groupé ne renvoie
+            //   jamais plus de 100 titres par catégorie (ex. « Cinéma » : 229 → 100). Si la catégorie en
+            //   annonce plus (totalItemsCount), on relit SES titres en entier — sur cet appel, « offset »
+            //   est la taille de page (vérifié dans le navigateur : offset=1000&page=1 → 229/229).
+            val total = cat.optInt("totalItemsCount", 0)
+            val catId = cat.optString("_id")
+            if (total > items.length() && catId.isNotBlank()) {
+                getJson("$vodHost/v4/vod/categories/$catId/items?offset=1000&page=1")
+                    ?.optJSONArray("items")?.takeIf { it.length() > items.length() }
+                    ?.let { complet -> Log.d(TAG, "VOD « $name » : ${items.length()} → ${complet.length()} titres"); items = complet }
+            }
             val list = ArrayList<PlutoVodItem>()
             for (k in 0 until items.length()) {
                 val it = items.optJSONObject(k) ?: continue
@@ -251,6 +264,32 @@ object PlutoTvResolver {
                 list.add(PlutoVodItem(id, nm, firstImage(it), isSeries))
             }
             if (list.isNotEmpty()) out.add(PlutoVodCategory(name, list))
+        }
+        return out
+    }
+
+    /** Résultat du moteur de recherche Pluto (films / séries à la demande, catalogue de la session). */
+    data class PlutoResultat(val id: String, val nom: String, val type: String, val slug: String)
+
+    /**
+     * 2026-10-23 (user : « que Pluto et Plex servent de serveur, comme Wiflix ») : recherche
+     *   par titre dans le catalogue À LA DEMANDE de la session (France). Une seule petite
+     *   requête — pas de chargement du catalogue complet. Rend films et séries uniquement.
+     */
+    suspend fun rechercher(requete: String): List<PlutoResultat> {
+        if (requete.isBlank() || !ensureCatalogSession()) return emptyList()
+        val q = java.net.URLEncoder.encode(requete, "UTF-8")
+        val j = getJson("$searchHost/v1/search?q=$q&limit=20") ?: return emptyList()
+        val arr = j.optJSONArray("data") ?: return emptyList()
+        val out = ArrayList<PlutoResultat>()
+        for (i in 0 until arr.length()) {
+            val it = arr.optJSONObject(i) ?: continue
+            val type = it.optString("type")
+            if (type != "movie" && type != "series") continue
+            val id = it.optString("id").ifBlank { it.optString("_id") }
+            val nom = it.optString("name").ifBlank { it.optString("title") }.trim()
+            if (id.isBlank() || nom.isBlank()) continue
+            out.add(PlutoResultat(id, nom, type, it.optString("slug")))
         }
         return out
     }

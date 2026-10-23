@@ -357,6 +357,68 @@ object PlexTvResolver {
         return out
     }
 
+    /** Résultat de recherche dans le catalogue GRATUIT (provider VOD), géo FR. */
+    data class PlexResultat(val rk: String, val titre: String, val annee: Int, val type: String, val slug: String)
+
+    /**
+     * 2026-10-23 (user : « que Pluto et Plex servent de serveur, comme Wiflix ») : recherche par
+     *   titre, une seule requête. On ne garde que le bloc « Gratuit à la demande »
+     *   (source `provider://tv.plex.provider.vod`) — les « autres façons de regarder » sont
+     *   des offres payantes tierces, illisibles chez nous.
+     */
+    suspend fun rechercherVod(requete: String): List<PlexResultat> = withContext(Dispatchers.IO) {
+        if (requete.isBlank()) return@withContext emptyList()
+        try {
+            val q = java.net.URLEncoder.encode(requete, "UTF-8")
+            val url = "https://discover.provider.plex.tv/library/search?query=$q&limit=15" +
+                "&searchTypes=movies,tv&searchProviders=discover,plexAVOD&includeMetadata=1"
+            val req = Request.Builder().url(url)
+                .header("Accept", "application/json")
+                .header("X-Plex-Language", "fr")
+                .header("X-Plex-Client-Identifier", clientId)
+                .frGeo().build()
+            val j = client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext emptyList()
+                JSONObject(resp.body?.string().orEmpty())
+            }
+            val blocs = j.optJSONObject("MediaContainer")?.optJSONArray("SearchResults")
+                ?: return@withContext emptyList()
+            val out = ArrayList<PlexResultat>()
+            for (i in 0 until blocs.length()) {
+                val res = blocs.optJSONObject(i)?.optJSONArray("SearchResult") ?: continue
+                for (k in 0 until res.length()) {
+                    val m = res.optJSONObject(k)?.optJSONObject("Metadata") ?: continue
+                    if (m.optString("source") != "provider://tv.plex.provider.vod") continue
+                    val rk = m.optString("ratingKey")
+                    if (rk.isBlank()) continue
+                    out.add(PlexResultat(rk, m.optString("title").trim(), m.optInt("year", 0),
+                        m.optString("type"), m.optString("slug")))
+                }
+            }
+            out
+        } catch (e: Exception) {
+            Log.w(TAG, "recherche Plex : ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Piste audio FR CONFIRMÉE pour [rk] (film ou épisode). null = indéterminé (réseau).
+     *   Contrairement au filtre du TV Hub (qui garde en cas de doute pour ne pas vider un
+     *   dossier), les serveurs de secours EXIGENT une VF confirmée (user : « bien garder le
+     *   filtre pour avoir que du français »).
+     */
+    suspend fun audioFrancaisConfirme(rk: String): Boolean? {
+        frAudioCache[rk]?.let { return it }
+        val tok = getToken() ?: return null
+        val meta = getJson("$VOD/library/metadata/$rk?${authQuery(tok)}")
+            ?.optJSONObject("MediaContainer")?.optJSONArray("Metadata")?.optJSONObject(0)
+            ?: return null
+        val fr = metaHasFrenchAudio(meta)
+        frAudioCache[rk] = fr
+        return fr
+    }
+
     /** Résout `plexvod://<metadataId>` → Video HLS VOD jouable (token frais). */
     suspend fun resolveVod(src: String): Video? = withContext(Dispatchers.IO) {
         val rk = src.removePrefix("plexvod://").trim()

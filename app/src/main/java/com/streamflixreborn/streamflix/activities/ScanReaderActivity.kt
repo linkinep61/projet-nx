@@ -114,6 +114,10 @@ class ScanReaderActivity : AppCompatActivity() {
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 2026-10-23 (user : « 395 Mo, on gaspille quelque part ») : en entrant dans le lecteur, on vide
+        //   le cache d'images en mémoire (jaquettes de l'accueil gardées « au cas où ») — mesuré sur
+        //   l'Oppo : ~50 Mo rendus. Elles se rechargent depuis le disque au retour à l'accueil.
+        runCatching { Glide.get(this).clearMemory() }
         requestedOrientation = if (estTele) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         WindowCompat.getInsetsController(window, window.decorView).run {
@@ -135,7 +139,9 @@ class ScanReaderActivity : AppCompatActivity() {
             adapter = adaptateur
             // 2026-10-23 (boîtier 2 Go qui plante en ouvrant One Piece) : en mode léger, 1 seule page
             //   gardée hors écran au lieu de 4.
-            setItemViewCacheSize(if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 1 else 4)
+            // 2026-10-23 (box qui plante sur les scans, mode léger éteint) : 2 pages hors écran au lieu
+            //   de 4 pour tout le monde.
+            setItemViewCacheSize(if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 1 else 2)
             isFocusable = true
             isFocusableInTouchMode = true
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
@@ -246,15 +252,20 @@ class ScanReaderActivity : AppCompatActivity() {
             com.bumptech.glide.load.resource.bitmap.DownsampleStrategy.SampleSizeRounding.QUALITY
     }
 
-    private fun optionsPage(): com.bumptech.glide.request.RequestOptions {
+    /** 2026-10-23 (user : « lecteur économe pour tout le monde, mais le zoom doit rester net ») :
+     *  pages décodées à la largeur de l'écran (rendu identique sans zoom) ; dès qu'on zoome, les pages
+     *  sont rechargées en × 2 (comme avant). En mode léger : × 1 toujours. */
+    private val qualiteZoom: Boolean
+        get() = echelle > 1f && !com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger
+
+    private fun optionsPage(zoom: Boolean = qualiteZoom): com.bumptech.glide.request.RequestOptions {
         val m = resources.displayMetrics
         val colonne = if (m.widthPixels > m.heightPixels)
             (m.heightPixels * 1.05f).toInt().coerceAtMost(m.widthPixels) else m.widthPixels
         val leger = com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger
         return com.bumptech.glide.request.RequestOptions()
-            // Mode léger : décodage à la largeur de l'écran (pas × 2) — zoom un peu moins net,
-            //   mais ~4 fois moins de mémoire par page.
-            .override(colonne * (if (leger) 1 else 2), com.bumptech.glide.request.target.Target.SIZE_ORIGINAL)
+            // Décodage à la largeur de l'écran ; × 2 seulement une fois zoomé (hors mode léger).
+            .override(colonne * (if (zoom) 2 else 1), com.bumptech.glide.request.target.Target.SIZE_ORIGINAL)
             .downsample(echellePage)
             .format(com.bumptech.glide.load.DecodeFormat.PREFER_RGB_565)  // 2 octets/pixel : indispensable pour les webtoons (690 × 15 000)
             .apply { if (leger) dontTransform() else transform(NetteteScan) }
@@ -352,7 +363,11 @@ class ScanReaderActivity : AppCompatActivity() {
     }
 
     private fun appliquerEchelle(px: Float, py: Float) {
+        val avant = qualiteZoom
         echelle = echelle.coerceIn(1f, 3f)
+        if (!avant && qualiteZoom) liste.post {
+            adaptateur.notifyItemRangeChanged(0, adaptateur.itemCount)
+        }
         conteneurZoom.pivotX = px
         conteneurZoom.pivotY = py
         conteneurZoom.scaleX = echelle
@@ -596,9 +611,13 @@ class ScanReaderActivity : AppCompatActivity() {
             val url = GlideUrl(pages[position], LazyHeaders.Builder().apply {
                 ScansProvider.headersPour(pages[position]).forEach { (k, v) -> addHeader(k, v) }
             }.build())
+            val zoom = qualiteZoom
             Glide.with(iv).load(url)
                 .diskCacheStrategy(DiskCacheStrategy.DATA)
-                .apply(optionsPage())
+                .apply(optionsPage(zoom))
+                // En passant au × 2, la page déjà affichée (× 1, en mémoire) reste visible pendant le
+                //   rechargement : pas de page vide ni de saut de défilement.
+                .apply { if (zoom) thumbnail(Glide.with(iv).load(url).apply(optionsPage(false)).onlyRetrieveFromCache(true)) }
                 .listener(object : com.bumptech.glide.request.RequestListener<android.graphics.drawable.Drawable> {
                     override fun onLoadFailed(e: com.bumptech.glide.load.engine.GlideException?, model: Any?,
                         target: com.bumptech.glide.request.target.Target<android.graphics.drawable.Drawable>, isFirstResource: Boolean): Boolean = false
@@ -612,7 +631,7 @@ class ScanReaderActivity : AppCompatActivity() {
                 .into(iv)
             // Pré-chargement des 2 pages suivantes.
             // Mode léger : 1 page préparée d'avance au lieu de 2.
-            for (k in 1..(if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 1 else 2)) pages.getOrNull(position + k)?.let { u ->
+            for (k in 1..(if (zoom) 2 else 1)) pages.getOrNull(position + k)?.let { u ->
                 Glide.with(iv).load(GlideUrl(u, LazyHeaders.Builder().apply {
                     ScansProvider.headersPour(u).forEach { (a, b) -> addHeader(a, b) }
                 }.build())).diskCacheStrategy(DiskCacheStrategy.DATA).apply(optionsPage()).preload()

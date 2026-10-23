@@ -777,7 +777,7 @@ private fun normSearch(s: String): String =
             val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             scope.launch {
                 try {
-                    val cats = LiveTvHubProvider.fetchPlexLineupCategoryPublic()
+                    val cats = LiveTvHubProvider.fetchPlexLivePublic()
                     if (cats.isNotEmpty()) {
                         LiveTvHubProvider.folderContents[folderKey] = cats
                     }
@@ -1986,22 +1986,48 @@ private fun normSearch(s: String): String =
         onChannelSelected: (TvShow) -> Unit,
     ) {
         val live = allCats.filter { it.name == "Chaînes en direct" }
-        val films = allCats.filter { it.name.startsWith("Films — ") }
-            .map { Category(name = it.name.removePrefix("Films — "), list = it.list) }
-        val series = allCats.filter { it.name.startsWith("Séries — ") }
-            .map { Category(name = it.name.removePrefix("Séries — "), list = it.list) }
+        fun strip(cats: List<Category>, prefix: String) = cats.filter { it.name.startsWith(prefix) }
+            .map { Category(name = it.name.removePrefix(prefix), list = it.list) }
+        // 2026-10-23 (user : « les dossiers se chargent quand on clique dessus ») : Films et Séries
+        //   ne sont plus chargés à l'ouverture du dossier Plex mais au clic, avec une fenêtre
+        //   d'attente (comme Autres Replay). Déjà en cache → ouverture immédiate.
+        fun auClic(libelle: String, prefix: String, charger: suspend () -> List<Category>): () -> Unit = {
+            val cle = "plex:$libelle"
+            if (chargementsEnCours.add(cle)) {
+                val attente: android.app.Dialog? = try {
+                    androidx.appcompat.app.AlertDialog.Builder(ctx)
+                        .setMessage("Chargement de $libelle…\n(première ouverture : quelques secondes)")
+                        .setCancelable(true)
+                        .create().also { it.show() }
+                } catch (_: Throwable) { null }
+                CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                    val cats = try { strip(charger(), prefix) } catch (_: Throwable) { emptyList() }
+                    withContext(Dispatchers.Main) {
+                        chargementsEnCours.remove(cle)
+                        val annule = attente != null && !attente.isShowing
+                        try { attente?.dismiss() } catch (_: Throwable) {}
+                        when {
+                            annule -> {}
+                            cats.isEmpty() -> android.widget.Toast.makeText(ctx,
+                                "Plex : rien à afficher pour l'instant — réessaie", android.widget.Toast.LENGTH_LONG).show()
+                            else -> displayCategories(ctx, libelle, cats, onChannelSelected)
+                        }
+                    }
+                }
+            } else {
+                android.widget.Toast.makeText(ctx, "Chargement de $libelle déjà en cours…",
+                    android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+        val films = strip(LiveTvHubProvider.plexFilmsEnCache(), "Films — ")
+        val series = strip(LiveTvHubProvider.plexSeriesEnCache(), "Séries — ")
         val folders = ArrayList<Pair<String, () -> Unit>>()
         if (live.isNotEmpty()) folders.add("📡 Chaînes en direct" to {
             if (live.size == 1) showChannelsList(ctx, live[0], onChannelSelected)
             else displayCategories(ctx, "Chaînes en direct", live, onChannelSelected)
         })
-        if (films.isNotEmpty()) folders.add("🎬 Films" to {
-            displayCategories(ctx, "Films", films, onChannelSelected)
-        })
-        if (series.isNotEmpty()) folders.add("📺 Séries" to {
-            displayCategories(ctx, "Séries", series, onChannelSelected)
-        })
-        if (folders.isEmpty()) { displayCategories(ctx, folderName, allCats, onChannelSelected); return }
+        folders.add("🎬 Films" to auClic("Films", "Films — ") { LiveTvHubProvider.fetchPlexFilmsPublic() })
+        folders.add("📺 Séries" to auClic("Séries", "Séries — ") { LiveTvHubProvider.fetchPlexSeriesPublic() })
         // 2026-07-04 (user "quand on va dans Stream4Free on pourrait verrouiller
         //   un film ou une série ou un Live") : passe le parentFolderKey pour
         //   activer le contrôle parental sur chaque sous-dossier (long-press).

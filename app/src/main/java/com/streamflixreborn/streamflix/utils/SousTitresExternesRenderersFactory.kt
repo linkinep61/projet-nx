@@ -52,6 +52,15 @@ class SousTitresExternesRenderersFactory(context: Context) : DefaultRenderersFac
     }
 }
 
+/**
+ * 2026-10-23 (user : Pluto · VF « tombé rouge directement », Le Carnaval des âmes) : le DASH
+ *   de Pluto est assemblé en PLUSIEURS périodes (film + pubs insérées). `MergingMediaSource`
+ *   exige le même nombre de périodes partout → IllegalMergeException dès qu'on lui greffe un
+ *   .srt OpenSubtitles (une seule période). Sur ces flux, pas de fusion de sous-titres externes.
+ */
+fun fluxMultiPeriodes(mediaItem: androidx.media3.common.MediaItem): Boolean =
+    mediaItem.localConfiguration?.uri?.host?.contains("pluto.tv", ignoreCase = true) == true
+
 /** Partagé avec [Av1RenderersFactory] : même correctif, deux hiérarchies de fabriques. */
 @UnstableApi
 fun activerDecodageHeriteSurTextRenderers(out: ArrayList<Renderer>, depuis: Int) {
@@ -77,6 +86,10 @@ fun avecSousTitresExternes(
 ): androidx.media3.exoplayer.source.MediaSource {
     val confs = mediaItem.localConfiguration?.subtitleConfigurations.orEmpty()
     if (confs.isEmpty()) return source
+    if (fluxMultiPeriodes(mediaItem)) {
+        android.util.Log.d("PlayerDebug", "sous-titres externes NON fusionnés : flux multi-périodes (Pluto)")
+        return source
+    }
     val f = androidx.media3.exoplayer.source.SingleSampleMediaSource.Factory(fabrique)
     val pistes = confs.map { f.createMediaSource(it, androidx.media3.common.C.TIME_UNSET) }
     android.util.Log.d("PlayerDebug", "sous-titres externes fusionnés : ${pistes.size}")

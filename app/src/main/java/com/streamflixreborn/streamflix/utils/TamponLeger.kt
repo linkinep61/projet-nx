@@ -44,7 +44,11 @@ object TamponLeger {
         runCatching {
             val am = com.streamflixreborn.streamflix.StreamFlixApp.instance
                 .getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
-            am?.isLowRamDevice == true || (am?.memoryClass ?: 512) <= 128
+            // 2026-10-23 (user) : + RAM totale sous ~1,6 Go (box 1 / 1,5 Go). Une TV TCL 2,4 Go
+            //   (192 Mo par appli) ou une Chromecast 2 Go (256 Mo) ne sont pas concernées.
+            val ram = android.app.ActivityManager.MemoryInfo().also { am?.getMemoryInfo(it) }.totalMem
+            am?.isLowRamDevice == true || (am?.memoryClass ?: 512) <= 128 ||
+                (ram in 1L until 1_700_000_000L)
         }.getOrDefault(false)
     }
 

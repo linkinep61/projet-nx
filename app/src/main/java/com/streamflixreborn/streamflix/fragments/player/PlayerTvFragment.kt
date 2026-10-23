@@ -5860,7 +5860,16 @@ class PlayerTvFragment : Fragment() {
                             val initialPosition = player.currentPosition
                             bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
                                 if (!vodCurrentStreamHasWorked) {
-                                    kotlinx.coroutines.delay(35_000L)
+                                    // 2026-10-23 (user : « elle mouline et elle fait rien », Ciné Films serveur 2) :
+                                    //   un serveur qui n'a envoyé AUCUN octet au bout de 12 s est une connexion morte
+                                    //   (hôte injoignable) → on n'attend pas 35 s. S'il envoie des données, même
+                                    //   lentement, on garde le délai complet (règle « aller jusqu'à l'échec »).
+                                    kotlinx.coroutines.delay(12_000L)
+                                    val rienRecu = player.playbackState == Player.STATE_BUFFERING &&
+                                        !vodCurrentStreamHasWorked &&
+                                        player.bufferedPosition <= 0L && player.totalBufferedDuration <= 0L
+                                    if (rienRecu) Log.w("PlayerNetwork", "Pre-READY : aucun octet reçu en 12 s → connexion morte")
+                                    else kotlinx.coroutines.delay(23_000L)
                                     if (player.playbackState == Player.STATE_BUFFERING &&
                                         player.currentPosition == initialPosition &&
                                         !vodCurrentStreamHasWorked) {
@@ -9575,6 +9584,12 @@ class PlayerTvFragment : Fragment() {
             //   - sur STATE_READY → marque iptvCurrentStreamHasWorked
             //   - sur onPlayerError → délègue à viewModel pour full restart
             attachTransferRecoveryListener()
+            // 2026-10-23 : saut demandé dans le mini-lecteur sur un film Pluto / Plex → fait ici.
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.sautApresPleinEcranMs?.let { ms ->
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.sautApresPleinEcranMs = null
+                Log.i("PlayerTvFragment", "saut demandé depuis le mini-lecteur → ${ms / 1000}s")
+                player.seekTo(ms)
+            }
             Log.d("PlayerTvFragment", "Transferred player attached — no codec re-init needed (repeat=${player.repeatMode} playWhenReady=${player.playWhenReady})")
         }
 

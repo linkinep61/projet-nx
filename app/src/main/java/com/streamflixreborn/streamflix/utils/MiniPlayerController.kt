@@ -1370,8 +1370,26 @@ object MiniPlayerController {
 
     /** Déplacement dans la vidéo (barre de progression du mini-lecteur). */
     fun allerA(ms: Long) {
+        // 2026-10-23 (user : « si on avance dans le film à partir du mini-lecteur, ça bugge et le
+        //   film ne marche plus ») : le mini-lecteur est réglé pour le DIRECT (≈30 min d'avance en
+        //   mémoire, reconnexion live) ; un saut dans un FILM Pluto / Plex (DASH protégé + coupures
+        //   pub) laisse le décodeur à l'arrêt. Pour ces films : on passe en plein écran, et le saut
+        //   est fait là-bas, une fois le lecteur rattaché (où il fonctionne).
+        if (estFilmVod(currentChannelId)) {
+            sautApresPleinEcranMs = ms.coerceAtLeast(0L)
+            Log.i(TAG, "saut dans un film depuis le mini-lecteur → plein écran puis saut à ${ms / 1000}s")
+            navigateToFullscreenForCurrent()
+            return
+        }
         try { player?.seekTo(ms.coerceAtLeast(0L)) } catch (_: Exception) {}
     }
+
+    /** Films Pluto / Plex du TV Hub (pas les chaînes en direct). */
+    fun estFilmVod(id: String?): Boolean = id != null &&
+        (id.contains("plutomovie_") || id.contains("plexvod_") || id.contains("plutoep_") || id.contains("plexep_"))
+
+    /** Saut demandé dans le mini-lecteur, à faire par le plein écran une fois le lecteur rattaché. */
+    @Volatile var sautApresPleinEcranMs: Long? = null
 
     /** Bascule lecture/pause du mini-lecteur. Retourne true si ça joue après l'appel. */
     fun basculerLecture(): Boolean {
