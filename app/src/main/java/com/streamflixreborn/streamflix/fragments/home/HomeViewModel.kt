@@ -379,12 +379,37 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                     else c.copy(list = c.list.filter { isReleasedMovie(it) })
                 }
 
-                State.SuccessLoading(categoriesReleased)
+                // 2026-10-23 (user : boîtier 2 Go qui plante sur l'accueil, « en mode léger on réduit
+                //   fortement le nombre de lignes affichées ») : en mode léger, accueil allégé —
+                //   pas de carrousel, 5 rangées du provider, 15 titres par rangée. Continuer /
+                //   Favoris / Pour vous restent entiers (choix du user). Les providers de chaînes TV
+                //   (leurs rangées = les bouquets de chaînes) ne sont pas touchés.
+                State.SuccessLoading(
+                    if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) accueilLeger(categoriesReleased)
+                    else categoriesReleased
+                )
             }
 
             else -> state
         }
     }.flowOn(Dispatchers.IO)
+
+    private fun accueilLeger(categories: List<Category>): List<Category> {
+        val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+        if (provider is com.streamflixreborn.streamflix.providers.IptvProvider ||
+            provider?.name in setOf("CableVisionHD", "TvporinternetHD", "WiTv"))
+            return categories.filter { it.name != Category.FEATURED }  // carrousel retiré partout, rangées de chaînes intactes
+        val gardees = setOf(Category.CONTINUE_WATCHING, Category.FAVORITE_MOVIES, Category.FAVORITE_TV_SHOWS, Category.POUR_VOUS)
+        var rangees = 0
+        return categories.mapNotNull { c ->
+            when {
+                c.name in gardees -> c
+                c.name == Category.FEATURED -> null  // pas de carrousel en mode léger (user)
+                rangees < 5 -> { rangees++; c.copy(list = c.list.take(15)) }
+                else -> null
+            }
+        }
+    }
 
     sealed class State {
         data object Loading : State()
