@@ -173,6 +173,19 @@
             android:textSize="14sp"
             android:background="@android:color/transparent" />
 
+        <!-- 2026-10-23 : 3e onglet, visible seulement sur le profil Scans (« Scan 2 »). -->
+        <TextView
+            android:id="@+id/tab_3"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="Scan 2"
+            android:textColor="#80FFFFFF"
+            android:textSize="14sp"
+            android:visibility="gone"
+            android:background="@android:color/transparent" />
+
     </LinearLayout>
 
     <!-- 2026-05-13 (user "il y a pas de filtre de catégorie et de langue en

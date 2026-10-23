@@ -423,6 +423,17 @@ object ScansProvider : Provider {
 
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()
 
+    /** 2026-10-23 (user) : les 3 onglets du profil Scans — « Webtoon » (séries officielles Webtoon),
+     *  « Scan 1 » (Sushiscan, ce qu'affichait l'onglet unique) et « Scan 2 » (scans d'Anime-Sama).
+     *  L'accueil, lui, reste mélangé. */
+    suspend fun getTvShowsOnglet(onglet: String, page: Int): List<TvShow> = runCatching {
+        when (onglet) {
+            "webtoon" -> if (page == 1) wtListe("$WT_BASE/fr/originals") else emptyList()
+            "scan2" -> asListe(asCatalogue(page))
+            else -> liste(catalogue("popular", page))
+        }
+    }.onFailure { Log.w(TAG, "onglet $onglet p$page : ${it.message}") }.getOrDefault(emptyList())
+
     override suspend fun getTvShows(page: Int): List<TvShow> = runCatching { liste(catalogue("popular", page)) }.getOrDefault(emptyList())
 
     override suspend fun getMovie(id: String): Movie = Movie(id = id, title = "")

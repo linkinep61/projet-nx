@@ -786,7 +786,8 @@ class HomeTvFragment : Fragment() {
         // 2026-06-09 v3 : toggle OFF = l'image est gérée par
         //   CategoryViewHolder.displayTvSwiper qui la met DANS le swiper item
         //   (ivSwiperBannerInline). Ici on clear iv_home_background fullscreen.
-        if (!UserPreferences.carouselAsBackground) {
+        // 2026-10-23 : mode léger → pas de grande image de fond (une image plein écran de moins).
+        if (!UserPreferences.carouselAsBackground || UserPreferences.modeLeger) {
             try {
                 Glide.with(requireContext()).clear(binding.ivHomeBackground)
                 binding.ivHomeBackground.setImageDrawable(null)
@@ -817,7 +818,8 @@ class HomeTvFragment : Fragment() {
             return
         }
         // 2026-06-09 : même garde que updateBackground.
-        if (!UserPreferences.carouselAsBackground) {
+        // 2026-10-23 : mode léger → pas de grande image de fond (une image plein écran de moins).
+        if (!UserPreferences.carouselAsBackground || UserPreferences.modeLeger) {
             try {
                 Glide.with(requireContext()).clear(binding.ivHomeBackground)
                 binding.ivHomeBackground.setImageDrawable(null)

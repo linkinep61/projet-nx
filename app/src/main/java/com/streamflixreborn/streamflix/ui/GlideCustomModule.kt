@@ -44,9 +44,12 @@ class GlideCustomModule : AppGlideModule() {
         val appMemory = activityManager.memoryClass * 1024L * 1024L
         val isTv = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
         val maxCache = if (isTv) 24L * 1024 * 1024 else 48L * 1024 * 1024
-        val memoryCacheSize = (appMemory / 12).coerceIn(8L * 1024 * 1024, maxCache)
+        // 2026-10-23 (user, boîtiers 2 Go) : en mode léger, cache d'images en mémoire divisé par deux
+        //   (les jaquettes déjà vues se rechargent depuis le disque). Pris en compte au démarrage.
+        val leger = runCatching { com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger }.getOrDefault(false)
+        val memoryCacheSize = (appMemory / 12).coerceIn(8L * 1024 * 1024, maxCache).let { if (leger) it / 2 else it }
         builder.setMemoryCache(LruResourceCache(memoryCacheSize))
-        android.util.Log.d("GlideCustom", "Memory cache=${memoryCacheSize / 1024 / 1024}MB (isTv=$isTv, heap=${appMemory / 1024 / 1024}MB)")
+        android.util.Log.d("GlideCustom", "Memory cache=${memoryCacheSize / 1024 / 1024}MB (isTv=$isTv, heap=${appMemory / 1024 / 1024}MB, léger=$leger)")
 
         // 2026-07-07 (ANR home Leanback sur Chromecast) : le pool de décodage Glide par défaut
         //   (~1 thread/cœur) SATURE le CPU faible quand la grille TV charge beaucoup de jaquettes

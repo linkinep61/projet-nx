@@ -121,6 +121,10 @@ class ScanReaderActivity : AppCompatActivity() {
             hide(WindowInsetsCompat.Type.systemBars())
         }
 
+        // 2026-10-23 (user : « la veille de la TV se lance pendant que je lis des scans ») : comme pour
+        //   une vidéo, l'écran reste allumé tant qu'un chapitre est ouvert (ni Mode Ambiant ni mise en
+        //   veille) ; Android retire ce réglage tout seul quand on quitte le lecteur.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         serieId = intent.getStringExtra(EXTRA_SERIE)
         serieTitre = intent.getStringExtra(EXTRA_SERIE_TITRE)
 
@@ -129,7 +133,9 @@ class ScanReaderActivity : AppCompatActivity() {
         liste = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@ScanReaderActivity)
             adapter = adaptateur
-            setItemViewCacheSize(4)
+            // 2026-10-23 (boîtier 2 Go qui plante en ouvrant One Piece) : en mode léger, 1 seule page
+            //   gardée hors écran au lieu de 4.
+            setItemViewCacheSize(if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 1 else 4)
             isFocusable = true
             isFocusableInTouchMode = true
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
@@ -160,7 +166,10 @@ class ScanReaderActivity : AppCompatActivity() {
         pageVue = TextView(this).apply { setTextColor(0xFFDDDDDD.toInt()); textSize = 14f }
         // 2026-10-20 (user) : la radio est disponible PENDANT la lecture des scans (et seulement là :
         //   si c'est la liseuse qui l'a lancée, elle s'arrête quand on la quitte).
-        radioBtn = bouton("♪ Radio") {
+        // 2026-10-23 (user : « problème de positionnement des touches sur mobile ») : écran étroit →
+        //   libellés courts, sinon « Précédent / Suivant » sont écrasés en fines barres verticales.
+        val etroit = resources.configuration.screenWidthDp < 600
+        radioBtn = bouton(if (etroit) "♪" else "♪ Radio") {
             radioLanceeIci = true
             runCatching { com.streamflixreborn.streamflix.utils.RadioPickerDialog.show(this, this) }
                 .onFailure { toast("Radio indisponible : ${it.message}") }
@@ -178,17 +187,21 @@ class ScanReaderActivity : AppCompatActivity() {
             setPadding(dp(16f).toInt(), dp(12f).toInt(), dp(16f).toInt(), dp(24f).toInt())
             background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(0xE6000000.toInt(), 0x00000000))
         }
-        btnPrec = bouton("◀  Précédent") { chapitre?.precedent?.let { charger(it) } }
-        btnSuiv = bouton("Suivant  ▶") { chapitre?.suivant?.let { charger(it) } }
+        btnPrec = bouton(if (etroit) "◀" else "◀  Précédent") { chapitre?.precedent?.let { charger(it) } }
+        btnSuiv = bouton(if (etroit) "▶" else "Suivant  ▶") { chapitre?.suivant?.let { charger(it) } }
         // Zoom − / + (indispensable à la télécommande, pratique aussi au doigt).
         val zoomMoins = bouton("−") { zoomer(-0.25f) }
         val zoomPlus = bouton("+") { zoomer(+0.25f) }
         btnZoomPlus = zoomPlus
+        // 2026-10-23 (user) : bouton « Auto » entre − et + : lecture qui descend toute seule, lentement ;
+        //   re-cliquer, une flèche ▲▼, OK ou toucher l'écran l'arrête.
+        btnAuto = bouton("Auto") { if (autoCollant) arreterAuto() else lancerLectureAuto() }
         val marge = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             marginStart = dp(6f).toInt(); marginEnd = dp(6f).toInt()
         }
         barreBas.addView(btnPrec, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         barreBas.addView(zoomMoins, marge)
+        barreBas.addView(btnAuto, LinearLayout.LayoutParams(marge))
         barreBas.addView(zoomPlus, LinearLayout.LayoutParams(marge))
         // Radio dans la barre du bas : atteignable à la télécommande (◀▶ après OK).
         barreBas.addView(radioBtn, LinearLayout.LayoutParams(marge))
@@ -197,6 +210,12 @@ class ScanReaderActivity : AppCompatActivity() {
 
         setContentView(racine)
         installerGestes()
+        liste.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
+            override fun onInterceptTouchEvent(rv: RecyclerView, e: android.view.MotionEvent): Boolean {
+                if (e.actionMasked == android.view.MotionEvent.ACTION_DOWN && autoCollant) arreterAuto()
+                return false
+            }
+        })
 
         val id = intent.getStringExtra(EXTRA_CHAPITRE)
         if (id == null) { finish(); return }
@@ -214,7 +233,7 @@ class ScanReaderActivity : AppCompatActivity() {
     //   reste net), hauteur libre, couleurs complètes — avec un plafond de pixels par page
     //   pour la mémoire (plus bas en mode léger, qui garde aussi le RGB_565).
     private val pixelsMaxPage: Int
-        get() = if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 6_000_000 else 12_000_000
+        get() = if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 3_000_000 else 12_000_000
 
     private val echellePage = object : com.bumptech.glide.load.resource.bitmap.DownsampleStrategy() {
         override fun getScaleFactor(sw: Int, sh: Int, rw: Int, rh: Int): Float {
@@ -233,7 +252,9 @@ class ScanReaderActivity : AppCompatActivity() {
             (m.heightPixels * 1.05f).toInt().coerceAtMost(m.widthPixels) else m.widthPixels
         val leger = com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger
         return com.bumptech.glide.request.RequestOptions()
-            .override(colonne * 2, com.bumptech.glide.request.target.Target.SIZE_ORIGINAL)
+            // Mode léger : décodage à la largeur de l'écran (pas × 2) — zoom un peu moins net,
+            //   mais ~4 fois moins de mémoire par page.
+            .override(colonne * (if (leger) 1 else 2), com.bumptech.glide.request.target.Target.SIZE_ORIGINAL)
             .downsample(echellePage)
             .format(com.bumptech.glide.load.DecodeFormat.PREFER_RGB_565)  // 2 octets/pixel : indispensable pour les webtoons (690 × 15 000)
             .apply { if (leger) dontTransform() else transform(NetteteScan) }
@@ -392,8 +413,76 @@ class ScanReaderActivity : AppCompatActivity() {
 
     // ───────────────────────── télécommande ─────────────────────────
 
+    // 2026-10-23 (user : « quand on reste appuyé, une lecture fluide en mode automatique, pas
+    //   saccadée ») — DÉFILEMENT CONTINU. Avant : flèche maintenue = la télécommande répète la touche
+    //   ~20 fois/s et chaque répétition faisait un saut sec (scrollBy) → à-coups. Désormais, dès la
+    //   1re répétition, la liste glisse à CHAQUE IMAGE de l'écran (postOnAnimation), à vitesse
+    //   constante (montée douce en 0,4 s), et s'arrête net au relâchement. Appui court inchangé.
+    private var autoSens = 0
+    private var autoDebut = 0L
+    private var autoDernier = 0L
+    private var autoReste = 0f
+    /** true = lancé par le bouton « Auto » (continue après relâchement) ; vitesse de lecture lente. */
+    private var autoCollant = false
+    private var autoVitesse = 0.6f
+    private lateinit var btnAuto: TextView
+    private val autoPas = object : Runnable {
+        override fun run() {
+            if (autoSens == 0 || isFinishing) return
+            val maintenant = android.os.SystemClock.uptimeMillis()
+            val dt = (maintenant - autoDernier).coerceIn(0L, 50L) / 1000f
+            autoDernier = maintenant
+            val montee = ((maintenant - autoDebut) / 400f).coerceIn(0.25f, 1f)
+            // ~60 % de la hauteur d'écran par seconde : une vitesse de lecture.
+            autoReste += liste.height * autoVitesse * montee * dt
+            if (!liste.canScrollVertically(autoSens)) { arreterAuto(); return }
+            val d = autoReste.toInt()
+            if (d != 0) { liste.scrollBy(0, autoSens * d); autoReste -= d }
+            liste.postOnAnimation(this)
+        }
+    }
+    private fun demarrerAuto(sens: Int) {
+        if (autoSens == sens) return
+        if (!autoCollant) autoVitesse = 0.6f
+        liste.stopScroll()
+        autoSens = sens
+        autoDebut = android.os.SystemClock.uptimeMillis()
+        autoDernier = autoDebut
+        autoReste = 0f
+        liste.removeCallbacks(autoPas)
+        liste.postOnAnimation(autoPas)
+    }
+    private fun arreterAuto() {
+        autoSens = 0
+        liste.removeCallbacks(autoPas)
+        if (autoCollant) {
+            autoCollant = false
+            if (::btnAuto.isInitialized) btnAuto.text = "Auto"
+        }
+    }
+
+    /** Bouton « Auto » : ~1 écran toutes les 10 s, jusqu'à ce qu'on l'arrête. */
+    private fun lancerLectureAuto() {
+        arreterAuto()
+        // autoCollant AVANT demarrerAuto : sinon demarrerAuto remet la vitesse « flèche maintenue » (0,6).
+        autoCollant = true
+        autoVitesse = 0.10f
+        demarrerAuto(+1)
+        btnAuto.text = "⏸ Stop"
+        afficherBarres(false)
+        liste.requestFocus()
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_UP && autoSens != 0 && !autoCollant &&
+            (event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN || event.keyCode == KeyEvent.KEYCODE_DPAD_UP)) {
+            arreterAuto(); return true
+        }
         if (event.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event)
+        if (autoCollant && event.keyCode in setOf(KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER) && currentFocus != btnAuto) {
+            arreterAuto(); return true
+        }
         // Barres affichées et focus sur un bouton : on laisse ◀▶/OK naviguer entre les boutons.
         val focusBouton = currentFocus != null && currentFocus != liste &&
             (currentFocus?.parent == barreBas || currentFocus?.parent == barreHaut)
@@ -403,12 +492,11 @@ class ScanReaderActivity : AppCompatActivity() {
         //   Page+/Page− et Chaîne+/− gardent le grand saut (80 % d'écran) pour aller vite.
         val grandPas = (liste.height * 0.8f).toInt()
         val petitPas = (liste.height * 0.33f).toInt()
-        val pasMaintenu = (liste.height * 0.06f).toInt().coerceAtLeast(24)
         fun defiler(sens: Int, grand: Boolean) {
             if (focusBouton) liste.requestFocus()
             when {
                 grand -> liste.smoothScrollBy(0, sens * grandPas)
-                event.repeatCount > 0 -> liste.scrollBy(0, sens * pasMaintenu)
+                event.repeatCount > 0 -> demarrerAuto(sens)
                 else -> liste.smoothScrollBy(0, sens * petitPas)
             }
         }
@@ -420,12 +508,17 @@ class ScanReaderActivity : AppCompatActivity() {
             KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                 if (!focusBouton) {
                     if (echelle > 1f && event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) { deplacer(-1); return true }
+                    // 2026-10-23 (user : « on peut appuyer sans faire exprès et on perd l'endroit ») : ▶ ne
+                    //   change plus de chapitre — il affiche la barre, curseur sur « Suivant » (OK pour valider).
+                    if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) { afficherBarres(true); btnSuiv.requestFocus(); return true }
                     chapitre?.suivant?.let { charger(it) } ?: toast("Dernier chapitre"); return true
                 }
             }
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_PREVIOUS, KeyEvent.KEYCODE_MEDIA_REWIND -> {
                 if (!focusBouton) {
                     if (echelle > 1f && event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) { deplacer(+1); return true }
+                    // 2026-10-23 : ◀ affiche la barre, curseur sur « Précédent » (OK pour valider).
+                    if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) { afficherBarres(true); btnPrec.requestFocus(); return true }
                     chapitre?.precedent?.let { charger(it) } ?: toast("Premier chapitre"); return true
                 }
             }
@@ -518,7 +611,8 @@ class ScanReaderActivity : AppCompatActivity() {
                 })
                 .into(iv)
             // Pré-chargement des 2 pages suivantes.
-            for (k in 1..2) pages.getOrNull(position + k)?.let { u ->
+            // Mode léger : 1 page préparée d'avance au lieu de 2.
+            for (k in 1..(if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 1 else 2)) pages.getOrNull(position + k)?.let { u ->
                 Glide.with(iv).load(GlideUrl(u, LazyHeaders.Builder().apply {
                     ScansProvider.headersPour(u).forEach { (a, b) -> addHeader(a, b) }
                 }.build())).diskCacheStrategy(DiskCacheStrategy.DATA).apply(optionsPage()).preload()

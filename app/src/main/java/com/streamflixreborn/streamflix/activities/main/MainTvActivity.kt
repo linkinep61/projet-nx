@@ -1360,6 +1360,8 @@ class MainTvActivity : FragmentActivity() {
                 isMyIptv -> getString(R.string.main_menu_tv_shows)
                 isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
                     getString(R.string.main_menu_all_channels)
+                // 2026-10-23 (user : « Séries TV porte à confusion ») : profil Scans → « Scans ».
+                provider.name == "Scans" -> "Scans"
                 isAnimeOnly ->
                     getString(R.string.main_menu_series)  // "VOSTFR" (anime providers VF/VOSTFR split)
                 // 2026-05-14 (user "il est censé s'appeler série et il a pas

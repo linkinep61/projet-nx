@@ -336,7 +336,8 @@ object FranimeSession {
     //   jusqu'à la fermeture de l'app (franime.fr, ses scripts et ses pubs tournaient en fond), alors
     //   que la session est de toute façon re-bootstrappée après BOOTSTRAP_TTL_MS. On la détruit donc
     //   après IDLE_MS sans usage : la prochaine lecture la recrée, exactement comme après le TTL.
-    private val IDLE_MS = BOOTSTRAP_TTL_MS
+    // 2026-10-23 : en mode léger, libérée après 1 min d'inactivité au lieu de 5.
+    private val IDLE_MS: Long get() = if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) 60_000L else BOOTSTRAP_TTL_MS
     @Volatile private var lastUseAt: Long = 0L
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val liberationSiInactive = Runnable {

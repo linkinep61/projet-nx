@@ -202,6 +202,30 @@ class TvShowsTvFragment : Fragment() {
     private fun initializeLanguageTabs() {
         val providerName = UserPreferences.currentProvider?.name ?: return
 
+        // 2026-10-23 (user) : profil Scans → 3 onglets Webtoon / Scan 1 / Scan 2.
+        binding.tab3.visibility = View.GONE
+        if (viewModel.estScans) {
+            val onglets = listOf(binding.tabFr to "webtoon", binding.tabVostfr to "scan1", binding.tab3 to "scan2")
+            binding.tabLanguage.visibility = View.VISIBLE
+            binding.tab3.visibility = View.VISIBLE
+            binding.tabFr.text = "Webtoon"
+            binding.tabVostfr.text = "Scan 1"
+            binding.tab3.text = "Scan 2"
+            fun choisir(actif: android.widget.TextView) {
+                onglets.map { it.first }.filter { it !== actif }.forEach { selectTab(actif, it) }
+            }
+            choisir(binding.tabFr)
+            setupTabFocus(binding.tabFr, binding.tabVostfr)
+            binding.tab3.onFocusChangeListener = binding.tabFr.onFocusChangeListener
+            onglets.forEach { (onglet, filtre) ->
+                onglet.setOnClickListener {
+                    choisir(onglet)
+                    viewModel.setLanguageFilter(filtre)
+                }
+            }
+            return
+        }
+
         if (viewModel.isTypeFilterable) {
             // Providers like AnimeSama: "Série" / "Film" tabs — reload from server on each tab
             binding.tabLanguage.visibility = View.VISIBLE

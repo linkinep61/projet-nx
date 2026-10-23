@@ -98,7 +98,10 @@ open class WebJsProvider(
     //   → ce test seul ne se déclenchait JAMAIS là où il est prévu. On ajoute les appareils
     //   déclarés « faible mémoire » et les TV dont la classe mémoire normale est ≤ 192 Mo.
     //   Téléphones : inchangé (seul le test d'origine s'applique).
-    private val lowRam: Boolean by lazy {
+    // 2026-10-23 : le mode léger compte comme un appareil faible (WebView détruite après inactivité,
+    //   pas de préchauffage au démarrage).
+    private val lowRam: Boolean get() = lowRamMateriel || com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger
+    private val lowRamMateriel: Boolean by lazy {
         if (Runtime.getRuntime().maxMemory() < 200L * 1024 * 1024) return@lazy true
         runCatching {
             val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance

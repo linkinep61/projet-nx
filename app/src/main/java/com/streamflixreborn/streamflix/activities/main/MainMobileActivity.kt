@@ -577,6 +577,8 @@ class MainMobileActivity : FragmentActivity() {
                 provider.name == "DessinAnime" ->
                     getString(R.string.main_menu_series_tab)
                 provider.name == "Mini Drama" -> "Épisodes"
+                // 2026-10-23 (user : « Séries TV porte à confusion ») : profil Scans → « Scans ».
+                provider.name == "Scans" -> "Scans"
                 else -> getString(R.string.main_menu_tv_shows)
             }
             if (provider.name == "DessinAnime") {

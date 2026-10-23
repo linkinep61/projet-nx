@@ -266,6 +266,25 @@
             android:nextFocusUp="@id/mini_player_progress_row"
             android:nextFocusDown="@id/vgv_tv_shows"
             android:nextFocusLeft="@id/tab_fr"
+            android:nextFocusRight="@id/tab_3"
+            android:background="@android:color/transparent" />
+
+        <!-- 2026-10-23 : 3e onglet, visible seulement sur le profil Scans (« Scan 2 »). -->
+        <TextView
+            android:id="@+id/tab_3"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="Scan 2"
+            android:textColor="#80FFFFFF"
+            android:textSize="14sp"
+            android:visibility="gone"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/mini_player_progress_row"
+            android:nextFocusDown="@id/vgv_tv_shows"
+            android:nextFocusLeft="@id/tab_vostfr"
             android:background="@android:color/transparent" />
 
     </LinearLayout>

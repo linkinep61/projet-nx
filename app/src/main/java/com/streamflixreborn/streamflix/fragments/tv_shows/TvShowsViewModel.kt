@@ -30,6 +30,7 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
         viewModelScope.launch {
             ProviderChangeNotifier.providerChangeFlow.collect {
                 languageFilter = when {
+                    UserPreferences.currentProvider?.name == "Scans" -> "webtoon"
                     UserPreferences.currentProvider?.name in typeFilterProviders -> "serie"
                     UserPreferences.currentProvider is FilterableProvider -> "vf"
                     else -> "all"
@@ -85,6 +86,7 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
 
     private var page = 1
     private var languageFilter: String = when {
+        UserPreferences.currentProvider?.name == "Scans" -> "webtoon"
         UserPreferences.currentProvider?.name in typeFilterProviders -> "serie"
         UserPreferences.currentProvider is FilterableProvider -> "vf"
         else -> "all"
@@ -92,6 +94,10 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
 
     val isFilterable: Boolean
         get() = UserPreferences.currentProvider is FilterableProvider
+
+    /** Profil Scans : 3 onglets Webtoon / Scan 1 / Scan 2. */
+    val estScans: Boolean
+        get() = UserPreferences.currentProvider?.name == "Scans"
 
     val isTypeFilterable: Boolean
         get() = UserPreferences.currentProvider?.name in typeFilterProviders
@@ -163,7 +169,7 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
                 } else {
                     Log.d("TvShowsViewModel", "getTvShows: using STANDARD (no filter)")
                     ParentalControlUtils.filterItems(
-                        provider.getTvShows()
+                        (if (provider is com.streamflixreborn.streamflix.providers.ScansProvider) provider.getTvShowsOnglet(languageFilter, 1) else provider.getTvShows())
                     ).filterIsInstance<TvShow>()
                 }
                 if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
@@ -201,7 +207,7 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
                         ).filterIsInstance<TvShow>()
                     } else {
                         ParentalControlUtils.filterItems(
-                            provider.getTvShows(page + 1)
+                            (if (provider is com.streamflixreborn.streamflix.providers.ScansProvider) provider.getTvShowsOnglet(languageFilter, page + 1) else provider.getTvShows(page + 1))
                         ).filterIsInstance<TvShow>()
                     }
                     if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
