@@ -28,6 +28,19 @@ object AdultTvResolver {
 
     fun isAdultTvUrl(src: String): Boolean = src.startsWith(SCHEME)
 
+    /** Playlist HLS sans aucun segment ni variante (chaîne qui ne diffuse rien). En cas de
+     *  doute (réseau, code d'erreur) → false : on tente la chaîne normalement. */
+    private fun playlistVide(client: okhttp3.OkHttpClient, url: String, referer: String): Boolean = try {
+        client.newCall(
+            Request.Builder().url(url).header("User-Agent", UA).header("Referer", referer).build()
+        ).execute().use { r ->
+            if (!r.isSuccessful) return@use false
+            val corps = r.body?.string().orEmpty()
+            corps.contains("#EXTM3U") && !corps.contains("#EXTINF") &&
+                corps.lineSequence().none { it.isNotBlank() && !it.trimStart().startsWith("#") }
+        }
+    } catch (_: Exception) { false }
+
     suspend fun resolve(src: String): Video? = withContext(Dispatchers.IO) {
         try {
             val slug = src.removePrefix(SCHEME).trim('/')
@@ -65,13 +78,25 @@ object AdultTvResolver {
                 "direct" -> cfg["sourceUrl"].orEmpty()
                 else -> ""
             }
-            if (!lien.startsWith("http")) {
+            // 2026-10-24 (user : « on devrait prendre la pub quand elle est présente, comme
+            //   fait leur site ») : quand la chaîne ne diffuse rien, son flux xlivetv rend une
+            //   playlist VIDE (~80 octets, aucun segment) et leur lecteur bascule sur
+            //   `playerConfig.fallbackUrl` (flux de remplacement). On fait pareil.
+            val secours = cfg["fallbackUrl"].orEmpty().takeIf { it.startsWith("http") }
+            var choisi = lien
+            if (lien.startsWith("http") && secours != null && playlistVide(client, lien, page)) {
+                Log.w(TAG, "$slug : flux de la chaîne vide → flux de remplacement du site")
+                choisi = secours
+            } else if (!lien.startsWith("http") && secours != null) {
+                choisi = secours
+            }
+            if (!choisi.startsWith("http")) {
                 Log.w(TAG, "$slug : aucun lien (type=${cfg["streamType"]})")
                 return@withContext null
             }
-            Log.d(TAG, "$slug : lien résolu (${lien.substringAfter("://").substringBefore('/')})")
+            Log.d(TAG, "$slug : lien résolu (${choisi.substringAfter("://").substringBefore('/')})")
             Video(
-                source = lien,
+                source = choisi,
                 type = "application/vnd.apple.mpegurl",
                 headers = mapOf("User-Agent" to UA, "Referer" to page, "Origin" to BASE),
             )
