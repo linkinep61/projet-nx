@@ -202,6 +202,10 @@ class ScanReaderActivity : AppCompatActivity() {
         // 2026-10-23 (user) : bouton « Auto » entre − et + : lecture qui descend toute seule, lentement ;
         //   re-cliquer, une flèche ▲▼, OK ou toucher l'écran l'arrête.
         btnAuto = bouton("Auto") { if (autoCollant) arreterAuto() else lancerLectureAuto() }
+        // 2026-10-24 (user : « rester appuyé sur OK sur défilement auto, on nous propose la vitesse ») :
+        //   appui long (OK maintenu à la télécommande, doigt maintenu au téléphone) → choix de la vitesse.
+        btnAuto.isLongClickable = true
+        btnAuto.setOnLongClickListener { choisirVitesseAuto(); true }
         val marge = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             marginStart = dp(6f).toInt(); marginEnd = dp(6f).toInt()
         }
@@ -476,12 +480,39 @@ class ScanReaderActivity : AppCompatActivity() {
         }
     }
 
-    /** Bouton « Auto » : ~1 écran toutes les 10 s, jusqu'à ce qu'on l'arrête. */
+    /** Vitesses de la lecture auto, en secondes pour faire défiler un écran (10 s = l'ancienne vitesse fixe). */
+    private val vitessesAuto = listOf(20 to "Très lent", 14 to "Lent", 10 to "Normal", 7 to "Rapide", 5 to "Très rapide")
+    private fun secondesParEcran(): Int = prefs().getInt("auto_secondes", 10).takeIf { s -> vitessesAuto.any { it.first == s } } ?: 10
+
+    /** Appui long sur « Auto » : liste des vitesses ; le choix est mémorisé et lance (ou ajuste) la lecture auto. */
+    private fun choisirVitesseAuto() {
+        val actuelle = secondesParEcran()
+        val libelles = vitessesAuto.map { (sec, nom) -> "$nom — $sec s par écran" }.toTypedArray()
+        val coche = vitessesAuto.indexOfFirst { it.first == actuelle }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Vitesse du défilement auto")
+            .setSingleChoiceItems(libelles, coche) { d, i ->
+                val (sec, nom) = vitessesAuto[i]
+                prefs().edit().putInt("auto_secondes", sec).putBoolean("auto_astuce_vue", true).apply()
+                d.dismiss()
+                if (autoCollant) autoVitesse = 1f / sec else lancerLectureAuto()
+                toast("Défilement auto : $nom")
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** Bouton « Auto » : un écran toutes les N secondes (réglable par appui long), jusqu'à ce qu'on l'arrête. */
     private fun lancerLectureAuto() {
         arreterAuto()
         // autoCollant AVANT demarrerAuto : sinon demarrerAuto remet la vitesse « flèche maintenue » (0,6).
         autoCollant = true
-        autoVitesse = 0.10f
+        autoVitesse = 1f / secondesParEcran()
+        // Première utilisation : on signale l'appui long (sinon personne ne le trouve).
+        if (!prefs().getBoolean("auto_astuce_vue", false)) {
+            prefs().edit().putBoolean("auto_astuce_vue", true).apply()
+            Toast.makeText(this, "Astuce : appui long sur « Auto » pour régler la vitesse", Toast.LENGTH_LONG).show()
+        }
         demarrerAuto(+1)
         btnAuto.text = "⏸ Stop"
         afficherBarres(false)

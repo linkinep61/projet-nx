@@ -364,6 +364,24 @@ object ScansProvider : Provider {
             listOf("Shônen", "Isekai", "Romance", "Seinen", "Fantasy", "Action")
                 .map { "$it · Anime-Sama" to asCatalogue(genre = it) }
 
+        // 2026-10-24 (user : box Freebox Pop qui plante à l'ouverture de l'accueil Scans ; mesuré sur la TV :
+        //   +120 Mo pendant 2-3 s, le temps de lire ~33 pages de catalogue EN MÊME TEMPS) : en mode léger,
+        //   l'accueil n'affiche de toute façon que 5 rangées sans carrousel (cf. HomeViewModel.accueilLeger).
+        //   On ne charge donc que ces 5 rangées, UNE PAR UNE : Sushiscan (populaires, mises à jour,
+        //   nouveautés) puis les 2 premières d'Anime-Sama. Les onglets Webtoon / Scan 1 / Scan 2 restent complets.
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) {
+            val out = ArrayList<Category>()
+            for ((nom, url) in rangees.take(3)) {
+                val l = runCatching { liste(url) }.onFailure { Log.w(TAG, "rangée $nom : ${it.message}") }.getOrDefault(emptyList())
+                if (l.size >= 4) out.add(Category(nom, l.map { it.copy() }))
+            }
+            for ((nom, url) in rangeesAs.take(2)) {
+                val l = runCatching { asListe(url) }.onFailure { Log.w(TAG, "rangée $nom : ${it.message}") }.getOrDefault(emptyList())
+                if (l.size >= 4) out.add(Category(nom, l.map { it.copy() }))
+            }
+            Log.i(TAG, "accueil léger : ${out.size} rangées chargées une par une")
+            return@coroutineScope out
+        }
         val resultats = rangees.map { (nom, url) ->
             async { nom to runCatching { liste(url) }.onFailure { Log.w(TAG, "rangée $nom : ${it.message}") }.getOrDefault(emptyList()) }
         }.awaitAll()
