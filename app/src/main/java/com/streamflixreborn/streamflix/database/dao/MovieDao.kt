@@ -25,7 +25,18 @@ interface MovieDao {
     fun getByIdAsFlow(id: String): Flow<Movie?>
 
     @Query("SELECT * FROM movies WHERE id IN (:ids)")
-    fun getByIds(ids: List<String>): Flow<List<Movie>>
+    fun getByIdsPaquet(ids: List<String>): Flow<List<Movie>>
+
+    // 2026-10-24 (crash remonté par un abonné, Infinix Android 10) : « too many SQL variables ».
+    //   Jusqu'à Android 10, SQLite refuse plus de 999 paramètres dans une requête ; une liste de
+    //   plus de 999 films faisait planter l'appli. On interroge par paquets de 500 et on recolle.
+    //   Liste de 500 ou moins : requête unique, comportement identique à avant.
+    fun getByIds(ids: List<String>): Flow<List<Movie>> {
+        if (ids.size <= 500) return getByIdsPaquet(ids)
+        return kotlinx.coroutines.flow.combine(ids.chunked(500).map { getByIdsPaquet(it) }) { paquets ->
+            paquets.flatMap { it }
+        }
+    }
 
     @Query("SELECT * FROM movies WHERE isFavorite = 1 ORDER BY favoritedAtMillis DESC")
     fun getFavorites(): Flow<List<Movie>>

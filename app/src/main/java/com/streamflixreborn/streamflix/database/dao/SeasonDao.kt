@@ -18,7 +18,12 @@ interface SeasonDao {
     fun getById(id: String): Season?
 
     @Query("SELECT * FROM seasons WHERE id IN (:ids)")
-    fun getByIds(ids: List<String>): List<Season>
+    fun getByIdsPaquet(ids: List<String>): List<Season>
+
+    // 2026-10-24 : même limite SQLite que TvShowDao.getByIds (999 paramètres max jusqu'à
+    //   Android 10) → requête par paquets de 500.
+    fun getByIds(ids: List<String>): List<Season> =
+        if (ids.size <= 500) getByIdsPaquet(ids) else ids.chunked(500).flatMap { getByIdsPaquet(it) }
 
     @Query("SELECT * FROM seasons WHERE id = :id")
     fun getByIdAsFlow(id: String): Flow<Season?>

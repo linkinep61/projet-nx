@@ -25,7 +25,18 @@ interface TvShowDao {
     fun getByIdAsFlow(id: String): Flow<TvShow?>
 
     @Query("SELECT * FROM tv_shows WHERE id IN (:ids)")
-    fun getByIds(ids: List<String>): Flow<List<TvShow>>
+    fun getByIdsPaquet(ids: List<String>): Flow<List<TvShow>>
+
+    // 2026-10-24 (crash remonté par un abonné, Infinix Android 10) : « too many SQL variables ».
+    //   Jusqu'à Android 10, SQLite refuse plus de 999 paramètres dans une requête ; une liste de
+    //   plus de 999 séries faisait planter l'appli. On interroge par paquets de 500 et on recolle.
+    //   Liste de 500 ou moins : requête unique, comportement identique à avant.
+    fun getByIds(ids: List<String>): Flow<List<TvShow>> {
+        if (ids.size <= 500) return getByIdsPaquet(ids)
+        return kotlinx.coroutines.flow.combine(ids.chunked(500).map { getByIdsPaquet(it) }) { paquets ->
+            paquets.flatMap { it }
+        }
+    }
 
     @Query("SELECT * FROM tv_shows WHERE isFavorite = 1 ORDER BY favoritedAtMillis DESC")
     fun getFavorites(): Flow<List<TvShow>>

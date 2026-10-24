@@ -62,8 +62,8 @@ android {
         //   la balance sera alors differente parce qu'il y aura quelque chose en face.
         minSdk 23
         targetSdk 35
-        versionCode 108004
-        versionName "1.8.4"
+        versionCode 108005
+        versionName "1.8.5"
 
         // ABI pilotÃ©e par la propriÃ©tÃ© ABI_TARGET (local.properties, posÃ©e par la CI).
         //   APK par dÃ©faut = ARM (armeabi-v7a + arm64-v8a).
