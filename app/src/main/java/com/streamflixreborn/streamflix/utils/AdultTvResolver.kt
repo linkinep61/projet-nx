@@ -28,6 +28,26 @@ object AdultTvResolver {
 
     fun isAdultTvUrl(src: String): Boolean = src.startsWith(SCHEME)
 
+    // 2026-10-25 (user : « les liens expirent et ne sont pas redemandés ») : le lien xlivetv est
+    //   à durée limitée. Quand la lecture tombe en erreur, le lecteur réessayait le MÊME lien
+    //   périmé puis abandonnait → écran noir. On redemande désormais un lien neuf au site et on
+    //   relance, avec un garde-fou : au plus 1 redemande toutes les 10 s, 6 par chaîne et par
+    //   quart d'heure (sinon une chaîne vraiment HS ferait tourner le site en boucle).
+    private val redemandes = java.util.concurrent.ConcurrentHashMap<String, ArrayDeque<Long>>()
+
+    /** true si on a le droit de redemander un lien neuf pour cette chaîne maintenant. */
+    fun peutRedemander(src: String): Boolean {
+        val now = System.currentTimeMillis()
+        val file = redemandes.getOrPut(src) { ArrayDeque() }
+        synchronized(file) {
+            while (file.isNotEmpty() && now - file.first() > 15 * 60_000L) file.removeFirst()
+            if (file.isNotEmpty() && now - file.last() < 10_000L) return false
+            if (file.size >= 6) return false
+            file.addLast(now)
+            return true
+        }
+    }
+
     /** Playlist HLS sans aucun segment ni variante (chaîne qui ne diffuse rien). En cas de
      *  doute (réseau, code d'erreur) → false : on tente la chaîne normalement. */
     private fun playlistVide(client: okhttp3.OkHttpClient, url: String, referer: String): Boolean = try {

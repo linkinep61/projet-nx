@@ -93,6 +93,10 @@ object BackupRegistry {
         "MoviesFree" to "MoviesFree (VOSTFR, par TMDB)",
         // 2026-10-22 (user : « branche-le et on fait les tests ») : Vidnest, agrégateur VO par TMDB.
         "Vidnest" to "Vidnest (VOSTFR, par TMDB)",
+        // 2026-10-25 (user : « autant rajouter la source, si ça permet de compléter des trucs où il
+        //   n'y a rien » / « juste préciser qu'elle est surtout en VO ») : EmbedWave (lecteur
+        //   web.nxsha.app), par TMDB — a par ex. WWE Raw récent.
+        "EmbedWave" to "EmbedWave (surtout VO, par TMDB)",
         "Movix" to "Movix",
         "Frembed" to "Frembed",
         "Vidzy" to "Vidzy (par TMDB)",
@@ -1741,6 +1745,11 @@ object BackupRegistry {
             //   faire de bêtises ») : page web cachée à la lecture + VO qui compte sur les sous-titres
             //   automatiques / la traduction, coupés en mode léger → source absente en mode léger.
             if (!UserPreferences.modeLeger && !resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("MoviesFree") {
+                // 2026-10-25 : plus d'affichage à l'aveugle — Vidsrc dit lui-même s'il a l'œuvre
+                //   (cf. Vidsrc.disponible). Absent → aucun serveur ; pas de réponse nette → gardé.
+                if (com.streamflixreborn.streamflix.utils.Vidsrc.disponible(resolvedTmdbId!!, key.isMovie, key.season, key.episode) == false) {
+                    return@emit emptyList()
+                }
                 listOf(Video.Server(
                     id = "vidsrc_${if (key.isMovie) "movie_$resolvedTmdbId" else "tv_${resolvedTmdbId}_${key.season}_${key.episode}"}",
                     name = "[VOSTFR]",
@@ -1763,6 +1772,24 @@ object BackupRegistry {
                     name = "[VOSTFR]",
                     src = (if (key.isMovie) "https://vidnest.fun/movie/$tmdb"
                            else "https://vidnest.fun/tv/$tmdb/${key.season.coerceAtLeast(1)}/${key.episode}") + "#vostfr",
+                ))
+            } }
+
+            // ── EMBEDWAVE (lecteur web.nxsha.app, par TMDB) ─────────────────────────
+            // 2026-10-25 (user : « autant rajouter la source, si ça permet de compléter des trucs où
+            //   il n'y a rien ») : vérifié au navigateur, WWE Raw S34E01 (absent partout ailleurs) se
+            //   lance — audio anglais. Mêmes règles que Vidnest : jamais sur une œuvre française,
+            //   coupé en mode léger, sous-titres de l'appli. Pas de contrôle de présence possible
+            //   (API chiffrée) → abandon court à la lecture (cf. EmbedWave.video).
+            if (!UserPreferences.modeLeger && !resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("EmbedWave") {
+                val tmdb = resolvedTmdbId!!
+                listOf(Video.Server(
+                    id = "embedwave_${if (key.isMovie) "movie_$tmdb" else "tv_${tmdb}_${key.season}_${key.episode}"}",
+                    // « [VOSTFR] » comme Vidnest/MoviesFree (sous-titres ajoutés par l'appli) : avec
+                    //   « [VO] », le réglage « masquer la VO » le cachait (hideVo). La mention
+                    //   « surtout VO » demandée par le user est dans le nom de la source.
+                    name = "[VOSTFR]",
+                    src = com.streamflixreborn.streamflix.utils.EmbedWave.lien(tmdb, key.isMovie, key.season, key.episode) + "#vostfr",
                 ))
             } }
 
@@ -2808,6 +2835,7 @@ object BackupRegistry {
             "KissKH" -> com.streamflixreborn.streamflix.utils.KissKh.video(orig)
             "MoviesFree" -> com.streamflixreborn.streamflix.utils.Vidsrc.video(orig)
             "Vidnest" -> com.streamflixreborn.streamflix.extractors.VidnestExtractor().extract(orig.src.substringBefore('#'))
+            "EmbedWave" -> com.streamflixreborn.streamflix.utils.EmbedWave.video(orig)
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
                 dynamicBackups[source]?.let { dyn ->

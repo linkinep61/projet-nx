@@ -25,6 +25,44 @@ object Vidsrc {
     fun lien(tmdb: String, estUnFilm: Boolean, saison: Int, episode: Int): String =
         if (estUnFilm) "$BASE/embed/movie/$tmdb" else "$BASE/embed/tv/$tmdb/${saison.coerceAtLeast(1)}/$episode"
 
+    /**
+     * 2026-10-25 (user : « deux sources TMDB qui s'affichent pour tout et n'importe quoi, même s'ils
+     * n'ont pas la source ») — Vidsrc était proposé à l'aveugle (ex. WWE Raw S34E01 → « Media not
+     * found »). Son lecteur interroge data.vidsrc.sh/api.php (type, tmdb, saison, épisode) qui
+     * répond {"status_code":404} quand il n'a rien, 200 + titre quand il l'a (relevé au navigateur :
+     * GoT S01E01 et Fight Club → 200 ; WWE Raw S34E01 et GoT saison 99 → 404). Réponse de quelques
+     * octets → contrôle léger avant d'afficher le serveur.
+     * Retour : true = présent, false = absent (on cache le serveur), null = pas de réponse nette
+     * (on garde le serveur, comme avant, pour ne rien perdre si l'API change).
+     */
+    suspend fun disponible(tmdb: String, estUnFilm: Boolean, saison: Int, episode: Int): Boolean? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val url = if (estUnFilm) "https://data.vidsrc.sh/api.php?type=movie&tmdb=$tmdb"
+                else "https://data.vidsrc.sh/api.php?type=tv&tmdb=$tmdb&season=${saison.coerceAtLeast(1)}&episode=$episode"
+            try {
+                val client = NetworkClient.default.newBuilder()
+                    .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+                val req = okhttp3.Request.Builder().url(url)
+                    .header("Referer", "$BASE/")
+                    .build()
+                client.newCall(req).execute().use { r ->
+                    val corps = r.body?.string().orEmpty()
+                    val code = Regex(""""status_code"\s*:\s*(\d+)""").find(corps)?.groupValues?.get(1)?.toIntOrNull()
+                    val res = when (code) {
+                        200 -> true
+                        404 -> false
+                        else -> null
+                    }
+                    Log.d(TAG, "disponible ${url.substringAfter("api.php?")} → HTTP ${r.code}, status_code=$code → $res")
+                    res
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "disponible : pas de réponse (${e.message}) → serveur gardé")
+                null
+            }
+        }
+
     suspend fun video(server: Video.Server): Video {
         val r = WebViewStreamResolver.resolve(
             entryUrl = server.src.substringBefore('#'),

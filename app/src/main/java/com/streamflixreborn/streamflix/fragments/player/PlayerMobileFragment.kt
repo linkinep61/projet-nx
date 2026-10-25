@@ -707,6 +707,8 @@ class PlayerMobileFragment : Fragment() {
     private val BUFFERING_TIMEOUT_MS = 45_000L
     private var usingCronet = false
     private var usingDoH = false
+    /** 2026-10-25 (RoutesLecture) : hôte relancé par le client d'extraction après un 403 ; appris si READY. */
+    private var essaiRouteExtractionHote: String? = null
     private var usingBrowserOkHttp = false
     private var usingWebView = false
 
@@ -6047,6 +6049,13 @@ class PlayerMobileFragment : Fragment() {
                         vodStickyRetryCount = 0
                         Log.d("PlayerMobileFragment", "VOD stream marked as working — fast-swap on glitch enabled")
                     }
+                    // 2026-10-25 (RoutesLecture) : l'essai « client d'extraction » après un 403 a lu → appris.
+                    essaiRouteExtractionHote?.let { h ->
+                        val u = player.currentMediaItem?.localConfiguration?.uri?.toString()
+                        if (com.streamflixreborn.streamflix.utils.RoutesLecture.hote(u) == h)
+                            com.streamflixreborn.streamflix.utils.RoutesLecture.apprendre(u)
+                        essaiRouteExtractionHote = null
+                    }
                     // 2026-05-21 : ce serveur a RÉELLEMENT joué pour CE titre → VERIFIED (vert)
                     //   uniquement pour ce titre (args.id), pas de bave sur les autres.
                     currentServer?.let {
@@ -6299,6 +6308,23 @@ class PlayerMobileFragment : Fragment() {
                 Log.e("PlayerDebug", "onPlayerError: code=${error.errorCode}, msg=${error.message}")
                 Log.e("PlayerDebug", "  cause: ${error.cause}")
                 Log.e("PlayerDebug", "  cause.cause: ${error.cause?.cause}")
+                // 2026-10-25 (user, Zone 18@ : « les liens expirent et ne sont pas redemandés ») :
+                //   lien xlivetv à durée limitée → on redemande un lien NEUF au site
+                //   (getVideo → AdultTvResolver) au lieu de recharger le lien périmé.
+                currentServer?.let { srv ->
+                    if (com.streamflixreborn.streamflix.utils.AdultTvResolver.isAdultTvUrl(srv.src)) {
+                        if (com.streamflixreborn.streamflix.utils.AdultTvResolver.peutRedemander(srv.src)) {
+                            Log.w("PlayerMobileFragment", "Zone 18 : lien expiré ? → nouveau lien demandé au site")
+                            // Pas rouge : ce n'est pas le serveur qui a lâché, c'est le lien qui a expiré.
+                            com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                                srv.id, com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNSURE, args.id)
+                            binding.settings.refreshServerList()
+                            viewModel.getVideo(srv)
+                            return
+                        }
+                        Log.w("PlayerMobileFragment", "Zone 18 : trop de redemandes de lien, suite normale")
+                    }
+                }
                 Log.e("PlayerDebug", "  uri: ${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(100)}")
                 Log.e("PlayerMobileFragment", "onPlayerError: ", error)
 
@@ -6470,6 +6496,22 @@ class PlayerMobileFragment : Fragment() {
                 if (is403) {
                     Log.e("PlayerNetwork", "403 error! usingCronet=$usingCronet, source=${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(80)}")
                     val server = currentServer ?: return
+                    // 2026-10-25 (RoutesLecture, règle GÉNÉRIQUE) : le flux a été lancé par la pile du
+                    //   lecteur (DNS système / Cronet) → on le relance UNE fois par le client
+                    //   d'extraction (même DNS, même adresse que la demande du lien). Si ça lit,
+                    //   l'hébergeur est appris (cf. onPlaybackStateChanged READY).
+                    val uri403 = player.currentMediaItem?.localConfiguration?.uri?.toString()
+                    val video403 = currentVideo
+                    if (!usingDoH && video403 != null &&
+                        com.streamflixreborn.streamflix.utils.RoutesLecture.peutEssayer(uri403)) {
+                        essaiRouteExtractionHote = com.streamflixreborn.streamflix.utils.RoutesLecture.hote(uri403)
+                        hostOf(video403.source)?.let { dnsBlockedHosts.add(it) }   // force DoH-OkHttp au relancement
+                        httpDataSource = createDoHOkHttpDataSourceFactory()
+                        dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
+                        initializePlayer(currentExtraBuffering, currentSoftwareDecoder, video403.source)
+                        displayVideo(video403, server)
+                        return
+                    }
                     pruneBrokenVariant(server)
                     val nextServer = nextAutoFallbackServer(servers, server)
                     if (nextServer != null) {
@@ -7870,6 +7912,13 @@ class PlayerMobileFragment : Fragment() {
             || url.contains("cloudatacdn.com", ignoreCase = true)
             || url.contains("cdndirector.dailymotion.com", ignoreCase = true)
             || url.contains("dmcdn.net", ignoreCase = true)
+            // 2026-10-25 (user, Zone 18@ en 403 sur le Honor, OK sur l'Oppo) : le lien xlivetv
+            //   n'est valable que pour l'adresse IP qui l'a demandé (AdultTvResolver, OkHttp+DoH).
+            //   Lu par le DNS système, le flux pouvait partir en IPv6 au lieu d'IPv4 (ou l'inverse)
+            //   → autre adresse vue par le serveur → 403. Même route pour la demande et la lecture.
+            || url.contains("xlivetv.com", ignoreCase = true)
+            // 2026-10-25 (RoutesLecture, règle générique) : hébergeurs APPRIS après un 403 réparé.
+            || com.streamflixreborn.streamflix.utils.RoutesLecture.exigeClientExtraction(url)
             || url.contains("anime-sama.", ignoreCase = true)
             // 2026-07-30 : CDN Vidmoly (cert rejeté par vieux CA store) → OkHttp trust-all.
             || url.contains("vmwesa", ignoreCase = true)

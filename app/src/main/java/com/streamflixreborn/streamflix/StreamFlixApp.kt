@@ -601,6 +601,7 @@ class StreamFlixApp : Application() {
         // 2. Inizializzazione preferenze.
         try {
             UserPreferences.setup(this)
+            com.streamflixreborn.streamflix.utils.RoutesLecture.init(this)
             DnsResolver.setDnsUrl(UserPreferences.dohProviderUrl)
         } catch (e: Throwable) {
             Log.e("StreamFlixApp", "UserPreferences/DNS setup failed: ${e.message}", e)

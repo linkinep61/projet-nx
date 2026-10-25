@@ -240,6 +240,12 @@ object MiniPlayerController {
      */
     @Volatile private var currentServerIsFastTrack: Boolean = false
 
+    // 2026-10-25 (RoutesLecture) : lecture en cours = essai par le client d'extraction après un
+    //   403 → si elle démarre (STATE_READY), l'hébergeur est appris pour les fois suivantes.
+    @Volatile private var essaiRouteExtractionHote: String? = null
+    /** Flux lancé par la pile du lecteur (DefaultHttp/Cronet), donc candidat à l'essai sur 403. */
+    @Volatile private var lectureParPileLecteur: Boolean = false
+
     // 2026-05-17 v18 (user "faire un jumelage pour éviter la coupure") :
     //   pré-buffer d'un BACKUP MediaItem dans la queue ExoPlayer. Quand
     //   le primary cut (STATE_BUFFERING extended), on bascule INSTANTANÉMENT
@@ -714,6 +720,44 @@ object MiniPlayerController {
                 tryNextServer()
                 return
             }
+            // 2026-10-25 (RoutesLecture, règle GÉNÉRIQUE) : 403 sur un flux lancé par la pile du
+            //   lecteur → on relance UNE fois le même serveur par le client d'extraction (même
+            //   DNS, même adresse que la demande du lien). Si ça lit, l'hébergeur est appris.
+            val uri403 = player?.currentMediaItem?.localConfiguration?.uri?.toString()
+            if (httpCode == 403 && lectureParPileLecteur && RoutesLecture.peutEssayer(uri403)) {
+                val chIdR = currentChannelId
+                val idxR = currentServerIndex
+                if (chIdR != null) {
+                    essaiRouteExtractionHote = RoutesLecture.hote(uri403)
+                    loadJob?.cancel()
+                    loadJob = scope.launch {
+                        delay(300)
+                        if (currentChannelId == chIdR) {
+                            val provR = UserPreferences.currentProvider
+                            if (provR is IptvProvider) playServerAtIndex(chIdR, provR, idxR)
+                            else playChannel(chIdR, currentChannelName ?: "", currentChannelPoster)
+                        }
+                    }
+                    return
+                }
+            }
+            // 2026-10-25 (user, Zone 18@ : « les liens expirent et ne sont pas redemandés ») :
+            //   le lien xlivetv est à durée limitée → on redemande un lien NEUF au site via
+            //   playChannel (getVideo → AdultTvResolver) au lieu de recharger le lien périmé.
+            val srcAdult = availableServers.getOrNull(currentServerIndex)?.src
+            val chIdAdult = currentChannelId
+            if (chIdAdult != null && srcAdult != null && AdultTvResolver.isAdultTvUrl(srcAdult)) {
+                if (AdultTvResolver.peutRedemander(srcAdult)) {
+                    Log.w(TAG, "Zone 18 : lien expiré ? → nouveau lien demandé au site (${error.errorCodeName})")
+                    val nom = currentChannelName ?: ""; val aff = currentChannelPoster
+                    scope.launch {
+                        delay(800)
+                        if (currentChannelId == chIdAdult) playChannel(chIdAdult, nom, aff)
+                    }
+                    return
+                }
+                Log.w(TAG, "Zone 18 : trop de redemandes de lien, on laisse la suite normale")
+            }
             // 2026-05-31 : OTF TV — le CDN coupe la connexion après ~60s.
             // Au lieu de passer au serveur suivant (il n'y en a qu'un),
             // on relance le même flux (reconnexion silencieuse).
@@ -896,6 +940,12 @@ object MiniPlayerController {
                     val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: ""
                     Log.d(TAG, "Playback ready on server [$currentServerIndex] $serverName")
                     indexServeurAyantJoue = currentServerIndex   // 2026-10-03 : voir stickyServeurEssais
+                    // 2026-10-25 : l'essai « client d'extraction » après un 403 a réellement lu → appris.
+                    essaiRouteExtractionHote?.let { h ->
+                        val u = player?.currentMediaItem?.localConfiguration?.uri?.toString()
+                        if (RoutesLecture.hote(u) == h) RoutesLecture.apprendre(u)
+                        essaiRouteExtractionHote = null
+                    }
                     // 2026-08-09 : on MÉMORISE le serveur qui a réellement joué, pour le
                     //   remonter en tête à la prochaine ouverture de cette chaîne. C'est le
                     //   pendant de la relecture faite dans loadServers — sans cette ligne,
@@ -2294,6 +2344,10 @@ object MiniPlayerController {
         //   ne l'avait jamais su et retombait sur DefaultHttpDataSource. On l'aligne.
         "cdndirector.dailymotion.com",
         "dmcdn.net",
+        // 2026-10-25 (user, Zone 18@ en 403 sur le Honor, OK sur l'Oppo) : lien xlivetv lié à
+        //   l'adresse IP qui l'a demandé (AdultTvResolver, OkHttp+DoH). Même route pour la lecture,
+        //   sinon IPv4/IPv6 peut différer entre la demande et la lecture → 403.
+        "xlivetv.com",
     )
 
     fun initPlayer(context: Context) {
@@ -3590,7 +3644,11 @@ object MiniPlayerController {
             val hoteFlux = runCatching {
                 java.net.URI(video.source).host.orEmpty().lowercase()
             }.getOrDefault("")
-            val exigeOkHttp = HOTES_REFUSANT_PILE_ANDROID.any { hoteFlux.endsWith(it) }
+            // 2026-10-25 (RoutesLecture) : hébergeurs connus ou APPRIS (lien lié à l'IP de la
+            //   demande) + essai en cours après un 403 → même client que l'extraction.
+            val essaiEnCours = essaiRouteExtractionHote != null && essaiRouteExtractionHote == hoteFlux
+            val exigeOkHttp = HOTES_REFUSANT_PILE_ANDROID.any { hoteFlux.endsWith(it) } ||
+                RoutesLecture.exigeClientExtraction(video.source) || essaiEnCours
             // 2026-09-27 : films Cinélux / Ciné Films (portails Stalker, /play/movie.php). Plusieurs
             //   de ces portails ne sont PAS résolus par le DNS de la box (ex. troublesupport.my.to,
             //   esogalaxiusnext.tech : vides en DNS système, OK en DoH). Le grand lecteur passe déjà
@@ -3598,6 +3656,7 @@ object MiniPlayerController {
             //   suivant (« 27 nuits ne part pas du premier coup »). Même client DoH qu'à l'extraction.
                 || video.source.contains("/play/movie.php", ignoreCase = true)
             val isIptvNonVavoo = isLiveChannel && !isVavoo && !exigeOkHttp
+            lectureParPileLecteur = !exigeOkHttp
             val dsFactory: androidx.media3.datasource.DataSource.Factory? = if (isIptvNonVavoo) {
                 val ua = perVideoHeaders["User-Agent"]
                     ?: com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT

@@ -126,9 +126,13 @@ object WebViewStreamResolver {
         //   tout de suite au lieu d'attendre [timeoutMs].
         abandonSiTitre: Regex? = null,
         delaiAbandonMs: Long = 12_000L,
+        // 2026-10-25 (EmbedWave) : hôtes dont le flux est connu mort — leur lecteur les essaie en
+        //   premier puis passe au suivant ; sans ça on capte le premier (mort) et la lecture tourne
+        //   dans le vide. Vide par défaut → aucun changement pour les autres sources.
+        hotesIgnores: List<String> = emptyList(),
     ): Resolved? = withContext(Dispatchers.Main) {
         withTimeoutOrNull(timeoutMs) {
-            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs)
+            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs, hotesIgnores)
         }
     }
 
@@ -166,6 +170,7 @@ object WebViewStreamResolver {
         motifsFlux: List<String> = emptyList(),
         abandonSiTitre: Regex? = null,
         delaiAbandonMs: Long = 12_000L,
+        hotesIgnores: List<String> = emptyList(),
     ): Resolved? = suspendCancellableCoroutine { cont ->
         val context = StreamFlixApp.instance.applicationContext
         var resolved = false
@@ -293,7 +298,8 @@ object WebViewStreamResolver {
                 val reqPath = try { android.net.Uri.parse(reqUrl).path ?: "" } catch (_: Throwable) { reqUrl.substringBefore("?") }
                 val isStream = exts.any { reqPath.contains(it, ignoreCase = true) } ||
                     motifsFlux.any { reqPath.contains(it) }
-                if (isStream && !POISONED_TARGET_HOSTS.any { host.contains(it) }) {
+                if (isStream && !POISONED_TARGET_HOSTS.any { host.contains(it) } &&
+                    !hotesIgnores.any { host.contains(it, ignoreCase = true) }) {
                     android.util.Log.d(
                         "WebViewStreamResolver",
                         "stream INTERCEPTED: $reqUrl",
