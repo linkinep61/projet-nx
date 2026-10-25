@@ -923,8 +923,20 @@ private fun normSearch(s: String): String =
         // 2026-10-25 (user : « le dossier Sport est trop lourd… un chargement qu'à l'endroit où on
         //   veut aller ») : l'ouverture du dossier Sport n'affiche que ses sous-dossiers (aucun
         //   chargement) ; chaque sous-dossier `sportdos_<id>` charge son contenu au clic.
+        // 2026-10-25 (user : « tant qu'il n'y a rien dedans, tu ne devrais pas afficher la tuile ») :
+        //   l'accueil ne montre que les rubriques qui ont du contenu ; il faut pour ça les matchs
+        //   (préchargés en fond à l'entrée du TV Hub). Pas encore prêts → on les attend.
         if (folderKey == com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY) {
-            displayCategories(ctx, folderName, com.streamflixreborn.streamflix.utils.SportHub.accueil(), onChannelSelected)
+            val sh = com.streamflixreborn.streamflix.utils.SportHub
+            if (sh.matchsPrets()) {
+                displayCategories(ctx, folderName, sh.accueil(), onChannelSelected)
+                return
+            }
+            android.widget.Toast.makeText(ctx, "Chargement des matchs…", android.widget.Toast.LENGTH_SHORT).show()
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                val cats = runCatching { sh.accueilCharge() }.getOrElse { sh.accueil() }
+                withContext(Dispatchers.Main) { displayCategories(ctx, folderName, cats, onChannelSelected) }
+            }
             return
         }
         if (folderKey.startsWith(com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER)) {
@@ -945,7 +957,7 @@ private fun normSearch(s: String): String =
                 }
                 withContext(Dispatchers.Main) {
                     if (cats.isEmpty()) {
-                        android.widget.Toast.makeText(ctx, "$folderName indisponible — réessaie", android.widget.Toast.LENGTH_LONG).show()
+                        android.widget.Toast.makeText(ctx, "Rien dans $folderName pour le moment", android.widget.Toast.LENGTH_LONG).show()
                     } else {
                         displayCategories(ctx, folderName, cats, onChannelSelected)
                     }

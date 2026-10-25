@@ -367,8 +367,45 @@ object SportHub {
             SousDossier("web", NOM_DOSSIER_WEB)
     }
 
-    /** Accueil du dossier Sport : la grille des sous-dossiers, immédiate. */
-    fun accueil(): List<Category> = listOf(Category(name = "Sport", list = SOUS_DOSSIERS.map { d ->
+    /**
+     * 2026-10-25 (user : « tant qu'il n'y a rien dedans, tu ne devrais pas afficher la tuile ») :
+     * une tuile vide (« Premier League indisponible — réessaie ») n'est plus montrée. Les tuiles
+     * de compétitions dépendent du chargement « matchs » : il est lancé EN FOND dès l'entrée dans
+     * le TV Hub ([prechargerMatchs]) pour que le dossier Sport s'ouvre déjà trié ; sinon l'ouverture
+     * l'attend ([accueilCharge]). Les autres tuiles (bouquets, RénéVéo, Nouvelles sources) restent
+     * visibles tant qu'on ne sait pas qu'elles sont vides.
+     */
+    fun matchsPrets(): Boolean = contenus["matchs"]?.let { System.currentTimeMillis() - it.ts < TTL_MS } == true
+
+    /** Lance le chargement des matchs en fond (entrée dans le TV Hub). Rien en mode léger. */
+    fun prechargerMatchs() {
+        if (UserPreferences.modeLeger || matchsPrets() || !enRafraichissement.add("matchs")) return
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            try { runCatching { contenu("matchs") } } finally { enRafraichissement.remove("matchs") }
+        }
+    }
+
+    /** Accueil après chargement des matchs (attend celui en cours s'il y en a un). */
+    suspend fun accueilCharge(): List<Category> {
+        runCatching { contenu("matchs") }
+        return accueil()
+    }
+
+    /** Rubriques non vides d'un sous-dossier chargé et frais ; null = pas (encore) chargé. */
+    private fun rubriquesConnues(id: String): Set<String>? =
+        contenuSiPret(id).takeIf { contenus[id] != null && System.currentTimeMillis() - contenus[id]!!.ts < TTL_MS }
+            ?.filter { it.list.isNotEmpty() }?.map { it.name }?.toSet()
+
+    /** Accueil du dossier Sport : la grille des sous-dossiers NON VIDES (inconnus = montrés). */
+    fun accueil(): List<Category> = listOf(Category(name = "Sport", list = SOUS_DOSSIERS.filter { d ->
+        val base = d.id.substringBefore('~')
+        val connues = rubriquesConnues(base)
+        when {
+            connues == null -> true
+            d.id.contains('~') -> d.titre in connues
+            else -> connues.isNotEmpty()
+        }
+    }.map { d ->
         TvShow(id = "livehub::folder::$PREFIXE_SOUS_DOSSIER${d.id}", title = d.titre).apply {
             providerName = "TV Hub"
             poster = LOGO

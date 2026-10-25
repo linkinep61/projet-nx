@@ -472,6 +472,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
     }
 
     override suspend fun getHome(): List<Category> {
+        // 2026-10-25 : matchs du dossier Sport chargés en fond dès l'entrée dans le TV Hub, pour
+        //   que le dossier s'ouvre déjà trié (tuiles vides masquées, cf. SportHub.accueil).
+        com.streamflixreborn.streamflix.utils.SportHub.prechargerMatchs()
         val tHomeStart = System.currentTimeMillis()
         val favs = favoriteChannels()
         // Cache hit ? 95% des refresh tombent ici.
