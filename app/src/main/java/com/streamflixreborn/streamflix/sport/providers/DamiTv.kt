@@ -108,6 +108,7 @@ object DamiTv {
             viewers = e.optInt("viewers", 0),
             sources = sources,
             embedUrl = if (principal.isNotBlank()) toEmbed(principal) else sources.first().embedUrl,
+            francais = sources.any { DaddyLive.estFrancaise(it.name) },
         )
     }
 

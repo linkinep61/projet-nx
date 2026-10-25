@@ -257,7 +257,15 @@ open class Hoca8Extractor : Extractor() {
                                         .header("Accept", "text/html,application/xhtml+xml")
                                         .build()
                                     val resp = client.newCall(req).execute()
-                                    val body = resp.body?.string()
+                                    // 2026-10-25 : réponse lue SANS LIMITE → un « iframe » qui renvoyait
+                                    //   en fait un flux remplissait la mémoire (OutOfMemoryError de 250 Mo,
+                                    //   appli fermée — vu sur l'émulateur avec beIN de Multi Live). On ne
+                                    //   lit que les pages HTML, et 3 Mo au plus.
+                                    val typeRep = resp.header("Content-Type").orEmpty().lowercase()
+                                    val body = resp.use { r ->
+                                        if (typeRep.isNotEmpty() && !typeRep.contains("html")) null
+                                        else r.peekBody(3_000_000L).string()
+                                    }
                                     if (body != null && body.isNotEmpty()) {
                                         // Inject hook au début du <head> (ou
                                         // tout début du HTML si pas de <head>).

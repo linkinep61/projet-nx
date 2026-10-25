@@ -12,6 +12,7 @@ import com.streamflixreborn.streamflix.providers.VegetaTvProvider
 import com.streamflixreborn.streamflix.sport.SportEvent
 import com.streamflixreborn.streamflix.sport.SportSelfTest
 import com.streamflixreborn.streamflix.sport.providers.DamiTv
+import com.streamflixreborn.streamflix.sport.providers.DamiTvChaines
 import com.streamflixreborn.streamflix.sport.providers.SportProviders
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -86,6 +87,7 @@ object SportHub {
     /** Sous-dossiers du dossier Sport : `livehub::folder::sportdos_<id>`. */
     const val PREFIXE_SOUS_DOSSIER = "sportdos_"
     private const val NOM_DOSSIER_WEB = "🌐 Nouvelles sources"
+    private const val NOM_DOSSIER_CDIRECT = "📡 ChaineDirect"
 
     /** Tuiles déjà construites, clé « <sous-dossier>::<clé> » (cf. [tuile]). */
     @Volatile private var entrees: Map<String, Entree> = emptyMap()
@@ -104,7 +106,9 @@ object SportHub {
         "bein|sport|dazn|eurosport|equipe|golf|ligue ?1|\\bfoot|automoto|motors? ?tv|espn|setanta|equidia|" +
         "\\bnba\\b|\\bnfl\\b|\\bnhl\\b|\\bufc\\b|\\bwwe\\b|rugby|tennis|\\bf1\\b|formule ?1|moto ?gp|cyclisme|" +
         "\\bboxe|premier league|serie a\\b|laliga|la liga|bundesliga|champions league|ligue des champions|europa league|" +
-        "multiplex|olympi"
+        "multiplex|olympi|" +
+        // 2026-10-25 : chaînes foot ajoutées à data.m3u dont le nom ne contient pas de mot-clé sport évident.
+        "real madrid|\\bspor\\b|\\bssc\\b|arryadia|arriadia|mutv"
     )
     private val FAUX_SPORT = rx("transport|passeport|sportif du dimanche")
 
@@ -240,6 +244,8 @@ object SportHub {
             .replace(rx("\\b0+(\\d)"), "$1")              // « beIN MAX 01 » = « beIN MAX 1 »
             .replace(rx("\\bhd ?(\\d)"), " $1")            // « Bein Sport HD1 » = « beIN Sport 1 »
         p = p.replace("sports", "sport").replace("la chaine ", "").replace("canal plus", "canal+")
+            // 2026-10-25 : damitv « Canal+ Formula 1 » = Mix FR « Canal+ F1 » ; « Sport360 » = « Sport 360 ».
+            .replace(rx("\\bformula ?1\\b|\\bformule ?1\\b"), "f1").replace("sport360", "sport 360")
         p = p.replace(BRUIT, " ")
         return p.replace(rx("[^a-z0-9+]"), "").ifEmpty { plat(nomPropre).replace(rx("[^a-z0-9+]"), "") }
     }
@@ -285,7 +291,10 @@ object SportHub {
         "albania|kosovo|macedonia|bosnia|serbia|croatia|slovenia|slovakia|hungary|romania|bulgaria|greece|israel|" +
         "australia|new zealand|japan|korea|china|mexico|brazil|argentina|egypte|nigeria|" +
         // ligues étrangères qui ne nomment pas leur pays (« Liga MX », « Primeira Liga »…)
-        "liga mx|primeira|portugal|betplay|\\bmls\\b|saudi|super lig|eredivisie|jupiler|scottish|allsvenskan|eliteserien|superliga"
+        "liga mx|primeira|portugal|betplay|\\bmls\\b|saudi|super lig|eredivisie|jupiler|scottish|allsvenskan|eliteserien|superliga|" +
+        // 2026-10-25 (planning DaddyLive : « Czech Republic - 1. liga », « Germany - 3. Liga », « Poland - II Liga »)
+        "czech|poland|austria|switzerland|denmark|sweden|norway|finland|turkey|belgium|netherlands|ireland|" +
+        "\\b[2-9]\\. ?(liga|bundesliga)|\\bii liga|\\b2\\. bundesliga|segunda|serie b\\b|serie c\\b|efl\\b|league one|league two"
     )
     private const val AUTRES_MATCHS = "🏟 Autres matchs"
 
@@ -297,7 +306,8 @@ object SportHub {
         "📺 Eurosport" to rx("eurosport"),
         "📺 DAZN" to rx("dazn"),
         "📺 Ligue 1+" to rx("ligue ?1"),
-        "📺 Disney+, Prime, Max…" to rx("disney|prime|\\bmax\\b|apple"),
+        // 2026-10-25 : « Disney+, Prime, Max… » retiré — dossier vide (ses 14 chaînes étaient des
+        //   « beIN SPORTS MAX », déjà rangées dans beIN), il ne s'ouvrait pas.
     )
     private const val AUTRES_CHAINES = "📺 L'Équipe et autres chaînes"
     private const val RENEVEO_AUTRES = "📡 RénéVéo : chaînes TV"
@@ -317,7 +327,8 @@ object SportHub {
     }
 
     private val ORDRE_RUBRIQUES: List<String> =
-        COMPETITIONS.map { it.first } + AUTRES_MATCHS + FOOT_MONDE + BOUQUETS.map { it.first } + AUTRES_CHAINES + RENEVEO_AUTRES
+        COMPETITIONS.map { it.first } + AUTRES_MATCHS + FOOT_MONDE + BOUQUETS.map { it.first } + AUTRES_CHAINES + RENEVEO_AUTRES +
+            com.streamflixreborn.streamflix.sport.providers.ChaineDirect.RUBRIQUES.values.distinct()
 
     // ────────────────────────────────────────────────────────── Chargement
 
@@ -328,19 +339,26 @@ object SportHub {
     private class Trouve(
         val proprio: String, val id: String, val nom: String, val logo: String, val sportif: Boolean,
         val brut: Boolean = true, val rubrique: String? = null, val live: Boolean = false,
+        /** Événement web sans serveur en français (→ « Foot d'ailleurs » si aucune autre source n'en a). */
+        val etranger: Boolean = false,
     )
 
     private const val LIBELLE_OLA = "OLA"
     private val LIBELLES = mapOf(
         "ola" to LIBELLE_OLA, "vegeta" to "Vegeta", "vavoo" to "Vavoo",
-        "reneveo" to "RénéVéo", "mixfr" to "Mix FR",
-        DamiTv.ID to "DAMITV",
+        "reneveo" to "RénéVéo", "mixfr" to "Mix FR", "fast" to "FAST",
+        DamiTv.ID to "DAMITV", DamiTvChaines.PROPRIO to "DAMITV",
+        com.streamflixreborn.streamflix.sport.providers.StreamedPk.ID to "Streamed",
+        com.streamflixreborn.streamflix.sport.providers.DaddyLive.ID to "DaddyLive",
+        com.streamflixreborn.streamflix.sport.providers.ChaineDirect.ID to "ChaineDirect",
     )
     /** Ordre des serveurs d'une tuile : RénéVéo (sondé, rapide), les portails, puis les pages
      *  web du module sport/ (lues dans la WebView du grand lecteur, donc en dernier pour une
      *  chaîne qui a aussi des flux directs). */
-    private val ORDRE_SOURCES = listOf("reneveo", "ola", "vegeta", "vavoo", "mixfr", DamiTv.ID)
-    private val SOURCES_WEB = setOf(DamiTv.ID)
+    private val ORDRE_SOURCES = listOf("reneveo", DamiTvChaines.PROPRIO, "mixfr", "fast", "ola", "vegeta", "vavoo", com.streamflixreborn.streamflix.sport.providers.StreamedPk.ID,
+        com.streamflixreborn.streamflix.sport.providers.DaddyLive.ID, DamiTv.ID)
+    private val SOURCES_WEB = setOf(DamiTv.ID, com.streamflixreborn.streamflix.sport.providers.StreamedPk.ID,
+        com.streamflixreborn.streamflix.sport.providers.DaddyLive.ID, com.streamflixreborn.streamflix.sport.providers.ChaineDirect.ID)
 
     // ────────────────────────────────────────────────────────── Sous-dossiers (chargés au clic)
 
@@ -364,7 +382,9 @@ object SportHub {
         } +
             BOUQUETS.mapIndexed { i, b -> SousDossier("b$i", b.first) } +
             SousDossier("autres", AUTRES_CHAINES) + SousDossier("reneveo", RENEVEO_AUTRES) +
-            SousDossier("web", NOM_DOSSIER_WEB)
+            SousDossier("web", NOM_DOSSIER_WEB) +
+            // 2026-10-25 (user : « pour les prochains sites, un petit dossier à part au même endroit »).
+            SousDossier("cdirect", NOM_DOSSIER_CDIRECT)
     }
 
     /**
@@ -387,7 +407,12 @@ object SportHub {
 
     /** Accueil après chargement des matchs (attend celui en cours s'il y en a un). */
     suspend fun accueilCharge(): List<Category> {
-        runCatching { contenu("matchs") }
+        // 2026-10-25 (user : « l'ouverture du dossier général ne doit pas faire exploser le profil ») :
+        //   on attend la liste des matchs 3 s au plus (mesuré 1,7 s ; 27 s quand damitv bloquait).
+        //   Au-delà, l'accueil s'affiche avec toutes les tuiles et le chargement continue en fond.
+        //   Le chargement tourne hors de cette attente : la dépasser ne l'annule pas.
+        val charge = kotlinx.coroutines.CoroutineScope(Dispatchers.IO).async { runCatching { contenu("matchs") } }
+        withTimeoutOrNull(3_000L) { charge.await() }
         return accueil()
     }
 
@@ -490,7 +515,15 @@ object SportHub {
             if (!forcer) contenus[id]?.takeIf { System.currentTimeMillis() - it.ts < TTL_MS }?.let { return@withLock it.cats }
             val debut = System.currentTimeMillis()
             val trouves = collecter(id)
-            if (trouves.isEmpty()) return@withLock contenus[id]?.cats.orEmpty()
+            if (trouves.isEmpty()) {
+                // 2026-10-25 : « rien trouvé » est un résultat (ex. aucune chaîne de match dans les
+                //   sources du TV Hub) : on le retient, sinon l'accueil croit ne pas savoir et
+                //   affiche les tuiles vides. Une liste précédente non vide reste servie.
+                contenus[id]?.cats?.takeIf { it.isNotEmpty() }?.let { return@withLock it }
+                contenus[id] = Contenu(emptyList(), System.currentTimeMillis())
+                Log.i(TAG, "sous-dossier $id : rien trouvé (${System.currentTimeMillis() - debut} ms)")
+                return@withLock emptyList()
+            }
             val cats = construire(id, trouves)
             contenus[id] = Contenu(cats, System.currentTimeMillis())
             Log.i(TAG, "sous-dossier $id : ${trouves.size} trouvées → " +
@@ -498,6 +531,19 @@ object SportHub {
             cats
         }
     }
+
+    /** 2026-10-25 : JAMAIS de Zone 18@ dans Sport — une vidéo de ce dossier dont le titre contenait
+     *  « football » passait le filtre et s'affichait dans « L'Équipe et autres chaînes ». On écarte
+     *  le dossier (nom de catégorie) et ses liens (`adulttv://`). */
+    private fun estZone18(texte: String?): Boolean =
+        texte != null && (texte.contains("zone 18", ignoreCase = true) || texte.contains("adulttv", ignoreCase = true))
+
+    /** Chaîne damitv à ranger dans les bouquets sport (Canal+ France diffuse la Ligue 1, la F1…). */
+    private fun estSportDami(nom: String): Boolean = estSport(nom) || plat(nom).contains("canal")
+
+    /** Clé de rapprochement d'une chaîne TV hors sport (« TF1 » RénéVéo = « TF1 France » damitv). */
+    private fun cleTv(nom: String): String =
+        plat(nom).replace(rx("\\s+france$"), "").replace(rx("[^a-z0-9+]"), "")
 
     /** Un nom qui ressemble à un match (avant tout nettoyage) : sert à ne traiter, pour
      *  « Matchs du jour », que ces lignes-là parmi les ~2 400. */
@@ -530,18 +576,39 @@ object SportHub {
                 async {
                     source("Web · événements") {
                         SportProviders.evenements().map { ev ->
+                            // 2026-10-25 (user : « tu gardes tout, mais tout ce qui n'est pas français,
+                            //   lorsque tu penses qu'il n'est pas français, dans Foot d'ailleurs »).
+                            //   La rubrique réelle est gardée : une autre source du même match peut
+                            //   avoir du français (cf. construire).
                             Trouve(ev.provider, "ev::${ev.id}", nomEvenement(ev), ev.poster, true,
-                                brut = false, rubrique = rubriqueEvenement(ev), live = ev.enDirect)
+                                brut = false, rubrique = rubriqueEvenement(ev),
+                                live = ev.enDirect, etranger = !ev.francais)
                         }
                     }
                 },
             )
+            // chainedirect.com : toutes ses chaînes, rangées par rubrique du site (cf. ChaineDirect).
+            "cdirect" -> listOf(async {
+                source("ChaineDirect") {
+                    com.streamflixreborn.streamflix.sport.providers.ChaineDirect.getStreams().map { ev ->
+                        Trouve(ev.provider, "ev::${ev.id}", ev.title, ev.poster, true, brut = false,
+                            rubrique = com.streamflixreborn.streamflix.sport.providers.ChaineDirect.rubrique(ev), live = true)
+                    }
+                }
+            })
             // Chaînes RénéVéo hors sport (TF1, M6…) : liste embarquée, instantanée.
             "reneveo" -> listOf(async {
                 source("RénéVéo") {
                     ReneveoTv.chaines().ifEmpty { ReneveoTv.chainesSiDejaChargees() }
                         .filter { it.categorie != "sport" && !estSport(it.nom) }
                         .map { c -> Trouve("reneveo", "${ReneveoTv.PREFIX}${c.id}", c.nom, c.logo, false) }
+                }
+            }, async {
+                // damitv « Télévision en direct » (TF1, France 2, M6…) : rejoint la tuile RénéVéo
+                //   de même nom quand elle existe (cf. construire).
+                source("DAMITV TV") {
+                    DamiTvChaines.chaines().filter { !estSportDami(it.nom) }
+                        .map { c -> Trouve(DamiTvChaines.PROPRIO, "${DamiTvChaines.PREFIX}${c.id}", c.nom, c.logo, false) }
                 }
             })
             else -> listOf(
@@ -552,18 +619,38 @@ object SportHub {
                             .map { c -> Trouve("reneveo", "${ReneveoTv.PREFIX}${c.id}", c.nom, c.logo, true) }
                     }
                 },
-                // 1 500 max : beaucoup sont écartées ensuite (autres pays, matchs d'un autre jour).
-                async { source("OLA") { depuis("ola", OlaTvProvider.chainesQui(garder, 1_500)) } },
-                async { source("Vegeta") { depuis("vegeta", VegetaTvProvider.chainesQui(garder, 1_500)) } },
-                async { source("Vavoo") { depuis("vavoo", VavooProvider.chainesQui(garder, 1_500)) } },
+                // 2026-10-25 (user : « virer tout ce qui vient de Vegeta, Vavoo et OLA » — ils ont leur
+                //   propre profil — « et condenser ce qu'il y a dans le TV Hub ») : plus d'OLA / Vegeta /
+                //   Vavoo ici ; les chaînes sport du TV Hub lui-même : RénéVéo (ci-dessus), Mix FR (dont
+                //   Multi Live) et les chaînes FAST (Samsung TV+, Pluto, Plex, LG, Rakuten…).
                 async {
                     source("Mix FR") {
                         LiveTvHubProvider.fetchMixFrCategoriesPublic().asSequence()
+                            .filter { cat -> !estZone18(cat.name) }
                             .flatMap { cat -> cat.list.asSequence().filterIsInstance<TvShow>() }
                             // Sur le NOM seulement : la rubrique « sport » de Mix FR mélange BFM, RMC Découverte…
-                            .filter { t -> garder(t.title ?: "") }
+                            .filter { t -> !estZone18(t.id) && garder(t.title ?: "") }
                             .map { t -> Trouve("mixfr", t.id, t.title ?: "", t.poster ?: "", true) }
                             .distinctBy { it.id }.take(400).toList()
+                    }
+                },
+                async {
+                    source("FAST") {
+                        LiveTvHubProvider.fetchFastCategoriesPublic().asSequence()
+                            .filter { cat -> !estZone18(cat.name) }
+                            .flatMap { cat -> cat.list.asSequence().filterIsInstance<TvShow>() }
+                            .filter { t -> !estZone18(t.id) && garder(t.title ?: "") }
+                            .map { t -> Trouve("fast", t.id, t.title ?: "", t.poster ?: "", true) }
+                            .distinctBy { it.id }.take(300).toList()
+                    }
+                },
+                // 2026-10-25 (user : « intégrer les chaînes France de damitv, Télévision en direct,
+                //   onglet France ») : flux HLS directs (segments déguisés en PNG, cf. SauteImageDataSource).
+                async {
+                    source("DAMITV TV") {
+                        DamiTvChaines.chaines().filter { estSportDami(it.nom) }
+                            .filter { c -> garder(if (estSport(c.nom)) c.nom else "sport ${c.nom}") }
+                            .map { c -> Trouve(DamiTvChaines.PROPRIO, "${DamiTvChaines.PREFIX}${c.id}", c.nom, c.logo, true) }
                     }
                 },
             )
@@ -601,15 +688,36 @@ object SportHub {
         }
     }
 
+    /**
+     * 2026-10-25 — tri du dossier Sport fait AVEC le user, chaîne par chaîne (fichier
+     * outils/captures/tri_sport.txt) : « on supprime les chaînes HS, et ce qui n'est pas français
+     * va dans Foot d'ailleurs ». Noms comparés sans accents ni majuscules.
+     */
+    private val CHAINES_HS = rx(
+        "^rmc talk sport|^dazn women|^sportitalia|^a spor\\b|^arryadia|^cctv|^ssc 1\\b|^tennis ?\\+|^tennis tv\\b|" +
+            "^real madrid tv|^mutv|^region \\d+\\b|^racing 8\\b|^l ?equipe live \\d"
+    )
+    private val CHAINES_HS_EXACTES = setOf("rmcsport") // tuile RénéVéo « RMC Sport » (3105) : ses 3 serveurs KO
+    private val CHAINES_ETRANGERES = rx(
+        "^fox sports|^sportsgrid|^tnt sports|^trace sport stars|^tennis channel|^nfl channel|^espn\\b"
+    )
+
     /** Construit les tuiles d'un sous-dossier et rend ses rubriques. */
     private fun construire(idDossier: String, trouves: List<Trouve>): List<Category> {
-        class Accu(val cle: String, var nom: String, var logo: String, val rubrique: String) {
+        class Accu(val cle: String, var nom: String, var logo: String, var rubrique: String) {
             val sources = LinkedHashSet<Source>()
             var live = false
+            /** Au moins une source en français (ou une source non web). */
+            var francais = false
         }
+        /** Rubrique « vague » : remplacée dès qu'une autre source du match en donne une précise. */
+        fun vague(r: String) = r == AUTRES_MATCHS || r == FOOT_MONDE
         val heure = rx("\\b\\d{1,2}[:h]\\d{2}\\b")
         val parCle = LinkedHashMap<String, Accu>()
-        for (t in trouves) {
+        /** Chaînes TV hors sport : clé de nom → clé de tuile (RénéVéo d'abord, cf. ordre ci-dessous). */
+        val parTv = HashMap<String, String>()
+        // RénéVéo avant damitv, pour que damitv rejoigne la tuile RénéVéo existante.
+        for (t in trouves.sortedBy { if (it.proprio == DamiTvChaines.PROPRIO) 1 else 0 }) {
             if (t.nom.isBlank()) continue
             val nom = when {
                 !t.brut -> t.nom
@@ -621,20 +729,34 @@ object SportHub {
             //   serveurs de toutes les sources se retrouvent sur la même tuile.
             fun cleMatchEquipes(n: String) = SportProviders.cleEquipes(n)?.let { "m_eq_$it" } ?: ("m_" + cleMatch(n))
             val (cle, rubrique) = when {
-                !t.sportif -> "rv_" + t.id.removePrefix(ReneveoTv.PREFIX) to RENEVEO_AUTRES
+                // damitv : rejoint la tuile RénéVéo de même nom (TF1, France 2…), sinon la sienne.
+                !t.sportif && t.proprio == DamiTvChaines.PROPRIO ->
+                    (parTv[cleTv(nom)] ?: ("rv_dt_" + t.id.removePrefix(DamiTvChaines.PREFIX))) to RENEVEO_AUTRES
+                !t.sportif -> ("rv_" + t.id.removePrefix(ReneveoTv.PREFIX)).also { parTv.putIfAbsent(cleTv(nom), it) } to RENEVEO_AUTRES
                 t.rubrique != null -> cleMatchEquipes(nom) to t.rubrique
                 estMatch(nom) -> cleMatchEquipes(nom) to rubriqueMatch(nom)
                 else -> "c_" + cleChaine(nom) to rubriqueChaine(nom)
             }
+            if (cle.startsWith("c_")) {
+                val p = plat(nom).trim()
+                if (CHAINES_HS.containsMatchIn(p) || cle.removePrefix("c_") in CHAINES_HS_EXACTES) continue
+            }
+            // Chaîne étrangère : rangée dans « Foot d'ailleurs » du dossier « L'Équipe et autres chaînes ».
+            val etrangere = cle.startsWith("c_") && rubrique == AUTRES_CHAINES && CHAINES_ETRANGERES.containsMatchIn(plat(nom).trim())
+            val rubriqueFinale = if (etrangere) FOOT_MONDE else rubrique
             // Chaque sous-dossier ne garde que ce qui lui revient (un bouquet : ses chaînes
             //   fixes ; « Matchs du jour » : les matchs ; « Nouvelles sources » : tout).
             val aGarder = when {
-                idDossier == "web" || idDossier == "reneveo" -> true
+                idDossier == "web" || idDossier == "reneveo" || idDossier == "cdirect" -> true
                 idDossier == "matchs" -> cle.startsWith("m_")
                 else -> cle.startsWith("c_") && rubrique == (SOUS_DOSSIERS.firstOrNull { it.id == idDossier }?.titre)
             }
             if (!aGarder) continue
-            val a = parCle.getOrPut(cle) { Accu(cle, nom, t.logo, rubrique) }
+            val a = parCle.getOrPut(cle) { Accu(cle, nom, t.logo, rubriqueFinale) }
+            // Une source donne la compétition (DaddyLive : « Spain - La Liga »), une autre le français
+            //   (streamed : « French - DAZN ») : la tuile garde le meilleur des deux.
+            if (!cle.startsWith("c_") && vague(a.rubrique) && !vague(rubrique)) a.rubrique = rubrique
+            if (!t.etranger) a.francais = true
             if (t.live) a.live = true
             if (a.logo.isBlank() && t.logo.isNotBlank()) a.logo = t.logo
             // Nom le plus lisible : on préfère celui qui n'est pas tout en majuscules.
@@ -644,7 +766,8 @@ object SportHub {
             a.sources += Source(t.proprio, t.id)
         }
         val nouvelles = parCle.values.map { a ->
-            Entree(a.cle, a.nom, a.logo, a.rubrique, a.sources.sortedBy { ORDRE_SOURCES.indexOf(it.proprio) }, a.live)
+            Entree(a.cle, a.nom, a.logo, if (a.francais) a.rubrique else FOOT_MONDE,
+                a.sources.sortedBy { ORDRE_SOURCES.indexOf(it.proprio) }, a.live)
         }
         // Tuiles de CE sous-dossier remplacées, celles des autres gardées.
         val prefixe = "$idDossier::"
@@ -747,6 +870,7 @@ object SportHub {
                             "vegeta" -> VegetaTvProvider.getServers(s.id, type)
                             "vavoo" -> VavooProvider.getServers(s.id, type)
                             in SOURCES_WEB -> serveursWeb(s)
+                            DamiTvChaines.PROPRIO -> listOf(DamiTvChaines.serveur(s.id, "Direct"))
                             else -> LiveTvHubProvider.getServers(s.id, type) // RénéVéo, Mix FR
                         }
                     }
@@ -760,10 +884,32 @@ object SportHub {
             }
         }
         val vus = HashSet<String>()
+        // 2026-10-25 (user : « la chaîne que tu viens de lancer n'est pas française ») : serveurs
+        //   français d'abord, langues étrangères en dernier (tri stable : l'ordre des sources reste).
         val tous = parSource.awaitAll().flatten().filter { vus.add(it.src.ifBlank { it.id }) }
+            .sortedBy { rangLangue(it.name) }
         Log.i(TAG, "${e.nom} : ${tous.size} serveurs (${e.sources.joinToString { it.proprio }})")
         tous
     }
+
+    private val SERVEUR_FRANCAIS = rx("fran[cç]ais|french|france|\\bfr\\b|\\bvf\\b|ligue ?1\\+", RegexOption.IGNORE_CASE)
+    private val SERVEUR_ETRANGER = rx(
+        "arab|spanish|espa[nñ]ol|espagnol|english|anglais|italian|italien|german|allemand|portug|poland|polska|" +
+            "dutch|swedish|czech|turk|greek|serbia|croat|hungar|romania|\\b(usa|us|uk|de|es|it|pt|pl|nl|ar|tr)\\b|" +
+            "espn|sky sport|fox|tnt|cbs|nbc|\\babc\\b|eleven|viaplay|nova|sport tv|astro|supersport|kayo|willow",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** 0 = serveur en français, 1 = langue inconnue (« Server 1 », « HD »), 2 = étranger. */
+    fun rangLangue(nom: String): Int = when {
+        SERVEUR_FRANCAIS.containsMatchIn(nom) -> 0
+        SERVEUR_ETRANGER.containsMatchIn(nom) -> 2
+        else -> 1
+    }
+
+    /** Serveur d'une tuile Sport dans une autre langue : jamais mémorisé comme « dernier bon ». */
+    fun serveurEtranger(idContenu: String, nomServeur: String?): Boolean =
+        estTuile(idContenu) && nomServeur != null && rangLangue(nomServeur) == 2
 
     // ── Débogage (SportAudit) ──
     internal suspend fun toutesLesTuiles(): Map<String, Entree> {
@@ -777,7 +923,7 @@ object SportHub {
     /** Serveurs d'une source web du module sport/ (événement damitv). */
     private suspend fun serveursWeb(s: Source): List<Video.Server> {
         val idEv = s.id.removePrefix("ev::")
-        fun cherche() = DamiTv.derniereListe()
+        fun cherche() = SportProviders.derniereListe(s.proprio)
             .firstOrNull { it.provider == s.proprio && it.id == idEv }
         val ev = cherche() ?: run { runCatching { SportProviders.evenements() }; cherche() }
             ?: return emptyList()
@@ -787,6 +933,7 @@ object SportHub {
     /** Lecture d'un serveur web du module sport/ (flux capté en arrière-plan, lu par le
      *  lecteur ONYX). Null = ce n'est pas un serveur web. */
     suspend fun videoWeb(server: Video.Server): Video? {
+        if (DamiTvChaines.estServeur(server)) return DamiTvChaines.video(server)
         if (!SportProviders.estServeurWeb(server)) return null
         return SportProviders.video(server) ?: throw Exception("Aucun flux pour ${server.name}")
     }

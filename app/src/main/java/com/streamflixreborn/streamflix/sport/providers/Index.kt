@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.sport.providers
 
 import android.util.Log
+import kotlinx.coroutines.async
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.sport.SportEvent
 import java.text.Normalizer
@@ -32,16 +33,32 @@ object SportProviders {
         }
 
     /** Événements normalisés, en direct d'abord puis par heure de début. */
-    suspend fun evenements(): List<SportEvent> =
-        isole(DamiTv.ID) { DamiTv.getStreams() }.sortedWith(
+    suspend fun evenements(): List<SportEvent> = kotlinx.coroutines.coroutineScope {
+        val dami = async { isole(DamiTv.ID) { DamiTv.getStreams() } }
+        // 2026-10-25 (liste du user, priorité 1) : streamed.pk.
+        val streamed = async { isole(StreamedPk.ID) { StreamedPk.getStreams() } }
+        // 2026-10-25 (liste du user, priorité 2) : planning thedaddy / DaddyLive.
+        val daddy = async { isole(DaddyLive.ID) { DaddyLive.getStreams() } }
+        dami.await() + streamed.await() + daddy.await()
+    }.sortedWith(
             compareBy<SportEvent> { if (it.enDirect) 0 else 1 }.thenBy { it.startsAt ?: Long.MAX_VALUE }
         )
 
     // ───────────────────────────────────────────────────────────── lecture
 
+    /** Dernière liste connue d'une source (pour retrouver un événement à la lecture). */
+    fun derniereListe(provider: String): List<SportEvent> = when (provider) {
+        StreamedPk.ID -> StreamedPk.derniereListe()
+        DaddyLive.ID -> DaddyLive.derniereListe()
+        ChaineDirect.ID -> ChaineDirect.derniereListe()
+        else -> DamiTv.derniereListe()
+    }
+
     /** Serveurs d'un événement (toutes ses sources). */
-    fun serveursEvenement(e: SportEvent): List<Video.Server> =
-        e.sources.mapIndexed { i, s ->
+    suspend fun serveursEvenement(e: SportEvent): List<Video.Server> =
+        if (e.provider == StreamedPk.ID) StreamedPk.serveurs(e)
+        else if (e.provider == DaddyLive.ID) DaddyLive.serveurs(e)
+        else e.sources.mapIndexed { i, s ->
             Video.Server(
                 id = "$PREFIXE_SERVEUR${e.provider}::ev::${e.id}::$i",
                 name = s.name,
@@ -100,6 +117,18 @@ object SportProviders {
     private val ACCENTS = Regex("\\p{M}+")
     private val NON_ALNUM = Regex("[^a-z0-9]+")
 
+    /** 2026-10-25 : streamed écrit « Paris Saint-Germain vs. Lyon », DaddyLive « PSG vs Olympique
+     *  Lyonnais » — même match, une seule tuile. Noms après nettoyage (sans mots vides). */
+    private val ALIAS_EQUIPES = mapOf(
+        "psg" to "parissaintgermain", "parissg" to "parissaintgermain",
+        "lyonnais" to "lyon", "ol" to "lyon", "om" to "marseille",
+        "barca" to "barcelona", "barcelone" to "barcelona", "fcbarcelona" to "barcelona",
+        "bayernmunchen" to "bayernmunich", "bayern" to "bayernmunich",
+        "intermilan" to "inter", "internazionale" to "inter",
+        "manutd" to "manchesterunited", "manunited" to "manchesterunited", "mancity" to "manchestercity",
+        "realmadridcf" to "realmadrid", "atleticomadrid" to "atletico", "atleticodemadrid" to "atletico",
+    )
+
     fun cleEquipes(titre: String): String? {
         val tete = titre.substringBefore(" · ").substringBefore(" | ")
         val parts = tete.split(SEPARATEUR_EQUIPES)
@@ -107,6 +136,7 @@ object SportProviders {
         val eq = parts.map { p ->
             Normalizer.normalize(p, Normalizer.Form.NFD).replace(ACCENTS, "").lowercase()
                 .split(NON_ALNUM).filter { it.isNotBlank() && it !in MOTS_VIDES }.joinToString("")
+                .let { ALIAS_EQUIPES[it] ?: it }
         }
         if (eq.any { it.length < 3 }) return null
         return eq.sorted().joinToString("_")

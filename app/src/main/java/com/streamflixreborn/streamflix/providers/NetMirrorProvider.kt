@@ -1772,6 +1772,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
     ): Flow<List<Video.Server>> = channelFlow {
         val ids = resolveOriginalTitle(parseNmIds(id, videoType))
         Log.d(TAG, "getServersProgressive '${ids.title}' (original: '${ids.originalTitle ?: "="}') tmdb=${ids.tmdbId}")
+        prechaufferSessionMobile()   // 2026-10-25 : la session se signe pendant que la liste s'affiche
         // 2026-07-08 (anti « STOP Abuse ») : les 4 plateformes OTT sont interrogées
         //   SÉQUENTIELLEMENT avec un délai entre chaque, au lieu d'une RAFALE parallèle.
         //   L'app officielle NetMirror n'interroge qu'une plateforme à la fois → l'anti-abus
@@ -2032,15 +2033,21 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             val qury = Regex("""var Qury\s*=\s*"(\w+)"""").find(home)?.groupValues?.get(1) ?: "ffr455"
             val enc = java.net.URLEncoder.encode(addhash, "UTF-8")
             val domaine = MAIN_URL.removePrefix("https://")
-            // 2. « clic pub » : une seule requête, redirection NON suivie
+            // 2. « clic pub » — 2026-10-25 : reproduit exactement le clic d un vrai navigateur.
+            //    En HTTP seul, userver.* répond 403 et le clic n est jamais enregistré.
+            val clicUrl = "https://$vsite.$domaine/?$qury=$enc&a=y&t=${Math.random()}"
             runCatching {
                 clientMobile.newCall(
-                    Request.Builder().url("https://$vsite.$domaine/?$qury=$enc&a=y&t=${Math.random()}")
+                    Request.Builder().url(clicUrl)
                         .header("User-Agent", NM_APP_UA)
-                        .header("X-Requested-With", NM_APP_PKG)
                         .build()
                 ).execute().close()
             }
+            // 2 bis. clic réel dans une WebView, lancé EN PARALLÈLE : la page de pub s exécute
+            //    pendant qu on sonde déjà la validation. Sans ça, on attendait 25 s fixes avant
+            //    même de demander au serveur s il avait validé → 25 s de temps mort.
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+                .launch { runCatching { clicViaWebView(clicUrl, 25_000L) } }
             // 3. attente de la validation (le serveur la donne seul après ~40-60 s)
             for (tour in 0 until 30) {
                 kotlinx.coroutines.delay(if (tour == 0) 2_000L else 5_000L)
@@ -2074,6 +2081,41 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
     }
 
     /**
+     * « Clic pub » dans une vraie WebView. Nécessaire car en OkHttp/curl userver.* répond 403 :
+     * le clic n est jamais enregistré et le jeton ne se signe pas (playlist renvoie in=unknown).
+     * Charge l URL de clic, laisse la page de pub s exécuter, puis se détache. Même montage
+     * invisible que harvestViaWebView (1x1 px, alpha 0, hors-écran).
+     */
+    private suspend fun clicViaWebView(url: String, attenteMs: Long): Boolean =
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+            var repondu = false
+            fun repondre(v: Boolean) { if (!repondu) { repondu = true; Log.d(TAG, "clic WebView : terminé (fenêtre écoulée)"); if (cont.isActive) cont.resume(v) {} } }
+            mainHandler.post {
+                var wv: android.webkit.WebView? = null
+                runCatching {
+                    val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
+                    wv = android.webkit.WebView(ctx)
+                    wv.settings.javaScriptEnabled = true
+                    wv.settings.domStorageEnabled = true
+                    wv.webViewClient = android.webkit.WebViewClient()
+                    com.streamflixreborn.streamflix.StreamFlixApp.currentActivity
+                        ?.addContentView(wv, android.widget.FrameLayout.LayoutParams(1, 1))
+                    wv.alpha = 0f
+                    wv.translationX = -100000f
+                    wv.loadUrl(url)
+                    Log.d(TAG, "clic WebView : chargement lancé")
+                }.onFailure { Log.w(TAG, "clic WebView KO : ${it.message}") }
+                mainHandler.postDelayed({
+                    val v = wv
+                    runCatching { (v?.parent as? android.view.ViewGroup)?.removeView(v) }
+                    runCatching { v?.destroy() }
+                    repondre(true)
+                }, attenteMs)
+            }
+        }
+
+    /**
      * Lecture par le chemin MOBILE (celui de l'appli officielle). Null si la session mobile
      * n'est pas disponible ou si la réponse est inattendue → l'appelant garde l'ancien chemin.
      */
@@ -2082,7 +2124,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         ottCode: String,
         vostfrDemande: Boolean,
     ): Video? = withContext(Dispatchers.IO) {
-        val session = withTimeoutOrNull(55_000L) { ensureSessionMobile() } ?: return@withContext null
+        val session = withTimeoutOrNull(75_000L) { ensureSessionMobile() } ?: return@withContext null
         val entetes = mapOf(
             "User-Agent" to NM_APP_UA,
             "X-Requested-With" to NM_APP_PKG,

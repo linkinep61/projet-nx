@@ -5555,7 +5555,7 @@ class PlayerTvFragment : Fragment() {
                     requireContext(),
                     com.streamflixreborn.streamflix.utils.WebViewDataSource.Factory(wv)
                 )
-                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(webViewDsFactory)
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(webViewDsFactory))
                     .createMediaSource(mediaItem)
                 player.setMediaSource(hlsSource)
                 usingWebView = true
@@ -5627,7 +5627,7 @@ class PlayerTvFragment : Fragment() {
                     //   alors que le master et les trois qualités vidéo répondent 200.
                     val dsFactoryHlsFiltre =
                         com.streamflixreborn.streamflix.utils.FiltreManifesteHls.Fabrique(dsFactoryHls)
-                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dsFactoryHlsFiltre)
+                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dsFactoryHlsFiltre))
                         .setAllowChunklessPreparation(true)
                         .setExtractorFactory(hlsExtractorFactory)
                         // 2026-08-08 (user, sur « J1F · upbolt.to (VF) » en rouge : « donc il
@@ -6175,9 +6175,11 @@ class PlayerTvFragment : Fragment() {
                                 com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.VERIFIED,
                                 args.id,
                             )
-                            com.streamflixreborn.streamflix.utils.LastWorkingServer.save(
-                                requireContext(), args.id, it.id
-                            )
+                            // 2026-10-25 : pas de serveur en langue étrangère mémorisé pour une tuile Sport.
+                            if (!com.streamflixreborn.streamflix.utils.SportHub.serveurEtranger(args.id, it.name))
+                                com.streamflixreborn.streamflix.utils.LastWorkingServer.save(
+                                    requireContext(), args.id, it.id
+                                )
                         }
                         // Restore the normal 2s auto-hide for the controller
                         // (we forced it to 0 during IPTV extraction so the
@@ -9106,7 +9108,7 @@ class PlayerTvFragment : Fragment() {
                     return 6
                 }
             }
-            val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+            val mediaSourceFactory = DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory))
                 .setLoadErrorHandlingPolicy(resilientLoadErrorPolicy)
 
             // 2026-07-05 (user "VLC décode l'AV1, reproduis-le in-app") : sélecteur de pistes qui
@@ -9255,7 +9257,9 @@ class PlayerTvFragment : Fragment() {
             //   repartaient en 403 (`HlsMediaChunk` → 403 après quelques secondes de
             //   lecture), alors que DefaultHttpDataSource applique proprement
             //   `setDefaultRequestProperties` à TOUTES les requêtes, segments compris.
-            return url.contains("vidzy.", ignoreCase = true)
+            // 2026-10-25 : streamed.pk (dossier Sport) — `lb*.strmd.st` : 403 hors empreinte Chrome.
+            return url.contains(".strmd.st", ignoreCase = true)
+                || url.contains("vidzy.", ignoreCase = true)
                 || url.contains("cfglobalcdn.com", ignoreCase = true)
                 || url.contains("anime-sama.", ignoreCase = true)
                 || url.contains("uqload.is", ignoreCase = true)
@@ -9327,6 +9331,9 @@ class PlayerTvFragment : Fragment() {
                 //   CONNECTION_FAILED en 3 s, 3 relances « sticky » identiques, puis abandon.
                 //   Selon le portail tiré au sort, ça marchait ou pas (d'où « relancé, ça lit »).
                 || url.contains("/play/movie.php", ignoreCase = true)
+                // 2026-10-25 (user : match Auxerre–Le Mans en Ligue 1 qui ne se lance pas) : les CHAÎNES
+                //   des mêmes portails (`/play/live.php`) ont le même blocage DNS de la box.
+                || url.contains("/play/live.php", ignoreCase = true)
                 // 2026-08-02 : upbolt → lecture via OKHTTP, comme l'extraction.
                 //   Constat décisif : le jeton obtenu par l'application est refusé (403) MÊME
                 //   rejoué dans un vrai navigateur, alors qu'un jeton obtenu par ce même navigateur
@@ -11526,7 +11533,7 @@ class PlayerTvFragment : Fragment() {
                         )
                         .build()
 
-                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(webViewDsFactory)
+                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(webViewDsFactory))
                         .createMediaSource(mediaItem)
 
                     if (!::player.isInitialized) return

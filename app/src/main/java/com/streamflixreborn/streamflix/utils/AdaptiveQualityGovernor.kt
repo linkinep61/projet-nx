@@ -133,12 +133,13 @@ class AdaptiveQualityGovernor(
         // Durée de stabilité (READY+playing, sans rebuffer) avant de remonter d'un cran.
         private const val STABLE_RECOVERY_MS = 45_000L
 
-        private const val MAX_LEVEL = 2
-        // index 0 = aucun plafond, 1 = 720p, 2 = 480p
+        // 2026-10-25 (user : « plancher 720p minimum ») : on retire le palier 480p.
+        //   Le governor ne peut plus descendre que d'un seul cran, jusqu'à 720p, jamais en dessous.
+        private const val MAX_LEVEL = 1
+        // index 0 = aucun plafond, 1 = 720p
         private val CAP_SIZES = arrayOf(
             Int.MAX_VALUE to Int.MAX_VALUE,
             1280 to 720,
-            854 to 480,
         )
     }
 }

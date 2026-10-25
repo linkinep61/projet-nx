@@ -5515,7 +5515,7 @@ class PlayerMobileFragment : Fragment() {
                 requireContext(),
                 com.streamflixreborn.streamflix.utils.WebViewDataSource.Factory(wv)
             )
-            val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(webViewDsFactory)
+            val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(webViewDsFactory))
                 .createMediaSource(mediaItem)
             player.setMediaSource(hlsSource)
             usingWebView = true
@@ -5573,7 +5573,7 @@ class PlayerMobileFragment : Fragment() {
                 //   les flux dont les PTS sont en ordre de decodage (segments Vidara :
                 //   PES avec PTS seul, +1 image/paquet malgre des B-frames → 1 image sur
                 //   4 jetee par ExoPlayer). Cf. utils/media3/H264ReaderAud.java.
-                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(teeFactory)
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(teeFactory))
                     .setAllowChunklessPreparation(true)
                     .setExtractorFactory(com.streamflixreborn.streamflix.utils.media3.HlsExtractorFactoryAud(0, true))
                     .setLoadErrorHandlingPolicy(errorPolicy)
@@ -7798,10 +7798,56 @@ class PlayerMobileFragment : Fragment() {
         return baseBuilder
             .setSeekBackIncrementMs(10_000)
             .setSeekForwardIncrementMs(10_000)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory)))
             .setLoadControl(loadControl)
             .build()
             .also { p -> installerDiagDecodeur(p) }
+    }
+
+    /**
+     * 2026-10-25 — Verrou qualité VOD. Empêche la bascule de rendu à chaud (ABR) qui change la
+     * résolution en cours de lecture et fige le décodeur matériel MediaTek (bug NetMirror :
+     * master 1080/720/480, Auto bascule 1080→720 au seek → gel). Dès que les pistes sont connues,
+     * en mode Auto (aucun choix manuel), on épingle le MEILLEUR rendu ≥720 (sinon le plus haut
+     * disponible — « s'il n'y a pas le choix ») via le même override que le menu Qualité. Un choix
+     * manuel de l'utilisateur (qualityHeight != null) reste prioritaire et n'est pas touché.
+     */
+    private fun verrouillerMeilleureQualiteVod(p: ExoPlayer, isLive: Boolean) {
+        if (isLive) return
+        p.addListener(object : androidx.media3.common.Player.Listener {
+            private var dejaVerrouille = false
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                if (com.streamflixreborn.streamflix.utils.UserPreferences.qualityHeight != null) return
+                if (dejaVerrouille) return
+                data class Rendu(val g: androidx.media3.common.Tracks.Group, val i: Int, val h: Int)
+                val rendus = mutableListOf<Rendu>()
+                for (g in tracks.groups) {
+                    if (g.type != androidx.media3.common.C.TRACK_TYPE_VIDEO) continue
+                    for (i in 0 until g.length) {
+                        if (!g.isTrackSupported(i)) continue
+                        val h = g.getTrackFormat(i).height
+                        if (h > 0) rendus.add(Rendu(g, i, h))
+                    }
+                }
+                // Une seule qualité (ou aucune) → rien à verrouiller, pas de bascule possible.
+                if (rendus.map { it.h }.distinct().size <= 1) return
+                val cibleH = (rendus.map { it.h }.filter { it >= 720 }.maxOrNull()
+                    ?: rendus.map { it.h }.maxOrNull()) ?: return
+                val choix = rendus.first { it.h == cibleH }
+                runCatching {
+                    p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                        .setOverrideForType(
+                            androidx.media3.common.TrackSelectionOverride(
+                                choix.g.mediaTrackGroup, listOf(choix.i)
+                            )
+                        )
+                        .build()
+                    dejaVerrouille = true
+                    Log.d("PlayerMobileFragment",
+                        "verrou qualité VOD (Auto) → ${cibleH}p épinglé, plus de bascule (dispo ${rendus.map { it.h }.distinct().sortedDescending()})")
+                }
+            }
+        })
     }
 
     // 2026-09-05 DIAG hachure : toutes les 5 s, compteurs du decodeur video
@@ -7809,18 +7855,53 @@ class PlayerMobileFragment : Fragment() {
     //   probleme de flux d'un probleme de rendu. Log uniquement, sans effet.
     private fun installerDiagDecodeur(p: ExoPlayer) {
         val h = android.os.Handler(android.os.Looper.getMainLooper())
+        // 2026-10-25 : détection de GEL vidéo + récupération auto.
+        //   Bug NetMirror : changement de résolution EN COURS de flux (1080p→720p près de la fin)
+        //   → le décodeur matériel MediaTek rend 1 image puis se fige, l'audio continue.
+        //   Signature : `rendu` (frames rendues) n'augmente plus alors que la position (horloge
+        //   audio) avance et que le player se croit en lecture. On force alors une réinitialisation
+        //   du décodeur par un seek sur la position courante (flush + recréation du codec à la
+        //   nouvelle résolution). Garde-fous : 2 ticks consécutifs figés avant d'agir, 1 seule
+        //   récupération toutes les 15 s, compteur borné pour ne pas boucler.
+        var lastRendered = -1L
+        var lastPosSec = -1L
+        var stallTicks = 0
+        var lastRecoverMs = 0L
+        var recoverCount = 0
         val r = object : Runnable {
             override fun run() {
                 try {
                     if (p.isReleased) return
                     val c = p.videoDecoderCounters
                     if (c != null && p.isPlaying) {
+                        val rendered = c.renderedOutputBufferCount.toLong()
+                        val posSec = p.currentPosition / 1000
                         Log.d("PlayerMobileFragment", "DIAG decodeur grand: in=${c.queuedInputBufferCount} " +
                             "rendu=${c.renderedOutputBufferCount} saute=${c.skippedOutputBufferCount} " +
                             "drop=${c.droppedBufferCount} dropMax=${c.maxConsecutiveDroppedBufferCount} " +
                             "dropToKeyframe=${c.droppedToKeyframeCount} " +
                             "offsetMoyUs=${if (c.videoFrameProcessingOffsetCount > 0) c.totalVideoFrameProcessingOffsetUs / c.videoFrameProcessingOffsetCount else 0} " +
-                            "pos=${p.currentPosition / 1000}s format=${p.videoFormat?.width}x${p.videoFormat?.height}@${p.videoFormat?.frameRate} codec=${p.videoFormat?.codecs}")
+                            "pos=${posSec}s format=${p.videoFormat?.width}x${p.videoFormat?.height}@${p.videoFormat?.frameRate} codec=${p.videoFormat?.codecs}")
+
+                        // Gel = vidéo qui n'avance plus (rendu figé) mais audio qui avance (pos +≥3 s).
+                        val videoFige = lastRendered >= 0 && rendered == lastRendered
+                        val audioAvance = lastPosSec >= 0 && posSec - lastPosSec >= 3
+                        if (videoFige && audioAvance) {
+                            stallTicks++
+                            val now = System.currentTimeMillis()
+                            if (stallTicks >= 2 && now - lastRecoverMs > 15_000L && recoverCount < 6) {
+                                lastRecoverMs = now
+                                recoverCount++
+                                Log.w("PlayerMobileFragment", "GEL VIDEO détecté (rendu figé à $rendered, audio à ${posSec}s) " +
+                                    "→ récupération #$recoverCount : réinit décodeur par seek sur position courante")
+                                runCatching { p.seekTo(p.currentPosition) }
+                                stallTicks = 0
+                            }
+                        } else {
+                            stallTicks = 0
+                        }
+                        lastRendered = rendered
+                        lastPosSec = posSec
                     }
                 } catch (_: Throwable) { return }
                 h.postDelayed(this, 5_000L)
@@ -7863,7 +7944,9 @@ class PlayerMobileFragment : Fragment() {
         // 2026-08-01 : détection `/v4/…/cf-master` RETIRÉE (parité TV). Ce CDN ne filtre pas
         //   le TLS mais l'ORIGINE — le 403 persistait sous Cronet, et les segments
         //   retombaient en 403 en cours de lecture. Corrigé dans RpmvidExtractor via `Origin`.
-        return url.contains("vidzy.", ignoreCase = true)
+        // 2026-10-25 : streamed.pk (dossier Sport) — `lb*.strmd.st` : 403 hors empreinte Chrome.
+        return url.contains(".strmd.st", ignoreCase = true) ||
+            url.contains("vidzy.", ignoreCase = true)
             // 2026-07-30 : vmwesa.online retiré de Cronet (cert rejeté par vieux CA store,
             //   Cronet impose son magasin de CA) → routé needsDoH (OkHttp trust-all).
             // (vmwesa.online géré via needsDoH)
@@ -7931,6 +8014,9 @@ class PlayerMobileFragment : Fragment() {
             //   3 relances identiques, puis abandon. Selon le portail tiré au sort, ça marchait
             //   ou pas (d'où « j'ai relancé, ça lit »).
             || url.contains("/play/movie.php", ignoreCase = true)
+            // 2026-10-25 (user : match Auxerre–Le Mans en Ligue 1 qui ne se lance pas) : les CHAÎNES
+            //   des mêmes portails (`/play/live.php`) ont le même blocage DNS de la box.
+            || url.contains("/play/live.php", ignoreCase = true)
     }
 
     // 2026-05-20 (parité PlayerTvFragment) : détection émulateur (BlueStacks inclus)
@@ -8186,6 +8272,9 @@ class PlayerMobileFragment : Fragment() {
                 .build(), !isLiveIptvHere)
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setPreferredAudioLanguage("fr").build()
+        // 2026-10-25 : même verrou qualité VOD qu'en lecture directe (cf. verrouillerMeilleureQualiteVod) —
+        //   sur un flux transféré du mini-lecteur aussi, pour éviter la bascule de résolution qui fige le décodeur.
+        if (!isLiveIptvHere) verrouillerMeilleureQualiteVod(player, false)
         // 2026-07-24 (user "du mini au grand lecteur ça crashe" sur Télé-Québec) :
         //   le live DASH Brightcove a une timeline epoch-based ÉNORME (position
         //   ~30760974362062 ms) → MediaSession.Builder.build() lève
@@ -8428,6 +8517,15 @@ class PlayerMobileFragment : Fragment() {
                     )
                 }
                 player.trackSelectionParameters = tsBuilder.build()
+                // 2026-10-25 (user, bug NetMirror : bascule ABR 1080p→720p EN COURS de lecture →
+                //   décodeur matériel MTK figé = 1 image + audio qui continue). Le flux FR est un
+                //   master à 3 rendus (1080/720/480) ; en mode Auto (qualityHeight==null) ExoPlayer
+                //   bascule de rendu à chaud, d'où le changement de résolution. Règle demandée :
+                //   « ne pas changer de qualité une fois lancé, toujours la meilleure, plancher 720 —
+                //    sauf s'il n'y a rien au-dessus ». On VERROUILLE donc, en VOD + Auto, sur le
+                //   meilleur rendu ≥720 dès que les pistes sont connues (même mécanisme d'override
+                //   que le menu Qualité). Un choix manuel dans le menu reste prioritaire.
+                if (!isLiveIptvCh) verrouillerMeilleureQualiteVod(player, false)
 
                 try {
                     mediaSession = MediaSession.Builder(requireContext(), player)
@@ -9485,7 +9583,7 @@ class PlayerMobileFragment : Fragment() {
                     )
                     .build()
 
-                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(webViewDsFactory)
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(webViewDsFactory))
                     .createMediaSource(mediaItem)
 
                 // ── 5. Play in ExoPlayer ──

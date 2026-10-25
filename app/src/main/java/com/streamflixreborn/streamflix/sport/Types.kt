@@ -34,6 +34,8 @@ data class SportEvent(
     val viewers: Int,
     val sources: List<StreamSource>,
     val embedUrl: String,
+    /** Au moins un serveur en français (2026-10-25, user : le reste va dans « Foot d'ailleurs »). */
+    val francais: Boolean = false,
 ) {
     val enDirect: Boolean get() = status == "live"
 }

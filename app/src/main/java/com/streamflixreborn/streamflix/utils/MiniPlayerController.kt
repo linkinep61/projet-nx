@@ -724,7 +724,13 @@ object MiniPlayerController {
             //   lecteur → on relance UNE fois le même serveur par le client d'extraction (même
             //   DNS, même adresse que la demande du lien). Si ça lit, l'hébergeur est appris.
             val uri403 = player?.currentMediaItem?.localConfiguration?.uri?.toString()
-            if (httpCode == 403 && lectureParPileLecteur && RoutesLecture.peutEssayer(uri403)) {
+            // 2026-10-25 (même règle) : adresse INTROUVABLE par le DNS de la box (blocage des FAI
+            //   français) → relance une fois par le client d'extraction (DoH) ; si ça lit, l'hébergeur
+            //   est appris et passera directement par là les fois suivantes.
+            val hoteIntrouvable = generateSequence(error as Throwable) { it.cause }
+                .take(8).any { it is java.net.UnknownHostException }
+            if (hoteIntrouvable) Log.w(TAG, "Hôte introuvable par le DNS de la box : ${RoutesLecture.hote(uri403)}")
+            if ((httpCode == 403 || hoteIntrouvable) && lectureParPileLecteur && RoutesLecture.peutEssayer(uri403)) {
                 val chIdR = currentChannelId
                 val idxR = currentServerIndex
                 if (chIdR != null) {
@@ -953,7 +959,10 @@ object MiniPlayerController {
                     runCatching {
                         val ctxMem = appContext
                         val sid = availableServers.getOrNull(currentServerIndex)?.id
-                        if (ctxMem != null && sid != null) {
+                        // 2026-10-25 : un serveur en langue étrangère d'une tuile Sport (« DAMITV ·
+                        //   Arabic ») n'est pas remis en tête la fois suivante.
+                        val etranger = SportHub.serveurEtranger(chId, availableServers.getOrNull(currentServerIndex)?.name)
+                        if (ctxMem != null && sid != null && !etranger) {
                             LastWorkingServer.save(ctxMem, chId, sid)
                         }
                     }
@@ -1671,6 +1680,10 @@ object MiniPlayerController {
         val effectiveWatchdogMs = when {
             availableServers.size <= 1 -> 15_000L
             estFichierVod(uriAtArm) -> 15_000L
+            // 2026-10-25 (tri du dossier Sport) : relais damitv (morceaux de 2-3 Mo déguisés en
+            //   image chez TikTok, à décoder) — Canal+ et Canal+ Sport 360 coupés à 6 s alors qu'ils
+            //   avaient joué un quart d'heure plus tôt. On leur laisse 12 s.
+            uriAtArm?.contains("damitv.st/dl/") == true -> 12_000L
             else -> BUFFERING_WATCHDOG_MS
         }
         bufferingWatchdogJob = scope.launch {
@@ -2159,7 +2172,7 @@ object MiniPlayerController {
                     dsFactory2, loadPolicy, parserFactory, cmcdConfig, 30.0,
                 )
             }
-            val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dsFactory)
+            val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dsFactory))
                 .setAllowChunklessPreparation(true)
                 .setExtractorFactory(hlsExtractorFactory)
                 .apply { if (needsStuckTolerance30x) setPlaylistTrackerFactory(playlistTrackerFactory) }
@@ -2323,6 +2336,9 @@ object MiniPlayerController {
             override fun getMinimumLoadableRetryCount(dataType: Int): Int = 6
         }
 
+    /** Hôtes qui n'acceptent que l'empreinte TLS de Chrome → lus par Cronet (cf. exigeCronet). */
+    internal val HOTES_EMPREINTE_CHROME = listOf("strmd.st")
+
     /**
      * 2026-08-11 — Hôtes qui refusent la pile HTTP d'Android (`HttpURLConnection`).
      * Ils renvoient un corps vide à ce client et servent normalement OkHttp.
@@ -2452,7 +2468,7 @@ object MiniPlayerController {
 
         // 2026-05-17 : MediaSourceFactory avec retry policy résilient (cf
         //   resilientLoadErrorPolicy déclaré au niveau classe).
-        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        val mediaSourceFactory = DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory))
             .setLoadErrorHandlingPolicy(resilientLoadErrorPolicy)
 
         // 2026-06-15 v8 (user "se coupe moins mais lag") : EXTENSION_RENDERER_MODE_ON
@@ -3220,7 +3236,11 @@ object MiniPlayerController {
                 // qui ont récemment foiré (Vegeta server X down, OTF cert
                 // expiré, etc.) tombent au fond. La 1ère tentative tape
                 // donc le server le plus probable de marcher.
-                val classes = ExtractorRanker.rankServers(rawServers)
+                val classes = ExtractorRanker.rankServers(rawServers).let { r ->
+                    // 2026-10-25 (user, tri du dossier Sport) : sur une tuile Sport, le français
+                    //   passe avant la fiabilité (tri stable : le classement reste à langue égale).
+                    if (SportHub.estTuile(channelId)) r.sortedBy { SportHub.rangLangue(it.name) } else r
+                }
                 // 2026-08-09 (user : « dans ta fusion des liens t'as pas mis en priorité ce
                 //   qui fonctionnait ») — il a raison, et le mécanisme existait déjà :
                 //   `LastWorkingServer` mémorise le serveur qui a réellement joué. Le GRAND
@@ -3242,7 +3262,7 @@ object MiniPlayerController {
                     //   (quota, géo, VPN qu'on rallume), donc tout s'oublie au redémarrage.
                     val penalise = classes.sortedBy { s -> if (HotesEnEchec.estFautif(s.src)) 1 else 0 }
                     val dernierBon = appContext?.let { LastWorkingServer.get(it, channelId) }
-                    if (dernierBon != null && penalise.any { it.id == dernierBon }) {
+                    if (dernierBon != null && penalise.any { it.id == dernierBon && !SportHub.serveurEtranger(channelId, it.name) }) {
                         Log.i(TAG, "serveur mémorisé remis en tête pour $channelName")
                         penalise.sortedByDescending { it.id == dernierBon }
                     } else penalise
@@ -3656,7 +3676,16 @@ object MiniPlayerController {
             //   par needsDoH() ; le mini-lecteur restait sur la pile Android → bloqué > 6 s, serveur
             //   suivant (« 27 nuits ne part pas du premier coup »). Même client DoH qu'à l'extraction.
                 || video.source.contains("/play/movie.php", ignoreCase = true)
-            val isIptvNonVavoo = isLiveChannel && !isVavoo && !exigeOkHttp
+                // 2026-10-25 (user : match Auxerre–Le Mans de la Ligue 1, dossier Sport, « autant de temps
+                //   à se lancer ») : les CHAÎNES de ces mêmes portails passent par /play/live.php et
+                //   restaient sur la pile Android → « UnknownHostException » (DNS de la box) au bout de
+                //   15 s, alors que troublesupport.my.to répond très bien en DoH. Même client DoH.
+                || video.source.contains("/play/live.php", ignoreCase = true)
+            // 2026-10-25 (streamed.pk, dossier Sport) : `lb*.strmd.st` refuse tout client qui n'a pas
+            //   l'empreinte TLS de Chrome (403 depuis Python et curl, même IP, mêmes en-têtes ; 200
+            //   dans Chrome, même sans cookies ni Referer) → Cronet, comme Vavoo.
+            val exigeCronet = HOTES_EMPREINTE_CHROME.any { hoteFlux.endsWith(it) }
+            val isIptvNonVavoo = isLiveChannel && !isVavoo && !exigeOkHttp && !exigeCronet
             lectureParPileLecteur = !exigeOkHttp
             val dsFactory: androidx.media3.datasource.DataSource.Factory? = if (isIptvNonVavoo) {
                 val ua = perVideoHeaders["User-Agent"]
@@ -3761,7 +3790,7 @@ object MiniPlayerController {
                 currentIptvDataSourceFactory = finalDataSource
                 currentIptvIsHls = true
                 val needsStuckTolerance30x = !channelId.startsWith("livehub::francetv::")
-                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(finalDataSource)
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(finalDataSource))
                     .setAllowChunklessPreparation(true)
                     .setExtractorFactory(hlsExtractorFactory)
                     .apply { if (needsStuckTolerance30x) setPlaylistTrackerFactory(playlistTrackerFactory) }
