@@ -915,12 +915,21 @@ private fun normSearch(s: String): String =
         //   liste chargée au clic (Supabase du site, clé lue dans la page), affichage immédiat
         //   si déjà en cache. Aucune pub à passer : le blocage du site est côté navigateur
         //   seulement (cf. l'en-tête de ReneveoTv).
-        if (folderKey == com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY) {
-            val rv = com.streamflixreborn.streamflix.utils.ReneveoTv
-            // Liste embarquée (assets) ou déjà en cache → affichage immédiat ; les nouveautés
-            //   arrivent en fond (Supabase) pour la prochaine ouverture.
-            val deja = rv.categories(rv.chainesSiDejaChargees())
-            rv.rafraichirEnFond()
+        // 2026-10-25 (user : « transforme mon dossier RénéVéo en dossier Sport ») : la carte
+        //   `reneveo` ouvre maintenant le dossier Sport (toutes sources, cf. SportHub). Les
+        //   chaînes RénéVéo y sont toujours, dans la dernière rubrique.
+        // 2026-10-25 : sous-dossier « Nouvelles sources » du dossier Sport (damitv, chainedirect,
+        //   thedaddy), rangé à part (user : « pour éviter le bazar »). Liste déjà en mémoire.
+        // 2026-10-25 (user : « le dossier Sport est trop lourd… un chargement qu'à l'endroit où on
+        //   veut aller ») : l'ouverture du dossier Sport n'affiche que ses sous-dossiers (aucun
+        //   chargement) ; chaque sous-dossier `sportdos_<id>` charge son contenu au clic.
+        if (folderKey == com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY) {
+            displayCategories(ctx, folderName, com.streamflixreborn.streamflix.utils.SportHub.accueil(), onChannelSelected)
+            return
+        }
+        if (folderKey.startsWith(com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER)) {
+            val sh = com.streamflixreborn.streamflix.utils.SportHub
+            val deja = sh.sousDossierSiPret(folderKey)
             if (deja.isNotEmpty()) {
                 displayCategories(ctx, folderName, deja, onChannelSelected)
                 return
@@ -929,9 +938,9 @@ private fun normSearch(s: String): String =
             val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             scope.launch {
                 val cats = try {
-                    rv.categories(rv.chaines())
+                    sh.sousDossier(folderKey)
                 } catch (t: Throwable) {
-                    android.util.Log.w("LiveHubFolderDialog", "RénéVéo KO : ${t.message}")
+                    android.util.Log.w("LiveHubFolderDialog", "Sport KO : ${t.message}")
                     emptyList()
                 }
                 withContext(Dispatchers.Main) {

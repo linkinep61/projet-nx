@@ -2662,6 +2662,26 @@ object OlaTvProvider : Provider, IptvProvider {
         } catch (_: Exception) { emptyList() }
     }
 
+    /** 2026-10-25 (dossier Sport du TV Hub, cf. SportHub) : toutes les chaînes dont le nom passe
+     *  [garder], sans la limite de 30 de la recherche (une soirée de foot = des dizaines de
+     *  chaînes « DAZN FR 0xx | match »). Même registre que la recherche. */
+    suspend fun chainesQui(garder: (String) -> Boolean, max: Int = 400): List<TvShow> {
+        runCatching { ensureRegistry() }
+        return try {
+            val curatedKeys = curatedChannels.map { it.key }.toSet()
+            val cures = curatedChannels.filter { garder(it.displayName) }.map { c ->
+                TvShow(id = "ola::${c.key}", title = c.displayName, poster = logoUrlFor(c.displayName), providerName = name)
+            }
+            val registre = synchronized(registryLock) {
+                channelRegistry.entries.filter { (k, info) -> k !in curatedKeys && garder(info.displayName) }
+                    .map { (k, info) -> Triple(k, info.displayName, info.logo) }
+            }.map { (k, n, logo) ->
+                TvShow(id = "ola::$k", title = n, poster = logo.ifEmpty { logoUrlFor(n) }, providerName = name)
+            }
+            (cures + registre).take(max)
+        } catch (_: Exception) { emptyList() }
+    }
+
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()
 
     override suspend fun getTvShows(page: Int): List<TvShow> {

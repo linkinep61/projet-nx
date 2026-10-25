@@ -294,7 +294,9 @@ class NetMirrorWebPlayerActivity : AppCompatActivity() {
                         realAsset = it.groupValues[1]; realHost = null
                     }
                     // 1) Requête AUDIO → host CDN réel + asset (files/<asset>/a/<n>/<n>.m3u8).
-                    Regex("https?://([^/]+)/files/(\\d+)/a/\\d+/\\d+\\.m3u8").find(u)?.let {
+                    // 2026-10-25 : l'audio peut passer par un relais (`relais/vrai-serveur/files/…`) →
+                    //   on garde tout ce qui précède `/files/` (cf. NetMirrorProvider.reconstructRealFilm).
+                    Regex("https?://(.+?)/files/(\\d+)/a/\\d+/\\d+\\.m3u8").find(u)?.let {
                         realHost = it.groupValues[1]; realAsset = it.groupValues[2]
                     }
                     // 2) Remplace la variante VIDÉO PREVIEW par la VRAIE vidéo token-free (segments libres).

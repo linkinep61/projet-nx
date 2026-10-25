@@ -1183,7 +1183,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
             // 2026-09-06 (user : « un nouveau dossier à côté de Stream4Free », site reneveo.store) :
             //   ~40 chaînes FR, liste Supabase + lecture avec Referer, cf. ReneveoTv. Contenu
             //   chargé au clic (LiveHubFolderDialog, clé `reneveo`), carte toujours affichée.
-            FolderDef(com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "RénéVéo", Regex("^RénéVéo - .*")),
+            // 2026-10-25 (user : « utilise mon dossier RénéVéo pour le transformer en dossier
+            //   Sport ») : même clé, la carte s'appelle « Sport » et regroupe le sport de toutes
+            //   les sources (cf. SportHub) ; les chaînes RénéVéo restent dedans, en dernier.
+            FolderDef(com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "Sport", Regex("^RénéVéo - .*")),
             // 2026-09-20 : dossier Bowd RETIRÉ (user : « pas vraiment stable »). Il listait
             //   689 chaînes FR via un jeton anonyme et lisait dans leur page player en
             //   WebView, leur /stream étant fermé en anonyme. Tout Bowd est parti le même
@@ -1366,7 +1369,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             "musique"        to "https://cdn-icons-png.flaticon.com/512/727/727218.png",
             "stream4cf"      to "https://www.stream4free.tv/images/logos4f.png",
             // 2026-09-06 : dossier RénéVéo (favicon du site).
-            com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.ReneveoTv.LOGO,
+            // 2026-10-25 : la carte RénéVéo est devenue « Sport » (cf. SportHub).
+            com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.SportHub.LOGO,
             // 2026-08-17 : dossier des fichiers perso (icone bibliotheque).
             "ma_bibliotheque" to "https://cdn-icons-png.flaticon.com/512/2991/2991108.png",
             // 2026-09-06 : carte « Ciné Films » (clap de cinéma).
@@ -2144,6 +2148,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 }
             }
         }
+        // 2026-10-25 : tuile du dossier Sport → fiche « En Direct » (cf. SportHub).
+        if (com.streamflixreborn.streamflix.utils.SportHub.estTuile(id)) {
+            return com.streamflixreborn.streamflix.utils.SportHub.fiche(id)
+        }
         // 2026-09-06 : chaîne RénéVéo → fiche synthétique « En Direct » (cf. ReneveoTv).
         if (com.streamflixreborn.streamflix.utils.ReneveoTv.estChaine(id)) {
             return com.streamflixreborn.streamflix.utils.ReneveoTv.fiche(id)
@@ -2798,6 +2806,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
     }
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-10-25 : tuile du dossier Sport → serveurs de toutes ses sources (cf. SportHub).
+        if (com.streamflixreborn.streamflix.utils.SportHub.estTuile(id)) {
+            return com.streamflixreborn.streamflix.utils.SportHub.serveurs(id, videoType)
+        }
         // 2026-09-26 : épisode « Plus de séries » → serveur unique (portails du groupe essayés à la lecture).
         if (id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_EP) || id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_EP_ANCIEN)) return listOf(com.streamflixreborn.streamflix.utils.OlaVod.serveurEpisode(id))
         if (id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_SERIE)) {
@@ -3237,6 +3249,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
             return com.streamflixreborn.streamflix.utils.AdultTvResolver.resolve(server.src)
                 ?: throw Exception("AdultTV resolver failed for ${server.src}")
         }
+        // 2026-10-25 : serveur OLA / Vegeta / Vavoo (dossier Sport) → lu par sa source d'origine.
+        com.streamflixreborn.streamflix.utils.SportHub.lecteurDe(server)?.let { return it.getVideo(server) }
+        // 2026-10-25 : serveur web du module sport/ (damitv) → flux capté, lu par le lecteur ONYX.
+        com.streamflixreborn.streamflix.utils.SportHub.videoWeb(server)?.let { return it }
+        // 2026-10-25 : lien ParaTV « …-dm.m3u8 » (Mix FR) → lien Dailymotion frais (cf. ParaTvDailymotion).
+        com.streamflixreborn.streamflix.utils.ParaTvDailymotion.video(server.src)?.let { return it }
         // 2026-09-26 : film Ciné Films servi par un portail OLA (handshake + create_link).
         if (server.id.startsWith(com.streamflixreborn.streamflix.utils.OlaVod.PREFIX_SRC)) {
             return com.streamflixreborn.streamflix.utils.OlaVod.video(server)

@@ -3513,6 +3513,7 @@ object MiniPlayerController {
                 return
             }
 
+
             // Host-level skip: if this resolved URL's host has already failed >= threshold,
             // skip it immediately instead of wasting 5s waiting for ExoPlayer to time out.
             val resolvedHost = extractHost(video.source)

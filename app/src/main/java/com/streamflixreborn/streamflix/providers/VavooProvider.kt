@@ -1457,6 +1457,16 @@ object VavooProvider : Provider, IptvProvider {
         }.map { it.toTvShow() }
     }
 
+    /** 2026-10-25 (dossier Sport du TV Hub, cf. SportHub) : toutes les chaînes dont le nom passe
+     *  [garder]. Même registre que la recherche. */
+    suspend fun chainesQui(garder: (String) -> Boolean, max: Int = 400): List<TvShow> {
+        runCatching { ensureRegistry() }
+        return runCatching {
+            synchronized(registryLock) { channelRegistry.filter { garder(it.name) } }
+                .take(max).map { it.toTvShow() }
+        }.getOrDefault(emptyList())
+    }
+
     override suspend fun getTvShow(id: String): TvShow {
         val vavooId = id.removePrefix("vavoo::")
         ensureRegistry()

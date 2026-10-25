@@ -586,7 +586,9 @@ class TvShowViewHolder(
         //   au profit d'un affichage a plat. Ne pas la retirer.
         if (selected.id.startsWith("livehub::folder::vidaradir_") ||
             // 2026-09-05 : sous-dossiers Vegeta VOD (Films / Séries / catégories), même mécanique.
-            selected.id.startsWith("livehub::folder::vegetavod_")) {
+            selected.id.startsWith("livehub::folder::vegetavod_") ||
+            // 2026-10-25 : sous-dossiers du dossier Sport (chargés au clic), même mécanique.
+            selected.id.startsWith("livehub::folder::" + com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER)) {
             com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
                 root.context,
                 selected.id.removePrefix("livehub::folder::"),

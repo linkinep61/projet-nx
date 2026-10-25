@@ -68,6 +68,8 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_netmirror"
 
     private const val TAG = "NetMirrorProvider"
+    /** R8 : message unique de l'échec « jeton anonyme » (in=unknown) — sert aussi à le repérer. */
+    private const val ECHEC_JETON_ANONYME = "NetMirror : jeton refusé (in=unknown)"
 
     // ══════════════════════════════════════════════════════════════════════
     //  NetMirror backend — auth + API
@@ -1756,7 +1758,8 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         Log.d(TAG, "getServers '${ids.title}' (original: '${ids.originalTitle ?: "="}') tmdb=${ids.tmdbId}")
         val native = fetchNativeNetMirrorServers(ids)
         val backups = if (BACKUPS_ENABLED) fetchNetMirrorBackups(ids, videoType) else emptyList()
-        val all = native + backups
+        val net27 = runCatching { serveursNet27(ids.tmdbId, ids.seasonNum, ids.episodeNum) }.getOrDefault(emptyList())
+        val all = net27 + native + backups
         Log.d(TAG, "getServers '${ids.title}' → ${native.size} natifs + ${backups.size} backups = ${all.size}")
         all
     }
@@ -1776,6 +1779,12 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         //   partaient d'un coup → « Too Many Requests ». On garde l'émission progressive
         //   (chaque plateforme émet ses serveurs dès qu'ils sont prêts), juste espacée.
         //   Les backups (ci-dessous) restent parallèles : ils tapent d'AUTRES domaines.
+        // 2026-10-25 : chemin rapide net27 (API par TMDB, sans session) — serveur montré
+        //   seulement si l'API renvoie vraiment un MP4 (cf. serveurNet27).
+        launch {
+            try { serveursNet27(ids.tmdbId, ids.seasonNum, ids.episodeNum).takeIf { it.isNotEmpty() }?.let { send(it) } }
+            catch (e: Exception) { Log.d(TAG, "net27 (prog) : ${e.message}") }
+        }
         launch {
             for (platform in OttPlatform.entries) {
                 try {
@@ -2093,6 +2102,12 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         }.getOrNull() ?: return@withContext null
         val file = entry.optJSONArray("sources")?.optJSONObject(0)?.optString("file")
             ?.takeIf { it.isNotBlank() } ?: return@withContext null
+        // 2026-10-25 (R8, échec rapide) : jeton anonyme (in=unknown::rf / ::db) → le service refusera
+        //   la lecture ; on n'essaie PAS l'ancien chemin, getVideo abandonne et Direct prend le relais.
+        if (file.contains("in=unknown")) {
+            Log.w(TAG, "lecture mobile : jeton anonyme (in=unknown) → abandon immédiat")
+            throw IllegalStateException(ECHEC_JETON_ANONYME)
+        }
         // Le jeton du lien doit reprendre l'identifiant de NOTRE session (sinon : lien anonyme = pub).
         val idSession = java.net.URLDecoder.decode(session.substringAfter("t_hash_t="), "UTF-8").substringBefore("::")
         if (idSession.isBlank() || !file.contains("in=$idSession")) {
@@ -2136,7 +2151,179 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         )
     }
 
+    // ── 2026-10-25 : chemin rapide net27 ───────────────────────────────────────
+    //   (user : fiche « NETMIRROR — chemin rapide testé en direct ») — le chemin habituel
+    //   échouait (« reconstruction impossible », jeton in=unknown). net27.cc expose une API
+    //   SANS session, par identifiant TMDB :
+    //     /api/embed-tmdb/<tmdb>?type=movie  ·  /api/embed-tmdb/<tmdb>?type=tv&se=<s>&ep=<e>
+    //   → {ok, streams:[{url,resolution,size}], captions:[{lang,name,url}], …}
+    //   Vérifié au navigateur : Animals, Fight Club → MP4 360→1080p ; GoT S1E1 → jusqu'au 1080p ;
+    //   sous-titres FR présents. Les MP4 viennent du CDN MovieBox : audio = version d'origine,
+    //   d'où l'étiquette [VOSTFR] (et non [VF]) — les serveurs Netflix [VF] restent à côté.
+    //   ok=true SANS flux (ex. WWE Raw S34E1) = absent → pas de serveur (jamais à l'aveugle).
+    //   Sous-titres : chemins RELATIFS → préfixer par l'hôte qui a répondu. fallbackHls ignoré.
+    //   Ajouté comme serveur À PART (et pas en premier dans le getVideo des serveurs Netflix [VF])
+    //   pour que l'étiquette de langue reste vraie ; les serveurs natifs restent en secours.
+    private val NET27_PREFIX = "net27::"
+    private val NET27_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+    private val NET27_REFERER = "https://videodownloader.site/"
+
+    // Brief 2 (user, 2026-10-25) : la série se demande avec se/ep (s/e sont IGNORÉS → toujours
+    //   S1E1) ; même API sur 3 hôtes, essayés dans l'ordre ; délai 8 s ; la vidéo publicitaire de
+    //   remplacement a toujours « /files/220884/ » dans son adresse → écartée.
+    private val NET27_HOTES = listOf("https://net27.cc", "https://net79.cc", "https://netmirrors.vip")
+    private val NET27_PUB = "/files/220884/"
+    private val net27Client by lazy {
+        httpClientFollowRedirects.newBuilder()
+            .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
+
+    /** 2026-10-25 (user : « le but c'est de réparer la version française ») — doublage français.
+     *  /api/variants-tmdb/{movie|tv}/{tmdb}[?se&ep] liste les versions (« Default », « French dub »,
+     *  « Hindi dub »…) avec leur dubSubjectId + detailPath ; embed-tmdb les accepte en &dub=&dubdp=.
+     *  Vérifié au navigateur : Animals, Fight Club, Inception ont « French dub » ; GoT n'a que
+     *  « Default ». Rend (dubSubjectId, detailPath) du doublage français, ou null. */
+    private fun net27DoublageFr(tmdb: String, saison: Int?, episode: Int?): Pair<String, String>? {
+        if (tmdb.isBlank() || !tmdb.all { it.isDigit() }) return null
+        val chemin = if (saison != null && episode != null) "/api/variants-tmdb/tv/$tmdb?se=$saison&ep=$episode"
+            else "/api/variants-tmdb/movie/$tmdb"
+        for (hote in NET27_HOTES) {
+            val req = Request.Builder().url(hote + chemin)
+                .header("Accept", "application/json").header("Referer", NET27_REFERER).header("User-Agent", NET27_UA)
+                .build()
+            val j = runCatching {
+                net27Client.newCall(req).execute().use { r -> if (!r.isSuccessful) null else JSONObject(r.body?.string().orEmpty()) }
+            }.getOrNull() ?: continue
+            val v = j.optJSONArray("variants") ?: return null
+            for (i in 0 until v.length()) {
+                val o = v.optJSONObject(i) ?: continue
+                // Brief VF : « French » / « Français » / « fr » ; l'API renvoie en fait « French dub »
+                //   (et « … sub » = simples sous-titres, à exclure).
+                val lg = o.optString("language").trim().lowercase()
+                val francais = lg == "french" || lg == "français" || lg == "francais" || lg == "fr" ||
+                    ((lg.contains("french") || lg.contains("français")) && lg.contains("dub"))
+                if (francais && !lg.contains("sub")) {
+                    val id = o.optString("dubSubjectId").takeIf { it.isNotBlank() } ?: continue
+                    return id to o.optString("detailPath")
+                }
+            }
+            return null
+        }
+        return null
+    }
+
+    /** Rend (hôte qui a répondu, réponse) — seulement si au moins un MP4 utilisable. */
+    private fun net27Appel(tmdb: String, saison: Int?, episode: Int?, doublage: Pair<String, String>? = null): Pair<String, JSONObject>? {
+        if (tmdb.isBlank() || !tmdb.all { it.isDigit() }) return null
+        val base = if (saison != null && episode != null)
+            "/api/embed-tmdb/$tmdb?type=tv&se=$saison&ep=$episode"
+        else "/api/embed-tmdb/$tmdb?type=movie"
+        val chemin = if (doublage == null) base
+            else base + "&dub=" + java.net.URLEncoder.encode(doublage.first, "UTF-8") +
+                "&dubdp=" + java.net.URLEncoder.encode(doublage.second, "UTF-8")
+        for (hote in NET27_HOTES) {
+            val req = Request.Builder().url(hote + chemin)
+                .header("Accept", "application/json")
+                .header("Referer", NET27_REFERER)
+                .header("User-Agent", NET27_UA)
+                .build()
+            val j = runCatching {
+                net27Client.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) null else JSONObject(r.body?.string().orEmpty())
+                }
+            }.onFailure { Log.d(TAG, "net27 : $hote injoignable (${it.message})") }.getOrNull() ?: continue
+            // Hôte vivant : sa réponse fait foi (pas de flux = l'œuvre est absente, inutile d'insister).
+            val utilisables = j.optJSONArray("streams")?.let { s ->
+                (0 until s.length()).count { s.optJSONObject(it)?.optString("url")?.let { u -> u.startsWith("http") && !u.contains(NET27_PUB) } == true }
+            } ?: 0
+            return if (j.optBoolean("ok") && utilisables > 0) hote to j else null
+        }
+        return null
+    }
+
+    private fun serveurNet27(tmdb: String, saison: Int?, episode: Int?): Video.Server? {
+        val (hote, j) = net27Appel(tmdb, saison, episode) ?: run {
+            Log.d(TAG, "net27 : rien pour tmdb=$tmdb s=$saison e=$episode → pas de serveur")
+            return null
+        }
+        Log.d(TAG, "net27 : réponse de $hote (saison renvoyée=${j.optInt("currentSeason")}, épisode=${j.optInt("currentEpisode")})")
+        val caps = j.optJSONArray("captions")
+        val aFr = caps != null && (0 until caps.length()).any { caps.optJSONObject(it)?.optString("lang")?.lowercase()?.startsWith("fr") == true }
+        val suffixe = if (saison != null && episode != null) "::$saison::$episode" else ""
+        Log.d(TAG, "net27 : tmdb=$tmdb s=$saison e=$episode → ${j.optJSONArray("streams")?.length()} MP4, sous-titres FR=$aFr")
+        return Video.Server(
+            id = "netmirror_net27_$tmdb${suffixe.replace("::", "_")}",
+            // « NetMirror · [VOSTFR] » s'affichait juste « [VOSTFR] » (le panneau retire le préfixe
+            //   de la source) → nom explicite, comme « NetMirror Netflix [VF] ».
+            name = "NetMirror Direct ${if (aFr) "[VOSTFR]" else "[VO]"}",
+            src = "$NET27_PREFIX$tmdb$suffixe",
+        )
+    }
+
+    /** Serveurs NetMirror Direct : [VF] (doublage français, s'il existe ET a un MP4) puis VOSTFR/VO. */
+    private fun serveursNet27(tmdb: String, saison: Int?, episode: Int?): List<Video.Server> {
+        val vo = serveurNet27(tmdb, saison, episode)
+        val vf = runCatching {
+            val d = net27DoublageFr(tmdb, saison, episode) ?: return@runCatching null
+            net27Appel(tmdb, saison, episode, d) ?: run {
+                Log.d(TAG, "net27 : doublage FR listé mais sans MP4 (tmdb=$tmdb)"); return@runCatching null
+            }
+            val suffixe = if (saison != null && episode != null) "::$saison::$episode" else ""
+            Log.d(TAG, "net27 : doublage FR trouvé pour tmdb=$tmdb s=$saison e=$episode")
+            Video.Server(
+                id = "netmirror_net27vf_$tmdb${suffixe.replace("::", "_")}",
+                name = "NetMirror Direct [VF]",
+                src = "$NET27_PREFIX$tmdb$suffixe::vf::${d.first}::${java.net.URLEncoder.encode(d.second, "UTF-8")}",
+            )
+        }.getOrNull()
+        return listOfNotNull(vf, vo)
+    }
+
+    private fun videoNet27(src: String): Video {
+        // src = net27::<tmdb>[::<s>::<e>][::vf::<dubSubjectId>::<detailPath encodé>]
+        val tout = src.removePrefix(NET27_PREFIX).split("::")
+        val iVf = tout.indexOf("vf")
+        val p = if (iVf >= 0) tout.subList(0, iVf) else tout
+        val doublage = if (iVf >= 0) tout.getOrNull(iVf + 1)?.let { id ->
+            id to java.net.URLDecoder.decode(tout.getOrNull(iVf + 2).orEmpty(), "UTF-8")
+        } else null
+        // Re-demandé à chaque lecture : les liens sont signés et datés.
+        val (hote, j) = net27Appel(p[0], p.getOrNull(1)?.toIntOrNull(), p.getOrNull(2)?.toIntOrNull(), doublage)
+            ?: throw Exception("NetMirror net27 : aucun flux pour $src")
+        val streams = j.getJSONArray("streams")
+        // Meilleure résolution d'abord (« 1080 », « 720p »… → nombre), sans la vidéo pub.
+        val meilleur = (0 until streams.length()).mapNotNull { streams.optJSONObject(it) }
+            .filter { it.optString("url").startsWith("http") && !it.optString("url").contains(NET27_PUB) }
+            .maxByOrNull { Regex("\\d+").find(it.optString("resolution"))?.value?.toIntOrNull() ?: 0 }
+            ?: throw Exception("NetMirror net27 : flux sans adresse")
+        val sousTitres = mutableListOf<Video.Subtitle>()
+        j.optJSONArray("captions")?.let { c ->
+            for (i in 0 until c.length()) {
+                val o = c.optJSONObject(i) ?: continue
+                var f = o.optString("url").takeIf { it.isNotBlank() } ?: continue
+                if (f.startsWith("//")) f = "https:$f" else if (f.startsWith("/")) f = "$hote$f"
+                val lg = o.optString("lang").lowercase()
+                val estFr = lg.startsWith("fr")
+                // En VF, aucun sous-titre activé d'office (pistes dispo dans le menu).
+                sousTitres += Video.Subtitle(label = nomLangueSousTitre(lg, o.optString("name")), file = f, default = estFr && doublage == null)
+            }
+        }
+        sousTitres.sortWith(compareBy({ if (it.default) 0 else 1 }, { it.label }))
+        Log.d(TAG, "net27 : lecture ${meilleur.optString("resolution")} (${sousTitres.size} sous-titres)")
+        return Video(
+            source = meilleur.optString("url"),
+            type = androidx.media3.common.MimeTypes.VIDEO_MP4,
+            headers = mapOf("Referer" to NET27_REFERER, "User-Agent" to NET27_UA),
+            subtitles = sousTitres,
+        )
+    }
+
     override suspend fun getVideo(server: Video.Server): Video = withContext(Dispatchers.IO) {
+        // 2026-10-25 : chemin rapide net27 (MP4 direct + sous-titres).
+        if (server.src.startsWith(NET27_PREFIX)) {
+            return@withContext videoNet27(server.src)
+        }
         // ── Délégation backup ──
         if (server.id.startsWith("nm_cs__")) {
             val original = server.copy(id = server.id.removePrefix("nm_cs__"))
@@ -2252,6 +2439,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         run {
             val mobile = runCatching { lectureMobile(contentId, ottCode, vostfrDemande) }
                 .onFailure { Log.w(TAG, "lecture mobile KO : ${it.message}") }
+                .onFailure { if (it.message == ECHEC_JETON_ANONYME) throw it } // R8 : pas d'ancien chemin
                 .getOrNull()
             if (mobile != null) return@withContext mobile
         }
@@ -2426,6 +2614,13 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             // 2026-07-08 (SOLUTION token-free) : on tente de reconstruire le VRAI film à partir du
             //   master masqué (audio réel + segments vidéo libres). Si ça marche → vrai film dans
             //   ExoPlayer. Sinon → fallback audio+pub.
+            // 2026-10-25 (user : « ÉCHEC RAPIDE — dès que le jeton revient in=unknown, on abandonne
+            //   immédiatement et on passe à Direct ») : jeton anonyme = le service refusera la
+            //   lecture ; la reconstruction (sondes de segments) ne faisait que retarder l'échec.
+            if (absUrl.contains("in=unknown")) {
+                Log.w(TAG, "getVideo : jeton anonyme (in=unknown) → abandon immédiat, NetMirror Direct prend le relais")
+                throw Exception(ECHEC_JETON_ANONYME)
+            }
             val realUri = runCatching { reconstructRealFilm(absUrl, vidHeaders) }.getOrNull()
             if (realUri != null) {
                 Log.d(TAG, "getVideo OK (VRAI film reconstruit token-free): $realUri")
@@ -2678,7 +2873,13 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                 ?: audioTracks.firstOrNull { it.lang.startsWith("en") || it.name.contains("english") }
                 ?: audioTracks.first()
             val audioUrl = chosen.uri
-            val hostAssetM = Regex("https?://([^/]+)/files/([A-Za-z0-9]+)/a/").find(audioUrl) ?: return@withContext null
+            // 2026-10-25 (user : « je crois que le net miroir est cassé » + lien qui marche au
+            //   navigateur `https://makhi15.top/s22.freecdn41.top/files/81757047/a/6/6.m3u8`) : les
+            //   pistes passent désormais par un RELAIS (`relais/vrai-serveur/files/…`). L'ancien motif
+            //   exigeait `/files/` juste après le 1er domaine → aucun match → abandon SILENCIEUX → plus
+            //   aucun film NetMirror. On garde tout ce qui précède `/files/` (relais compris).
+            val hostAssetM = Regex("https?://(.+?)/files/([A-Za-z0-9]+)/a/").find(audioUrl)
+                ?: run { Log.w(TAG, "reconstruct DIAG: adresse audio non reconnue ${audioUrl.take(80)}"); return@withContext null }
             val host = hostAssetM.groupValues[1]; val asset = hostAssetM.groupValues[2]
             Log.d(TAG, "reconstructRealFilm audio: lang=${chosen.lang} name=${chosen.name} (sur ${audioTracks.size} pistes)")
             val audioManifest = httpGet(audioUrl) ?: return@withContext null

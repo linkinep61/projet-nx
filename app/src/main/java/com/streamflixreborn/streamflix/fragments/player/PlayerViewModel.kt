@@ -459,8 +459,12 @@ class PlayerViewModel(
     // en cache et on GET le master m3u8 pour parser RESOLUTION=WxH.
     // Fallback : inférence depuis l'URL (patterns "1080", "720", etc.).
 
-    /** Providers IPTV exclus du probe (pas pertinent pour du live). */
-    private val IPTV_PROVIDER_NAMES = setOf(
+    /** Providers IPTV exclus du probe (pas pertinent pour du live).
+     *  2026-10-25 : getter, plus un champ — la recherche de serveurs est lancée par le bloc
+     *  `init` situé AU-DESSUS ; quand les serveurs arrivent tout de suite (dossier Sport, liste
+     *  en cache), elle atteignait probeServerQualities avant l'initialisation de ce champ →
+     *  NullPointerException « Set.contains » et grand lecteur refermé (vu sur l'émulateur). */
+    private val IPTV_PROVIDER_NAMES: Set<String> get() = setOf(
         "WiTv", "OlaTv", "VegetaTv", "Vavoo", "LiveTvHub", "SportLive"
     )
 
