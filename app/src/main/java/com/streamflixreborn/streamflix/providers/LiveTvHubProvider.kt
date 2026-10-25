@@ -3004,7 +3004,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val siId = id.removePrefix("livehub::replay::")
             val title = replayProgramTitles[siId] ?: "Replay"
             // Fallback francetv:// pour rétrocompat si le src n'a pas été stocké
-            val src = replayProgramSrcs[siId] ?: "francetv://$siId"
+            // 2026-10-24 (bug « Continuer à regarder » TV Hub) : après un redémarrage la map
+            //   est vide ; l'épisode relancé depuis la reprise gardait son préfixe
+            //   (francetv://ftvep::<si>) → rien trouvé, « direct non disponible ». On
+            //   reconstruit le src depuis le préfixe de l'épisode.
+            val src = replayProgramSrcs[siId] ?: when {
+                siId.startsWith("ftvep::") -> "francetv://${siId.removePrefix("ftvep::")}"
+                siId.startsWith("bfmep::") -> "bfmplay://${siId.removePrefix("bfmep::")}"
+                siId.startsWith("plexep::") -> "plexvod://${siId.removePrefix("plexep::")}"
+                siId.startsWith("plutoep::") -> "plutovod://e/${siId.removePrefix("plutoep::")}"
+                siId.startsWith("francetv-live::") -> "francetv://${siId.removePrefix("francetv-live::")}"
+                else -> "francetv://$siId"
+            }
             return listOf(
                 Video.Server(
                     id = "livehub::replay::$siId",

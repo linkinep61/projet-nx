@@ -540,6 +540,10 @@ class MovieViewHolder(
                     cf.removeFavorite(movie.id, true)
                 } else if (isDramaOrAnimeProvider()) {
                     ShowOptionsTvDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
+                } else if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM) {
+                    // 2026-10-25 : « Continuer à regarder » → + « Choisir le serveur » (liste
+                    //   ONYX / lecteur externe avant lecture ; le clic de la carte lance le film).
+                    ShowOptionsTvDialog(context, movie, lancerAvecChoix = { performClick() }).show()
                 } else {
                     ShowOptionsTvDialog(context, movie).show()
                 }
@@ -789,6 +793,10 @@ class MovieViewHolder(
                     cf.removeFavorite(movie.id, true)
                 } else if (isDramaOrAnimeProvider()) {
                     ShowOptionsTvDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
+                } else if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM) {
+                    // 2026-10-25 : « Continuer à regarder » → + « Choisir le serveur » (liste
+                    //   ONYX / lecteur externe avant lecture ; le clic de la carte lance le film).
+                    ShowOptionsTvDialog(context, movie, lancerAvecChoix = { performClick() }).show()
                 } else {
                     ShowOptionsTvDialog(context, movie).show()
                 }
@@ -1189,6 +1197,21 @@ class MovieViewHolder(
                         videoType = Video.Type.Movie(id = movie.id, title = movie.title, releaseDate = movie.released?.format("yyyy-MM-dd") ?: "", poster = movie.poster ?: movie.banner ?: "", imdbId = movie.imdbId),
                     ))
                 }
+            }
+            // 2026-10-25 (idée du user) : appui LONG sur OK → liste des serveurs puis lecteur
+            //   externe, pour ce film seulement (cf. ModeLecteurExterne).
+            setOnLongClickListener {
+                checkProviderAndRun {
+                    com.streamflixreborn.streamflix.utils.ModeLecteurExterne.uneFoisPourId = movie.id
+                    android.widget.Toast.makeText(context, "Lecture dans un lecteur externe", android.widget.Toast.LENGTH_SHORT).show()
+                    findNavController().navigate(MovieTvFragmentDirections.actionMovieToPlayer(
+                        id = movie.id,
+                        title = movie.title,
+                        subtitle = movie.released?.format("yyyy") ?: "",
+                        videoType = Video.Type.Movie(id = movie.id, title = movie.title, releaseDate = movie.released?.format("yyyy-MM-dd") ?: "", poster = movie.poster ?: movie.banner ?: "", imdbId = movie.imdbId),
+                    ))
+                }
+                true
             }
         }
 

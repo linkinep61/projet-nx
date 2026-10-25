@@ -2230,6 +2230,71 @@ class TvShowViewHolder(
         val episodeSeason = resolveEpisodeSeason(episodeToWatch)
         binding.btnTvShowWatchNow.apply {
             isVisible = episodeToWatch != null
+            // 2026-10-25 (idée du user) : appui LONG → l'épisode affiché sur le bouton part dans le
+            //   lecteur externe (liste des serveurs d'abord). Même chemin que le clic normal.
+            setOnLongClickListener {
+                val ep = episodeToWatch ?: return@setOnLongClickListener false
+                val estDossierLangue = ep.id.startsWith("@subfolder:") || ep.overview == "@subfolder"
+                if (!estDossierLangue) {
+                    com.streamflixreborn.streamflix.utils.ModeLecteurExterne.uneFoisPourId = ep.id
+                    performClick()
+                    return@setOnLongClickListener true
+                }
+                // 2026-10-25 (user, Blue Box / AnimeSama) : le bouton pointe sur un DOSSIER de langue
+                //   (VF / VOSTFR) ; le clic normal ouvre la liste des épisodes. À l'appui long on va
+                //   chercher nous-mêmes le vrai épisode dans ce dossier → liste des serveurs directe.
+                val provider = UserPreferences.currentProvider ?: return@setOnLongClickListener true
+                val nav = findNavController()
+                android.widget.Toast.makeText(context, "Recherche de l'épisode…", android.widget.Toast.LENGTH_SHORT).show()
+                findViewTreeLifecycleOwner()?.lifecycleScope?.launch {
+                    val trouve = withContext(Dispatchers.IO) {
+                        runCatching {
+                            var dossier = ep.id.removePrefix("@subfolder:")
+                            var resultat: Episode? = null
+                            for (profondeur in 0 until 3) {
+                                val eps = provider.getEpisodesBySeason(dossier).sortedBy { it.number }
+                                val sous = eps.firstOrNull { it.overview == "@subfolder" || it.id.startsWith("@subfolder:") }
+                                if (sous == null) {
+                                    resultat = eps.firstOrNull { it.number == ep.number } ?: eps.firstOrNull()
+                                    break
+                                }
+                                dossier = sous.id.removePrefix("@subfolder:")
+                            }
+                            resultat
+                        }.getOrNull()
+                    }
+                    if (trouve == null) {
+                        android.widget.Toast.makeText(context, "Épisode introuvable — choisis-le dans la liste", android.widget.Toast.LENGTH_SHORT).show()
+                        performClick()
+                        return@launch
+                    }
+                    com.streamflixreborn.streamflix.utils.ModeLecteurExterne.uneFoisPourId = trouve.id
+                    val numSaison = trouve.season?.number ?: episodeSeason?.number ?: 1
+                    val videoType = Video.Type.Episode(
+                        id = trouve.id,
+                        number = trouve.number,
+                        title = trouve.title,
+                        poster = trouve.poster ?: ep.poster,
+                        overview = trouve.overview,
+                        tvShow = Video.Type.Episode.TvShow(
+                            id = tvShow.id,
+                            title = tvShow.title,
+                            poster = tvShow.poster,
+                            banner = tvShow.banner,
+                            releaseDate = tvShow.released?.format("yyyy-MM-dd"),
+                            imdbId = tvShow.imdbId,
+                        ),
+                        season = Video.Type.Episode.Season(number = numSaison, title = trouve.season?.title ?: ""),
+                    )
+                    nav.navigate(R.id.player, Bundle().apply {
+                        putString("id", trouve.id)
+                        putString("title", tvShow.title)
+                        putString("subtitle", "S$numSaison E${trouve.number}  •  ${trouve.title ?: ""}")
+                        putSerializable("videoType", videoType)
+                    })
+                }
+                true
+            }
             setOnClickListener {
                 // 2026-05-15 (user "sur Mon IPTV cliquer sur Regarder S1 E1 ne
                 // lance pas la lecture, suivant/précédent puis ça marche") :

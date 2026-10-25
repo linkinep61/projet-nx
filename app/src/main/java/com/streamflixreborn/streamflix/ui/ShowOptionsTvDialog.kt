@@ -34,6 +34,9 @@ import kotlinx.coroutines.withContext
 class ShowOptionsTvDialog(
     context: Context,
     show: AppAdapter.Item,
+    /** 2026-10-25 : carte « Continuer à regarder » → ligne « Choisir le serveur » : relance la
+     *  lecture de la carte en affichant d'abord la liste des serveurs (ONYX ou lecteur externe). */
+    private val lancerAvecChoix: (() -> Unit)? = null,
 ) : Dialog(context) {
 
     private val binding = DialogShowOptionsTvBinding.inflate(LayoutInflater.from(context))
@@ -68,6 +71,19 @@ class ShowOptionsTvDialog(
             is Episode -> displayEpisode(show)
             is Movie -> displayMovie(show)
             is TvShow -> displayTvShow(show)
+        }
+
+        val idLecture = when (show) { is Episode -> show.id; is Movie -> show.id; else -> null }
+        if (lancerAvecChoix != null && idLecture != null) {
+            binding.btnOptionChoisirServeur.apply {
+                visibility = View.VISIBLE
+                setOnClickListener {
+                    com.streamflixreborn.streamflix.utils.ModeLecteurExterne.uneFoisPourId = idLecture
+                    hide()
+                    lancerAvecChoix.invoke()
+                }
+                requestFocus()
+            }
         }
 
 

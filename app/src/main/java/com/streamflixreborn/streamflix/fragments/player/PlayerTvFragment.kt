@@ -620,6 +620,7 @@ class PlayerTvFragment : Fragment() {
         com.streamflixreborn.streamflix.utils.LecteurExterne.fin(ctx)
         val retour = com.streamflixreborn.streamflix.utils.LecteurExterne.lireRetour(data)
         Log.i("ExternalPlayer", "TV - retour du lecteur externe : $retour")
+        if (modeExterne()) { apresLecteurExterne(retour); return }
         if (retour == null) return
         val appCtx = ctx.applicationContext
         val type = args.videoType
@@ -629,6 +630,99 @@ class PlayerTvFragment : Fragment() {
         if (!retour.fini && retour.positionMs > 0) {
             try { player.seekTo(retour.positionMs) } catch (_: Throwable) {}
         }
+    }
+
+    // 2026-10-25 : mode « lecteur externe » complet (cf. ModeLecteurExterne) — liste des
+    //   serveurs avant VLC, retour à la liste si VLC n'a pas pu lire, épisode suivant proposé.
+    private var listeExterne: com.streamflixreborn.streamflix.utils.ListeServeursExterne? = null
+    private var repriseExterneMs = 0L
+    /** 2026-10-25 (user) : « Lecteur ONYX » choisi dans la liste → lecture normale pour ce titre. */
+    private var lectureOnyxChoisie = false
+    private fun modeExterne() = !lectureOnyxChoisie &&
+        com.streamflixreborn.streamflix.utils.ModeLecteurExterne.actif(args.id)
+
+    /** Quitte le mode externe : la liste se ferme, le serveur choisi démarre dans notre lecteur
+     *  (mêmes serveurs, pas de nouvelle recherche ; bascule auto si ce serveur tombe). */
+    private fun passerAuLecteurOnyx() {
+        lectureOnyxChoisie = true
+        didProposeExternalThisSession = true   // sinon « toujours externe » relancerait VLC
+        com.streamflixreborn.streamflix.utils.ModeLecteurExterne.oublierUneFois(args.id)
+        listeExterne?.fermer(); listeExterne = null
+        showLoadingOverlay()
+        Log.i("PlayerTvFragment", "Mode externe : l'utilisateur choisit le lecteur ONYX")
+    }
+
+    private fun titreExterne(): String = when (val type = args.videoType) {
+        is Video.Type.Movie -> type.title
+        is Video.Type.Episode -> "${type.tvShow.title} • S${type.season.number} E${type.number}"
+    }
+
+    private fun ouvrirListeExterne(message: String? = null) {
+        val ctx = context ?: return
+        val fond = when (val t = args.videoType) {
+            is Video.Type.Movie -> t.poster
+            is Video.Type.Episode -> t.tvShow.banner ?: t.tvShow.poster ?: t.poster
+        }
+        val liste = listeExterne ?: com.streamflixreborn.streamflix.utils.ListeServeursExterne(
+            ctx, titreExterne(), fond,
+            serveurs = { servers },
+            onChoix = { s, onyx ->
+                if (onyx) passerAuLecteurOnyx()
+                currentServer = s
+                viewModel.getVideo(s)
+            },
+            onFermer = { if (isAdded) runCatching { findNavController().navigateUp() } },
+        ).also { listeExterne = it }
+        liste.afficher(message)
+    }
+
+    private fun fermerLecteurExterne() {
+        listeExterne?.fermer()
+        if (isAdded) runCatching { findNavController().navigateUp() }
+    }
+
+    /** Mode externe : suite à donner au retour de VLC (cf. ModeLecteurExterne). */
+    private fun apresLecteurExterne(retour: com.streamflixreborn.streamflix.utils.LecteurExterne.Retour?) {
+        val ctx = context ?: return
+        val type = args.videoType
+        val repriseAvant = repriseExterneMs
+        if (retour != null) {
+            val appCtx = ctx.applicationContext
+            lifecycleScope.launch {
+                com.streamflixreborn.streamflix.utils.LecteurExterne.enregistrer(appCtx, database, type, retour)
+            }
+            if (!retour.fini && retour.positionMs > repriseExterneMs) repriseExterneMs = retour.positionMs
+        }
+        // Pas de réponse, ou moins de 30 s lues depuis le point de départ → le serveur n'a
+        //   sans doute pas marché dans VLC : on revient à la liste.
+        val courte = retour == null || (!retour.fini &&
+            retour.positionMs - repriseAvant < com.streamflixreborn.streamflix.utils.ModeLecteurExterne.LECTURE_COURTE_MS)
+        if (courte) {
+            Log.i("ExternalPlayer", "Mode externe TV : lecture courte → retour à la liste des serveurs")
+            listeExterne?.marquerEchecDernier()
+            ouvrirListeExterne("Lecture interrompue ? Choisis un autre serveur, ou ferme.")
+            return
+        }
+        if (retour!!.fini && type is Video.Type.Episode) {
+            lifecycleScope.launch {
+                val aSuivant = withContext(Dispatchers.IO) { EpisodeManager.ensureNextEpisodeAvailable(type, database) }
+                val suivant = if (aSuivant) EpisodeManager.peekNextEpisode() else null
+                if (suivant == null || !isAdded) { fermerLecteurExterne(); return@launch }
+                val libelle = "S${suivant.season.number} E${suivant.number}" +
+                    (suivant.title?.takeIf { it.isNotBlank() }?.let { " • $it" } ?: "")
+                com.streamflixreborn.streamflix.utils.ModeLecteurExterne.proposerSuivant(
+                    requireContext(), libelle,
+                    onSuivant = {
+                        // Lancé par appui long : le suivant reste dans le lecteur externe.
+                        com.streamflixreborn.streamflix.utils.ModeLecteurExterne.uneFoisPourId = suivant.id
+                        playNextEpisodeAcrossSeasons(autoplay = false)
+                    },
+                    onArreter = { fermerLecteurExterne() },
+                )
+            }
+            return
+        }
+        fermerLecteurExterne()
     }
 
     private val pickLocalSubtitle = registerForActivityResult(
@@ -1449,7 +1543,22 @@ class PlayerTvFragment : Fragment() {
                         // 2026-07-07 (ANR DessinAnime) : pick + getVideo UNE SEULE FOIS par cycle.
                         //   Les vagues suivantes ne font que MAJ le picker (plus haut), pas de
                         //   re-getVideo → fini la rafale ré-entrante sur le main thread.
-                        if (!initialServerPicked) {
+                        if (modeExterne() && !attachedFromMiniPlayer) {
+                            // 2026-10-25 : mode lecteur externe → rien ne démarre tout seul, on
+                            //   affiche la liste des serveurs (mise à jour au fil des arrivées).
+                            if (!initialServerPicked) {
+                                initialServerPicked = true
+                                hideLoadingOverlay()
+                                val type = args.videoType
+                                val appCtx = requireContext().applicationContext
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    repriseExterneMs = com.streamflixreborn.streamflix.utils.ModeLecteurExterne
+                                        .positionReprise(appCtx, database, type)
+                                }
+                                Log.i("PlayerTvFragment", "Mode lecteur externe : liste des serveurs (${servers.size})")
+                                ouvrirListeExterne()
+                            }
+                        } else if (!initialServerPicked) {
                             // 2026-10-03 (user : « le passage du petit lecteur au grand fait bugger la
                             //   vidéo juste après ») : le mini cherchait encore (pas d'image) et la
                             //   liste du grand commence par un flux officiel → on le lance directement
@@ -1527,6 +1636,10 @@ class PlayerTvFragment : Fragment() {
                             // FileNotFoundException and puts the player in ERROR state
                             // before extraction finishes. displayVideo() will set the
                             // real MediaItem when SuccessLoadingVideo arrives.
+                            if (modeExterne() && listeExterne != null) {
+                                listeExterne?.marquerChargement(state.server)
+                                return@collect
+                            }
                             // 2026-05-16 : marque serveur en cours pour affichage " ⟳".
                             runCatching {
                                 val activeId = state.server.id
@@ -1569,6 +1682,14 @@ class PlayerTvFragment : Fragment() {
                             )
                             // Rafraîchir le picker pour que la couleur rouge s'affiche
                             binding.settings.refreshServerList()
+                            // 2026-10-25 : mode lecteur externe → pas de bascule auto, l'utilisateur
+                            //   choisit un autre serveur dans la liste.
+                            if (modeExterne() && listeExterne != null) {
+                                hideLoadingOverlay()
+                                listeExterne?.echec(state.server)
+                                if (listeExterne?.visible != true) ouvrirListeExterne("${state.server.name} ne répond pas, choisis-en un autre.")
+                                return@collect
+                            }
                             // IPTV: never auto-advance on extractor failure (same sticky
                             // policy as onPlayerError). Auto-jumping between OLA/Vegeta
                             // variants during initial loading was breaking playback.
@@ -2023,6 +2144,8 @@ class PlayerTvFragment : Fragment() {
 
         override fun onDestroyView() {
             super.onDestroyView()
+            listeExterne?.fermer(); listeExterne = null
+            com.streamflixreborn.streamflix.utils.ModeLecteurExterne.oublierUneFois(args.id)
             if (redirectionScan) return   // lecteur jamais initialise (scan redirige vers la liseuse)
             com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(false)
             // 2026-08-02 : sortie du lecteur → plus d'hébergeur courant (cf. PlayerMobileFragment).
@@ -5049,8 +5172,12 @@ class PlayerTvFragment : Fragment() {
 
             // 2026-07-11 : si le mode « toujours lecteur externe » est actif,
             //   on lance directement le lecteur externe mémorisé sans passer par ExoPlayer.
-            if (UserPreferences.alwaysUseExternalPlayer && !didProposeExternalThisSession) {
+            // 2026-10-25 : en mode lecteur externe (hors radios), CHAQUE serveur choisi part dans
+            //   le lecteur externe (plus seulement le premier de la session).
+            if (modeExterne() || (UserPreferences.alwaysUseExternalPlayer && !didProposeExternalThisSession)) {
                 didProposeExternalThisSession = true // 1 seule fois par session
+                // La liste reste ouverte derrière VLC (pas de flash du lecteur vide).
+                listeExterne?.enLecture(server)
                 val pkg = UserPreferences.externalPlayerPackage
                 Log.d("PlayerTvFragment", "alwaysUseExternalPlayer=true → launch external player ($pkg)")
                 launchExternalPlayer(directPackage = pkg)
@@ -7176,7 +7303,11 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                 args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
-            if (isLiveIptvStream && !estFichierBibliotheque) {
+            // 2026-10-24 (bug « Continuer à regarder » TV Hub) : un épisode de replay (France TV,
+            //   BFM, Plex, Pluto, TF1+, M6+) n'est pas du direct → il reprend à sa position.
+            val estEpisodeReplay = Regex("^livehub::replay::(ftvep|bfmep|plexep|plutoep|tf1ep|m6ep)::")
+                .containsMatchIn(args.id)
+            if (isLiveIptvStream && !estFichierBibliotheque && !estEpisodeReplay) {
                 player.seekToDefaultPosition()
             } else if (startPositionMs != null) {
                 player.seekTo(startPositionMs)
@@ -7591,7 +7722,8 @@ class PlayerTvFragment : Fragment() {
                     setDataAndType(uri, "video/*")
                     addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     putExtra("title", resolvePlayerTitle())
-                    putExtra("position", player.currentPosition.toInt())
+                    // Mode externe : le lecteur interne n'a rien joué → reprise mémorisée.
+                    putExtra("position", maxOf(player.currentPosition, repriseExterneMs).toInt())
                     putExtra("return_result", true)  // MX Player : renvoie la position au retour
                     currentVideo?.headers?.let { h ->
                         putExtra("extra_headers", h.map { "${it.key}: ${it.value}" }.toTypedArray())

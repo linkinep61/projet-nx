@@ -63,6 +63,22 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
+            <!-- 2026-10-25 : « Continuer à regarder » → liste des serveurs (ONYX ou lecteur externe). -->
+            <TextView
+                android:id="@+id/btn_option_choisir_serveur"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_item_option"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:gravity="center_vertical"
+                android:padding="12dp"
+                android:text="▶  Choisir le serveur"
+                android:textColor="@color/option_text"
+                android:visibility="gone"
+                tools:ignore="HardcodedText" />
+
             <TextView
                 android:id="@+id/btn_option_episode_open_tv_show"
                 android:layout_width="match_parent"

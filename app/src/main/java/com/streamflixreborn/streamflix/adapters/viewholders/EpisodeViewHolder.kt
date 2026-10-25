@@ -271,7 +271,10 @@ class EpisodeViewHolder(
             isLongClickable = true
             setOnLongClickListener {
                 android.util.Log.d("EpisodeVH", "Long click detected on ${episode.title}")
-                toggleEpisodeFavorite()
+                // 2026-10-25 (idée du user) : menu → lecteur externe pour CET épisode, ou favori.
+                com.streamflixreborn.streamflix.utils.ModeLecteurExterne.menuEpisode(
+                    context, episode.id, lancer = { performClick() }, onFavori = { toggleEpisodeFavorite() })
+                true
             }
             setOnFocusChangeListener { _, hasFocus ->
                 val animation = when {
@@ -466,7 +469,8 @@ class EpisodeViewHolder(
                 )
             }
             setOnLongClickListener {
-                ShowOptionsTvDialog(context, episode)
+                // 2026-10-25 : + « Choisir le serveur » (liste ONYX / lecteur externe avant lecture).
+                ShowOptionsTvDialog(context, episode, lancerAvecChoix = { performClick() })
                     .show()
                 true
             }

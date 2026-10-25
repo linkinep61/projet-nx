@@ -57,16 +57,19 @@ class ScanReaderActivity : AppCompatActivity() {
         private const val EXTRA_CHAPITRE = "chapitre"
         private const val EXTRA_SERIE = "serie"
         private const val EXTRA_SERIE_TITRE = "serieTitre"
+        private const val EXTRA_EPISODE = "episode"
         private const val PREFS = "scans_lecture"
 
         fun estScan(id: String?) = id?.startsWith(ScansProvider.ID_PREFIX) == true
 
-        fun ouvrir(context: Context, chapitreId: String, serieId: String?, serieTitre: String?) {
+        fun ouvrir(context: Context, chapitreId: String, serieId: String?, serieTitre: String?,
+                   episode: Video.Type.Episode? = null) {
             context.startActivity(
                 Intent(context, ScanReaderActivity::class.java)
                     .putExtra(EXTRA_CHAPITRE, chapitreId)
                     .putExtra(EXTRA_SERIE, serieId)
                     .putExtra(EXTRA_SERIE_TITRE, serieTitre)
+                    .putExtra(EXTRA_EPISODE, episode as java.io.Serializable?)
             )
         }
 
@@ -75,7 +78,7 @@ class ScanReaderActivity : AppCompatActivity() {
         fun redirigerSiScan(fragment: Fragment, id: String, videoType: Video.Type?): Boolean {
             if (!estScan(id)) return false
             val ep = videoType as? Video.Type.Episode
-            ouvrir(fragment.requireContext(), id, ep?.tvShow?.id, ep?.tvShow?.title)
+            ouvrir(fragment.requireContext(), id, ep?.tvShow?.id, ep?.tvShow?.title, ep)
             Handler(Looper.getMainLooper()).post {
                 runCatching { fragment.findNavController().popBackStack() }
             }
@@ -90,6 +93,13 @@ class ScanReaderActivity : AppCompatActivity() {
     private lateinit var conteneurZoom: FrameLayout
     private lateinit var barreHaut: LinearLayout
     private lateinit var barreBas: LinearLayout
+    /** 2026-10-24 (demande d'abonnés) : barre de progression pour sauter vite dans le chapitre. */
+    private lateinit var barreCurseur: LinearLayout
+    private lateinit var basConteneur: LinearLayout
+    private lateinit var curseur: android.widget.SeekBar
+    private lateinit var curseurTotal: TextView
+    private lateinit var curseurPage: TextView
+    private var curseurTire = false
     private lateinit var titreVue: TextView
     private lateinit var pageVue: TextView
     private lateinit var chargement: ProgressBar
@@ -102,6 +112,10 @@ class ScanReaderActivity : AppCompatActivity() {
     private var chapitre: ScansProvider.Chapitre? = null
     private var serieId: String? = null
     private var serieTitre: String? = null
+    /** Épisode (chapitre) tel que la fiche l'a ouvert : affiche, saison, numéro — pour « Continuer à regarder ». */
+    private var episodeRef: Video.Type.Episode? = null
+    /** Numéro du chapitre affiché (suit ◀ / ▶ depuis celui de [episodeRef]). */
+    private var numeroCourant = 0
     private var barresVisibles = true
     private var echelle = 1f
     private var radioLanceeIci = false
@@ -131,6 +145,9 @@ class ScanReaderActivity : AppCompatActivity() {
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         serieId = intent.getStringExtra(EXTRA_SERIE)
         serieTitre = intent.getStringExtra(EXTRA_SERIE_TITRE)
+        @Suppress("DEPRECATION")
+        episodeRef = intent.getSerializableExtra(EXTRA_EPISODE) as? Video.Type.Episode
+        numeroCourant = episodeRef?.number ?: 0
 
         val racine = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
@@ -187,36 +204,103 @@ class ScanReaderActivity : AppCompatActivity() {
         racine.addView(barreHaut, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
 
         // ── barre du bas : chapitre précédent / suivant ──
+        // 2026-10-24 (user : « que tout fasse un tout, pas un truc aussi large ») : un seul petit panneau
+        //   arrondi, centré en bas — boutons compacts en haut, barre de progression dessous, même largeur.
         barreBas = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(16f).toInt(), dp(12f).toInt(), dp(16f).toInt(), dp(24f).toInt())
-            background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(0xE6000000.toInt(), 0x00000000))
         }
-        btnPrec = bouton(if (etroit) "◀" else "◀  Précédent") { chapitre?.precedent?.let { charger(it) } }
-        btnSuiv = bouton(if (etroit) "▶" else "Suivant  ▶") { chapitre?.suivant?.let { charger(it) } }
+        // ── barre de progression : « 12 ━━━●━━━ 203 » — glisser = sauter à la page ──
+        //   Télécommande : ▼ depuis les boutons pour l'atteindre, ◀▶ = quelques pages, ▲ = retour aux boutons.
+        // 2026-10-24 (user : « comme la barre des films », ne doit pas cacher l'écriture) : une simple
+        //   ligne fine, sans fond, numéros en petit aux deux bouts (ombrés pour rester lisibles).
+        curseurPage = TextView(this).apply {
+            setTextColor(0xFFE0E0E0.toInt()); textSize = 10f; minWidth = dp(24f).toInt(); gravity = Gravity.CENTER
+            setShadowLayer(3f, 0f, 0f, Color.BLACK)
+        }
+        curseurTotal = TextView(this).apply {
+            setTextColor(0xFFE0E0E0.toInt()); textSize = 10f; minWidth = dp(24f).toInt(); gravity = Gravity.CENTER
+            setShadowLayer(3f, 0f, 0f, Color.BLACK)
+        }
+        curseur = android.widget.SeekBar(this).apply {
+            isFocusable = true
+            progressTintList = android.content.res.ColorStateList.valueOf(0xFFE53935.toInt())
+            thumbTintList = android.content.res.ColorStateList.valueOf(0xFFE53935.toInt())
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0x80FFFFFF.toInt())
+            setPadding(dp(8f).toInt(), 0, dp(8f).toInt(), 0)
+            // Pas de fond : au focus télécommande, seul le point grossit.
+            setOnFocusChangeListener { v, f -> v.scaleY = if (f) 1.6f else 1f }
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar, p: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    if (autoCollant) arreterAuto()
+                    (liste.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(p, 0)
+                    curseurPage.text = "${p + 1}"
+                    pageVue.text = "${p + 1} / ${adaptateur.pages.size}"
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar) { curseurTire = true }
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar) { curseurTire = false; majPage() }
+            })
+        }
+        barreCurseur = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4f).toInt(), 0, 0)
+            addView(curseurPage)
+            addView(curseur, LinearLayout.LayoutParams(0, dp(22f).toInt(), 1f))
+            addView(curseurTotal)
+        }
+        val panneau = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8f).toInt(), dp(6f).toInt(), dp(8f).toInt(), dp(4f).toInt())
+            background = GradientDrawable().apply { cornerRadius = dp(18f); setColor(0xCC111114.toInt()) }
+            addView(barreBas, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(barreCurseur, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        basConteneur = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 0, 0, dp(16f).toInt())
+            addView(panneau, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        // Boutons compacts du panneau (même style que [bouton], en plus petit).
+        fun petit(texte: String, action: () -> Unit) = bouton(texte, action).apply {
+            textSize = 14f
+            minWidth = dp(40f).toInt()
+            setPadding(dp(10f).toInt(), dp(6f).toInt(), dp(10f).toInt(), dp(6f).toInt())
+            background = GradientDrawable().apply { cornerRadius = dp(10f); setColor(0x00FFFFFF) }
+            setOnFocusChangeListener { v, f -> (v.background as? GradientDrawable)?.setColor(if (f) 0x66FFFFFF else 0x00FFFFFF) }
+        }
+        btnPrec = petit("◀") { chapitre?.precedent?.let { charger(it) } }
+        btnSuiv = petit("▶") { chapitre?.suivant?.let { charger(it) } }
         // Zoom − / + (indispensable à la télécommande, pratique aussi au doigt).
-        val zoomMoins = bouton("−") { zoomer(-0.25f) }
-        val zoomPlus = bouton("+") { zoomer(+0.25f) }
+        val zoomMoins = petit("−") { zoomer(-0.25f) }
+        val zoomPlus = petit("+") { zoomer(+0.25f) }
         btnZoomPlus = zoomPlus
+        radioBtn.text = "♪"
+        radioBtn.textSize = 14f
+        radioBtn.minWidth = dp(40f).toInt()
+        radioBtn.setPadding(dp(10f).toInt(), dp(6f).toInt(), dp(10f).toInt(), dp(6f).toInt())
+        radioBtn.background = GradientDrawable().apply { cornerRadius = dp(10f); setColor(0x00FFFFFF) }
+        radioBtn.setOnFocusChangeListener { v, f -> (v.background as? GradientDrawable)?.setColor(if (f) 0x66FFFFFF else 0x00FFFFFF) }
         // 2026-10-23 (user) : bouton « Auto » entre − et + : lecture qui descend toute seule, lentement ;
         //   re-cliquer, une flèche ▲▼, OK ou toucher l'écran l'arrête.
-        btnAuto = bouton("Auto") { if (autoCollant) arreterAuto() else lancerLectureAuto() }
+        btnAuto = petit("Auto") { if (autoCollant) arreterAuto() else lancerLectureAuto() }
         // 2026-10-24 (user : « rester appuyé sur OK sur défilement auto, on nous propose la vitesse ») :
         //   appui long (OK maintenu à la télécommande, doigt maintenu au téléphone) → choix de la vitesse.
         btnAuto.isLongClickable = true
         btnAuto.setOnLongClickListener { choisirVitesseAuto(); true }
-        val marge = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            marginStart = dp(6f).toInt(); marginEnd = dp(6f).toInt()
+        fun marge() = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            marginStart = dp(2f).toInt(); marginEnd = dp(2f).toInt()
         }
-        barreBas.addView(btnPrec, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        barreBas.addView(zoomMoins, marge)
-        barreBas.addView(btnAuto, LinearLayout.LayoutParams(marge))
-        barreBas.addView(zoomPlus, LinearLayout.LayoutParams(marge))
+        barreBas.addView(btnPrec, marge())
+        barreBas.addView(zoomMoins, marge())
+        barreBas.addView(btnAuto, marge())
+        barreBas.addView(zoomPlus, marge())
         // Radio dans la barre du bas : atteignable à la télécommande (◀▶ après OK).
-        barreBas.addView(radioBtn, LinearLayout.LayoutParams(marge))
-        barreBas.addView(btnSuiv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        racine.addView(barreBas, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+        barreBas.addView(radioBtn, marge())
+        barreBas.addView(btnSuiv, marge())
+        racine.addView(basConteneur, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
 
         setContentView(racine)
         installerGestes()
@@ -306,6 +390,13 @@ class ScanReaderActivity : AppCompatActivity() {
 
     private fun charger(id: String, reprendre: Boolean = false) {
         sauverPosition()
+        // Numéro du chapitre suivi depuis celui ouvert par la fiche (◀ / ▶ / « Chapitre suivant »).
+        chapitre?.let { ancien ->
+            when (id) {
+                ancien.suivant -> numeroCourant++
+                ancien.precedent -> numeroCourant = (numeroCourant - 1).coerceAtLeast(0)
+            }
+        }
         chargement.visibility = View.VISIBLE
         lifecycleScope.launch {
             val ch = runCatching { ScansProvider.chargerChapitre(id) }.getOrElse {
@@ -329,6 +420,8 @@ class ScanReaderActivity : AppCompatActivity() {
             val pos = if (reprendre) prefs().getInt("pos_${ch.id}", 0) else 0
             (liste.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(pos.coerceIn(0, ch.images.size - 1), 0)
             serieId?.let { prefs().edit().putString("dernier_$it", ch.id).apply() }
+            // Le chapitre ouvert entre tout de suite dans « Continuer à regarder ».
+            enregistrerReprise(ch, pos.coerceIn(0, ch.images.size - 1), fini = false)
             majPage()
             afficherBarres(true)
             liste.requestFocus()
@@ -342,6 +435,78 @@ class ScanReaderActivity : AppCompatActivity() {
     private fun sauverPosition() {
         val ch = chapitre ?: return
         prefs().edit().putInt("pos_${ch.id}", premiereVisible()).apply()
+        // Fin du chapitre = dernière page (ou le pied « Chapitre suivant ») visible.
+        val derniere = (liste.layoutManager as LinearLayoutManager).findLastVisibleItemPosition()
+        enregistrerReprise(ch, premiereVisible(), fini = ch.images.isNotEmpty() && derniere >= ch.images.size - 1)
+    }
+
+    /**
+     * 2026-10-24 (user : « les scans commencés qui apparaissent comme les séries ») — le chapitre
+     *   en cours va dans « Continuer à regarder », comme un épisode : position = page, durée = nombre
+     *   de pages (la barre de progression montre où on en est). Un seul chapitre en cours par série ;
+     *   un chapitre lu jusqu'au bout est marqué vu et sort de la liste. Le clic sur la vignette rouvre
+     *   la liseuse (via [redirigerSiScan]) à la page retenue.
+     */
+    private fun enregistrerReprise(ch: ScansProvider.Chapitre, page: Int, fini: Boolean) {
+        val sid = serieId ?: return
+        val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider ?: return
+        val ctx = applicationContext
+        val ref = episodeRef
+        val numero = numeroCourant
+        val titreSerie = serieTitre ?: ref?.tvShow?.title ?: ""
+        val total = ch.images.size.toLong()
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching {
+                val db = com.streamflixreborn.streamflix.database.AppDatabase.getInstance(ctx)
+                val tvDao = db.tvShowDao()
+                val epDao = db.episodeDao()
+                val serie = tvDao.getById(sid) ?: com.streamflixreborn.streamflix.models.TvShow(
+                    id = sid, title = titreSerie, poster = ref?.tvShow?.poster, banner = ref?.tvShow?.banner,
+                ).also { tvDao.insert(it) }
+                val ep = epDao.getById(ch.id) ?: com.streamflixreborn.streamflix.models.Episode(
+                    id = ch.id,
+                    number = numero,
+                    title = ch.titre,
+                    poster = ref?.poster ?: serie.poster,
+                    tvShow = serie,
+                    season = com.streamflixreborn.streamflix.models.Season(
+                        number = ref?.season?.number ?: 1,
+                        title = ref?.season?.title,
+                    ),
+                )
+                if (fini) {
+                    ep.isWatched = true
+                    ep.watchedDate = java.util.Calendar.getInstance()
+                    ep.watchHistory = null
+                } else {
+                    ep.isWatched = false
+                    ep.watchedDate = null
+                    ep.watchHistory = com.streamflixreborn.streamflix.models.WatchItem.WatchHistory(
+                        lastEngagementTimeUtcMillis = System.currentTimeMillis(),
+                        lastPlaybackPositionMillis = page.toLong(),
+                        durationMillis = total,
+                    )
+                }
+                epDao.save(ep)
+                val cache = com.streamflixreborn.streamflix.utils.UserDataCache
+                if (fini) cache.removeEpisodeFromContinueWatching(ctx, provider, ep.id)
+                else cache.syncEpisodeToCache(ctx, provider, ep)
+                // Un seul chapitre « en cours » par série : les autres quittent la liste.
+                if (!fini) {
+                    epDao.getEpisodesByTvShowId(sid)
+                        .filter { it.id != ch.id && it.watchHistory != null }
+                        .forEach { autre ->
+                            autre.watchHistory = null
+                            epDao.update(autre)
+                            cache.removeEpisodeFromContinueWatching(ctx, provider, autre.id)
+                        }
+                }
+                tvDao.save(serie.copy().apply {
+                    merge(serie)
+                    isWatching = !fini || epDao.hasAnyWatchHistoryForTvShow(sid)
+                })
+            }.onFailure { android.util.Log.w("ScanReader", "reprise non enregistrée : ${it.message}") }
+        }
     }
 
     private fun majPage() {
@@ -350,6 +515,15 @@ class ScanReaderActivity : AppCompatActivity() {
         val lm = liste.layoutManager as LinearLayoutManager
         val p = (lm.findLastVisibleItemPosition().takeIf { it >= 0 } ?: 0) + 1
         pageVue.text = "$p / $n"
+        if (!curseurTire) {
+            curseur.max = (n - 1).coerceAtLeast(1)
+            // Télécommande : ◀▶ avancent d'environ 1/25e du chapitre (au moins 1 page).
+            curseur.keyProgressIncrement = (n / 25).coerceAtLeast(1)
+            // Même numéro que le compteur du haut (dernière page visible).
+            curseur.progress = (p - 1).coerceIn(0, n - 1)
+            curseurPage.text = "$p"
+            curseurTotal.text = "$n"
+        }
     }
 
     override fun onPause() {
@@ -363,7 +537,7 @@ class ScanReaderActivity : AppCompatActivity() {
         barresVisibles = visible
         val v = if (visible) View.VISIBLE else View.GONE
         barreHaut.visibility = v
-        barreBas.visibility = v
+        basConteneur.visibility = v
     }
 
     private fun appliquerEchelle(px: Float, py: Float) {
@@ -508,11 +682,7 @@ class ScanReaderActivity : AppCompatActivity() {
         // autoCollant AVANT demarrerAuto : sinon demarrerAuto remet la vitesse « flèche maintenue » (0,6).
         autoCollant = true
         autoVitesse = 1f / secondesParEcran()
-        // Première utilisation : on signale l'appui long (sinon personne ne le trouve).
-        if (!prefs().getBoolean("auto_astuce_vue", false)) {
-            prefs().edit().putBoolean("auto_astuce_vue", true).apply()
-            Toast.makeText(this, "Astuce : appui long sur « Auto » pour régler la vitesse", Toast.LENGTH_LONG).show()
-        }
+        // 2026-10-24 (user) : plus de message « Astuce : appui long sur Auto » (c'est dans le guide).
         demarrerAuto(+1)
         btnAuto.text = "⏸ Stop"
         afficherBarres(false)
@@ -531,7 +701,28 @@ class ScanReaderActivity : AppCompatActivity() {
         }
         // Barres affichées et focus sur un bouton : on laisse ◀▶/OK naviguer entre les boutons.
         val focusBouton = currentFocus != null && currentFocus != liste &&
-            (currentFocus?.parent == barreBas || currentFocus?.parent == barreHaut)
+            (currentFocus?.parent == barreBas || currentFocus?.parent == barreHaut || currentFocus == curseur)
+        // Barre de progression à la télécommande (tout en bas) : ▼ depuis un bouton du bas → curseur ;
+        //   ▲ depuis le curseur → retour aux boutons ; ◀▶ sur le curseur = la SeekBar avance de quelques pages.
+        if (event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && currentFocus?.parent == barreBas) {
+            curseur.requestFocus(); return true
+        }
+        if (currentFocus == curseur) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> { btnZoomPlus.requestFocus(); return true }
+                KeyEvent.KEYCODE_DPAD_DOWN -> { liste.requestFocus(); afficherBarres(false); return true }
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    val pas = curseur.keyProgressIncrement * (if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) 1 else -1)
+                    val p = (curseur.progress + pas).coerceIn(0, curseur.max)
+                    curseur.progress = p
+                    (liste.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(p, 0)
+                    curseurPage.text = "${p + 1}"
+                    pageVue.text = "${p + 1} / ${adaptateur.pages.size}"
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { liste.requestFocus(); afficherBarres(false); return true }
+            }
+        }
         // 2026-10-20 (user : « sur la télé ça descend avec des gros à-coups ») : défilement fin.
         //   ▲▼ = un tiers d'écran par appui (on ne saute plus de bulles) ; flèche MAINTENUE =
         //   défilement continu, doux, qui s'arrête dès qu'on relâche (comme le doigt sur téléphone).

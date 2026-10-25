@@ -4128,6 +4128,15 @@ object MiniPlayerController {
         cancelServerScout()
         transitioningToFullscreen = true
         val p = player ?: return null.also { transitioningToFullscreen = false }
+        // 2026-10-24 (bug « Continuer à regarder » TV Hub : « ça cherche sans fin ») : le mini
+        //   existait mais n'avait encore rien chargé ; le grand le récupérait quand même, croyait
+        //   la lecture en cours et ne lançait jamais la vidéo. Rien de chargé = pas de transfert,
+        //   le grand lecteur crée le sien et lance la vidéo normalement.
+        if (p.currentMediaItem == null) {
+            transitioningToFullscreen = false
+            Log.d(TAG, "transferPlayer: mini vide (aucun média) → pas de transfert")
+            return null
+        }
         // Detach listener so mini player state changes don't fire
         try { p.removeListener(playerListener) } catch (_: Exception) {}
         player = null

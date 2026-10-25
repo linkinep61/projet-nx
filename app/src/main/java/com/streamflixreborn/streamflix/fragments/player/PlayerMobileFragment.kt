@@ -6830,7 +6830,11 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
             args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
-        if (isLiveIptvStream && !estFichierBibliotheque) {
+        // 2026-10-24 (bug « Continuer à regarder » TV Hub) : un épisode de replay (France TV,
+        //   BFM, Plex, Pluto, TF1+, M6+) n'est pas du direct → il reprend à sa position.
+        val estEpisodeReplay = Regex("^livehub::replay::(ftvep|bfmep|plexep|plutoep|tf1ep|m6ep)::")
+            .containsMatchIn(args.id)
+        if (isLiveIptvStream && !estFichierBibliotheque && !estEpisodeReplay) {
             player.seekToDefaultPosition()
         } else if (currentPosition == 0L) {
             val videoType = args.videoType
