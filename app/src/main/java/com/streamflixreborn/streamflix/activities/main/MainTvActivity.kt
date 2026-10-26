@@ -627,6 +627,16 @@ class MainTvActivity : FragmentActivity() {
             Log.d("MainTv", "RESELECT item=${menuItem.title} id=${menuItem.itemId} provider=${UserPreferences.currentProvider?.name}")
             when (menuItem.itemId) {
                 R.id.movies, R.id.tv_shows -> {
+                    // 2026-10-26 (user : « je fais un 2e clic sur Films, il n'y a pas le choix
+                    //   pour trier ») : ONYX Films → choix de la SOURCE (ONYX, communauté, OTF,
+                    //   Ciné Films…). La liste se recharge via ProviderChangeNotifier, comme
+                    //   après un choix de genre.
+                    if (com.streamflixreborn.streamflix.utils.OnyxFiltre.concerne()) {
+                        com.streamflixreborn.streamflix.utils.OnyxFiltre.show(
+                            this, lifecycleScope, series = menuItem.itemId == R.id.tv_shows,
+                        ) { com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged() }
+                        return@setOnItemReselectedListener true
+                    }
                     val nom = UserPreferences.currentProvider?.name
                     // ⚠ 2026-08-04 (user : « Wiflix, du coup tu ne l'as toujours pas mis
                     //   l'option ») — ce test ne portait QUE sur le filtre par genre. Wiflix

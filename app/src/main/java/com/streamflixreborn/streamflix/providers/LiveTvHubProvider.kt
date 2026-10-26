@@ -1222,7 +1222,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   « Film / série » descend dans Autres Replays (cf. nestedInAutresReplay +
             //   LiveHubFolderDialog). Aucune section ne porte ce préfixe : contenu au clic.
             FolderDef("vegetavod", "Ciné Films", Regex("^Ciné Films - .*$")),
-            FolderDef("ma_bibliotheque", "Film / série", Regex("^ONYX - .*$")),
+            FolderDef("ma_bibliotheque", "Clip / série", Regex("^ONYX - .*$")),  // 2026-10-26 : ex « Film / série »
             FolderDef("autres_replay", "Autres Replays", Regex("^Replay .*|^Généraliste$")),
         )
         // Sections gardées visibles directement (= pas dans un dossier) :
@@ -1333,7 +1333,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY, "vegetavod") +
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY) +
+            // 2026-10-26 (user) : « Ciné Films » quitte le TV Hub — son contenu est dans le
+            //   provider ONYX Films. Interrupteur : OnyxFilmsProvider.REMPLACE_TV_HUB.
+            (if (OnyxFilmsProvider.REMPLACE_TV_HUB) emptySet() else setOf("vegetavod")) +
             // ⚠ 2026-08-17 — CORRIGÉ (user « le dossier série/film n'est pas
             //   stable, regarde pourquoi il disparaît »).
             //   « Film / série » était VOLONTAIREMENT exclu d'ici, au motif
@@ -5228,7 +5231,14 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  rafraîchi par refresh_worldwide.yml) → catégories par group-title (pays).
      *  Réutilise le parser M3U générique de Mix FR (URLs de flux directes,
      *  jouées telles quelles par getVideo FAST). Cache RAM 30 min. */
+    /** 2026-10-26 (user : « on retire le dossier ») : WorldWide RETIRÉ du TV Hub. Mesuré : les
+     *  2 351 chaînes de la liste epg.pw passent toutes par stream1.freetv.fun (≈ 20 s de
+     *  redirection) vers des serveurs d'Asie qui débitent ~19 Ko/s pour un flux qui en demande
+     *  ~130 → saccadé quoi qu'on fasse. true = le remettre. */
+    const val WORLDWIDE_ACTIF = false
+
     suspend fun fetchWorldwideCategoriesPublic(): List<Category> {
+        if (!WORLDWIDE_ACTIF) return emptyList()
         val now = System.currentTimeMillis()
         if (worldwideCacheSections.isNotEmpty() && now - worldwideCacheTs < MIX_FR_TTL_MS) {
             return worldwideCacheSections

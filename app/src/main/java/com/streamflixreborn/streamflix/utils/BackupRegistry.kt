@@ -913,6 +913,12 @@ object BackupRegistry {
         //   Pour les anime VF+VOSTFR, `videoType.season.number` = la LANGUE (VOSTFR=1), PAS la vraie
         //   saison — celle-ci n'est QUE dans ce chemin. On l'extrait dans keyOf (« saison4 » → 4).
         episodeIdHint: String? = null,
+        // 2026-10-26 (user, ONYX Films : « le but c'est de ne pas faire participer les autres,
+        //   c'est vraiment tout ce qu'il y a sur le TV Hub ») : si non null, SEULES ces sources
+        //   (noms d'emit ou de provider) sont interrogées — sources nommées ET boucle générique.
+        seulement: Set<String>? = null,
+        // 2026-10-26 : sources interrogées EN DERNIER, en rattrapage (cf. emit()).
+        enDernier: Set<String> = emptySet(),
     ): Flow<List<Video.Server>> = channelFlow {
         val key = keyOf(videoType, titleHint, episodeIdHint)
 
@@ -1307,8 +1313,9 @@ object BackupRegistry {
             }
         }
 
-        suspend fun emit(source: String, fetch: suspend () -> List<Video.Server>) {
+        suspend fun emitInterne(source: String, fetch: suspend () -> List<Video.Server>) {
             if (source in exclude) return
+            if (seulement != null && source !in seulement) return
             // 2026-08-08 (user : « on peut pas se permettre de faire attendre des serveurs qui
             //   ont répondu en un quart de seconde, ils doivent arriver en premier, et pendant
             //   ce temps-là ça libère plein de choses ») — VAGUES DE LANCEMENT.
@@ -1468,6 +1475,24 @@ object BackupRegistry {
             // 2026-08-21 : le signalement automatique vers GitHub a été retiré ; en cas
             //   d'échec on se contente du journal (ligne « $source failed » ci-dessus).
             pushServers(source, servers)
+        }
+
+        // 2026-10-26 (user, ONYX Films : « je la mets vraiment en dernière source, qu'elle soit
+        //   checkée en dernier — c'est le petit truc de rattrapage au cas où ») : les sources de
+        //   [enDernier] attendent que TOUTES les autres aient fini de chercher avant de partir.
+        //   Les 3 s du départ laissent les autres démarrer (vagues, 2ᵉ vague CF à 0,8 s).
+        val autresEnCours = java.util.concurrent.atomic.AtomicInteger(0)
+        suspend fun emit(source: String, fetch: suspend () -> List<Video.Server>) {
+            if (source in enDernier) {
+                if (source in exclude || (seulement != null && source !in seulement)) return
+                kotlinx.coroutines.delay(3_000L)
+                while (autresEnCours.get() > 0) kotlinx.coroutines.delay(500L)
+                Log.i(TAG, "$source → rattrapage (dernière source, les autres ont fini)")
+                emitInterne(source, fetch)
+                return
+            }
+            autresEnCours.incrementAndGet()
+            try { emitInterne(source, fetch) } finally { autresEnCours.decrementAndGet() }
         }
 
         // ── Sources FEUILLES (pas de sous-backup → aucune récursion) ──────────────
@@ -2363,6 +2388,7 @@ object BackupRegistry {
                     // Contenu non asiatique → on saute les catalogues de dramas asiatiques.
                     !(skipDramaAsiatique && p.name in dramaAsiatiqueProviders) &&
                     p.name !in exclude && p.name !in dedicated &&
+                        (seulement == null || p.name in seulement) &&
                         // 2026-07-09 (user « remets aplouf dans les backups ») : aplouf RÉACTIVÉ
                         //   comme source de backup (recherche par titre via la boucle générique).
                         // 2026-07-09 (user "retire les serveurs Cloudstream des backups, qu'il soit

@@ -37,9 +37,12 @@ object EmbedWave {
             toucherCentre = true,
             // La page a une route « Télécharger » (/dl/…) : un clic ne doit jamais l'ouvrir.
             cheminsBloques = listOf("/dl/"),
-            // Relevé sur l'Oppo (Raw S1E1) : leur 1er serveur (itsnitrox) renvoie une erreur réseau
-            //   même dans leur propre page, qui passe alors au suivant → on attend le suivant.
-            hotesIgnores = listOf("itsnitrox"),
+            // 2026-10-26 (serveur rouge : l'app lisait un mp4 d'archive.org au lieu du film) :
+            //   vérifié au navigateur (Spider-Man : Un jour nouveau), leur 1er serveur (itsnitrox)
+            //   marche à nouveau, mais sa playlist n'a PAS d'extension .m3u8 : /nitro/<code> (master
+            //   anglais + hindi, morceaux fMP4 déguisés en .woff/.woff2). On le capte par ce chemin
+            //   au lieu de l'ignorer (il était en panne le 25/10).
+            motifsFlux = listOf("/nitro/"),
         ) ?: throw Exception("EmbedWave : aucun flux capté (épisode absent ou lecteur indisponible)")
         Log.i(TAG, "flux capté : ${r.url.substringBefore("/hls_mps/")}/hls_mps/…")
         return Video(

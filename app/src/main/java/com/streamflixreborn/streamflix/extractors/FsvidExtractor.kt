@@ -89,10 +89,15 @@ class FsvidExtractor : Extractor() {
      *   comme pour Vidzy. Gardée 30 min (même clé pour toute la séance). Sans elle : 403 au
      *   10ᵉ segment et la vidéo repart du début.
      */
-    private suspend fun lireCleSegments(link: String, refFs: String) {
-        val age = System.currentTimeMillis() - com.streamflixreborn.streamflix.utils.CleVidzy.cleFsvidDepuis
-        if (com.streamflixreborn.streamflix.utils.CleVidzy.cleFsvid != null && age < 30 * 60_000L) return
-        val gk = try {
+    /**
+     * 2026-10-26 (serveur rouge « FS · FSVid ») : la WebView tourne À CHAQUE extraction — elle ne
+     *   sert plus seulement la clé de segments, elle rend aussi l'adresse du flux que le VRAI
+     *   lecteur a demandée. L'adresse déchiffrée dans la page donnait désormais un master LEURRE
+     *   (une seule variante `index.m3u8` qui renvoie le même master → « Loaded playlist has
+     *   unexpected type »), y compris sous Cronet ; celle du lecteur est la bonne.
+     */
+    private suspend fun captureLecteur(link: String, refFs: String): com.streamflixreborn.streamflix.utils.WebViewStreamResolver.Resolved? {
+        val capte = try {
             com.streamflixreborn.streamflix.utils.WebViewStreamResolver.resolve(
                 entryUrl = link,
                 referer = refFs,
@@ -100,16 +105,40 @@ class FsvidExtractor : Extractor() {
                 clickPlay = true,
                 attach = true,
                 lireJsApresCapture = "(window.__vzgk||null)",
-            )?.valeurJs
+            )
         } catch (e: Throwable) {
-            Log.w("FsvidExtractor", "clé de segments : WebView KO (${e.message})"); null
+            Log.w("FsvidExtractor", "lecteur : WebView KO (${e.message})"); null
         }
+        val gk = capte?.valeurJs
         if (gk != null) {
             com.streamflixreborn.streamflix.utils.CleVidzy.memoriserFsvid(gk)
             Log.i("FsvidExtractor", "clé de segments FSVid (gk) récupérée (${gk.length} car.)")
         } else {
             Log.w("FsvidExtractor", "clé de segments FSVid absente → 403 probable après ~90 s")
         }
+        return capte
+    }
+
+    /** Flux du vrai lecteur s'il est exploitable, sinon l'adresse trouvée dans la page. */
+    private fun videoFinale(
+        capte: com.streamflixreborn.streamflix.utils.WebViewStreamResolver.Resolved?,
+        deLaPage: String, subtitles: List<Video.Subtitle>, refFs: String, origineFs: String,
+    ): Video {
+        val urlLecteur = capte?.url?.takeIf { it.startsWith("http") && it.contains(".m3u8") && !it.contains("/troll/") }
+        if (urlLecteur != null) {
+            Log.d("FsvidExtractor", "flux pris au lecteur (WebView), en-têtes ${capte.headers.keys}")
+            val entetes = LinkedHashMap<String, String>()
+            entetes["User-Agent"] = DEFAULT_USER_AGENT
+            entetes["Referer"] = refFs
+            entetes["Origin"] = origineFs
+            entetes.putAll(capte.headers)
+            return Video(source = urlLecteur, subtitles = subtitles, headers = entetes)
+        }
+        Log.d("FsvidExtractor", "flux du lecteur indisponible → adresse de la page")
+        return Video(
+            source = deLaPage, subtitles = subtitles,
+            headers = mapOf("User-Agent" to DEFAULT_USER_AGENT, "Referer" to refFs, "Origin" to origineFs),
+        )
     }
 
     override suspend fun extract(link: String): Video {
@@ -266,16 +295,8 @@ class FsvidExtractor : Extractor() {
             ?.let { dechiffrerNouveauFormat(it.groupValues[1], it.groupValues[2], link) }
         (nouveau ?: dechiffrerUrl())?.let { urlClaire ->
             Log.d("FsvidExtractor", "flux FSVid trouvé (${if (nouveau != null) "nouveau format" else "XOR 8 octets"})")
-            lireCleSegments(link, refFs)
-            return Video(
-                source = urlClaire,
-                subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(html + "\n" + js, link),
-                headers = mapOf(
-                    "User-Agent" to DEFAULT_USER_AGENT,
-                    "Referer" to refFs,
-                    "Origin" to origineFs,
-                ),
-            )
+            return videoFinale(captureLecteur(link, refFs), urlClaire,
+                com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(html + "\n" + js, link), refFs, origineFs)
         }
 
         val m3u8 = premierValide(
@@ -338,15 +359,7 @@ class FsvidExtractor : Extractor() {
                 throw Exception("Stream URL not found in unpacked JS")
             }
 
-        lireCleSegments(link, refFs)
-        return Video(
-            source = m3u8,
-            subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(html + "\n" + js, link),
-            headers = mapOf(
-                "User-Agent" to DEFAULT_USER_AGENT,
-                "Referer" to refFs,
-                "Origin" to origineFs,
-            )
-        )
+        return videoFinale(captureLecteur(link, refFs), m3u8,
+            com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(html + "\n" + js, link), refFs, origineFs)
     }
 }

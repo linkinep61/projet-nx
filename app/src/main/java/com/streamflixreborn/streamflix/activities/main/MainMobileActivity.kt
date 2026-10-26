@@ -319,21 +319,31 @@ class MainMobileActivity : FragmentActivity() {
                     val nom = UserPreferences.currentProvider?.name
                     val dispo =
                         com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(nom) ||
-                            com.streamflixreborn.streamflix.utils.YearFilter.estSupporte(nom)
-                    if (dispo) {
-                        // Le fragment courant porte déjà son sélecteur : on le lui délègue,
-                        //   il connaît son ViewModel et sait recharger sa propre liste.
-                        val hote = supportFragmentManager
-                            .findFragmentById(R.id.nav_main_fragment) as? NavHostFragment
-                        when (val f = hote?.childFragmentManager?.primaryNavigationFragment) {
-                            is com.streamflixreborn.streamflix.fragments.movies.MoviesMobileFragment ->
-                                f.ouvrirFiltres()
-                            is com.streamflixreborn.streamflix.fragments.tv_shows.TvShowsMobileFragment ->
-                                f.ouvrirFiltres()
-                            else -> {}
-                        }
-                    }
+                            com.streamflixreborn.streamflix.utils.YearFilter.estSupporte(nom) ||
+                            com.streamflixreborn.streamflix.utils.OnyxFiltre.concerne()
+                    if (dispo) ouvrirFiltresOnglet()
                 }
+            }
+        }
+
+        // 2026-10-26 (user : « quand on reste appuyé sur le dossier film ou le dossier série,
+        //   on puisse trier ») : APPUI LONG sur Films / Séries TV = choix de la source d'ONYX
+        //   Films. On navigue d'abord vers l'onglet (le sélecteur agit sur sa liste), puis on
+        //   ouvre le choix. Autres providers : l'appui long garde son comportement d'avant.
+        for (idOnglet in listOf(R.id.movies, R.id.tv_shows)) {
+            binding.bnvMain.findViewById<android.view.View>(idOnglet)?.setOnLongClickListener {
+                if (!com.streamflixreborn.streamflix.utils.OnyxFiltre.concerne()) return@setOnLongClickListener false
+                if (binding.bnvMain.selectedItemId != idOnglet) {
+                    binding.bnvMain.selectedItemId = idOnglet
+                    // Le fragment de l'onglet met un instant à s'installer : on réessaie
+                    //   jusqu'à ce qu'il soit là (au plus ~2 s).
+                    fun essayer(reste: Int) {
+                        if (ouvrirFiltresOnglet()) return
+                        if (reste > 0) binding.bnvMain.postDelayed({ essayer(reste - 1) }, 200L)
+                    }
+                    binding.bnvMain.postDelayed({ essayer(10) }, 200L)
+                } else ouvrirFiltresOnglet()
+                true
             }
         }
 
@@ -488,6 +498,21 @@ class MainMobileActivity : FragmentActivity() {
         dismissUpdateDialog()
         _binding = null
         super.onDestroy()
+    }
+
+    /** Ouvre le sélecteur du fragment Films / Séries affiché (genre, année, ou source ONYX Films). */
+    private fun ouvrirFiltresOnglet(): Boolean {
+        val hote = supportFragmentManager
+            .findFragmentById(R.id.nav_main_fragment) as? NavHostFragment
+        val f = hote?.childFragmentManager?.primaryNavigationFragment
+        val attendu = binding.bnvMain.selectedItemId
+        return when {
+            f is com.streamflixreborn.streamflix.fragments.movies.MoviesMobileFragment &&
+                attendu == R.id.movies && f.isResumed -> { f.ouvrirFiltres(); true }
+            f is com.streamflixreborn.streamflix.fragments.tv_shows.TvShowsMobileFragment &&
+                attendu == R.id.tv_shows && f.isResumed -> { f.ouvrirFiltres(); true }
+            else -> false
+        }
     }
 
     private fun clearResolverState() {

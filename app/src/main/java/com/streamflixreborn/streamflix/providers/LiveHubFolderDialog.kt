@@ -721,7 +721,8 @@ private fun normSearch(s: String): String =
                     }
                     // 2026-09-19 (user « au pire tu mets ça dans le TV Hub, tout en bas dans
                     //   Autres Replays ») : les films VF du catalogue OTF, en DERNIER sous-dossier.
-                    val otfFilmCats = if (folderKey == "autres_replay") {
+                    // 2026-10-26 (user) : « OTF Films (VF) » quitte le TV Hub (catégorie OTF d'ONYX Films).
+                    val otfFilmCats = if (folderKey == "autres_replay" && !OnyxFilmsProvider.REMPLACE_TV_HUB) {
                         try { LiveTvHubProvider.fetchOtfFilmsCategoriesPublic() }
                         catch (_: Throwable) { emptyList() }
                     } else emptyList()
@@ -1711,7 +1712,8 @@ private fun normSearch(s: String): String =
                     !it.name.startsWith("Multi Live", ignoreCase = true) } } })
             folders.add("📺 Live MIX" to { ouvrirParesseux("Live MIX") {
                 chargerMix().filter { it.name.equals("Live MIX", ignoreCase = true) } } })
-            folders.add("🌍 WorldWide" to { ouvrirParesseux("WorldWide") {
+            // 2026-10-26 (user) : WorldWide retiré (cf. LiveTvHubProvider.WORLDWIDE_ACTIF).
+            if (LiveTvHubProvider.WORLDWIDE_ACTIF) folders.add("🌍 WorldWide" to { ouvrirParesseux("WorldWide") {
                 LiveTvHubProvider.fetchWorldwideCategoriesPublic() } })
             folders.add("🎬 Rakuten TV" to { ouvrirParesseux("Rakuten TV") {
                 filterFastByFolder(LiveTvHubProvider.fetchFastCategoriesPublic(), "rakuten_tv") } })
@@ -1746,7 +1748,9 @@ private fun normSearch(s: String): String =
         //   (cf. l'interrupteur documente dans VoeCommunaute). Un seul booleen a
         //   basculer le jour ou une cle de contributeur entre dans VOE_KEYS.
         // 2026-09-05 : le partage passe sur VIDARA (VidaraCommunaute, index vidara_amis.json).
-        if (com.streamflixreborn.streamflix.utils.VidaraCommunaute.disponible)
+        // 2026-10-26 (user) : le Partage de la communauté quitte le TV Hub — il est dans ONYX
+        //   Films (rangée + filtre « Partage de la communauté »).
+        if (com.streamflixreborn.streamflix.utils.VidaraCommunaute.disponible && !OnyxFilmsProvider.REMPLACE_TV_HUB)
         folders.add("\uD83E\uDD1D Partage de la communaute" to {
             val dejaLa = com.streamflixreborn.streamflix.utils.VidaraCommunaute.categoriesSiDejaCharge()
             if (dejaLa.isNotEmpty()) {
@@ -1804,8 +1808,8 @@ private fun normSearch(s: String): String =
         //   premier niveau du TV Hub sous le nom « Ciné Films » (clé `vegetavod`), et c'est
         //   « Film / série » (bibliothèque Vidara) qui prend sa place ici.
         if (com.streamflixreborn.streamflix.utils.VidaraLibrary.disponible)
-        folders.add("\uD83D\uDCDA Film / série" to {
-            show(ctx, "ma_bibliotheque", "Film / série", onChannelSelected)
+        folders.add("\uD83D\uDCDA Clip / série" to {  // 2026-10-26 (user) : ex « Film / série », plus de films dedans
+            show(ctx, "ma_bibliotheque", "Clip / série", onChannelSelected)
         })
         // 2026-10-04 : plus de préchauffage VegetaVod / OlaVod à l'ouverture d'Autres Replays —
         //   la carte Ciné Films charge elle-même les deux index au clic s'ils ne sont pas prêts
@@ -1842,7 +1846,9 @@ private fun normSearch(s: String): String =
             }
         })
 
-        if (otfFilmCategories.isNotEmpty()) folders.add("🎬 OTF Films (VF)" to {
+        // 2026-10-26 (user) : « OTF Films (VF) » quitte le TV Hub (catégorie OTF d'ONYX Films).
+        if (OnyxFilmsProvider.REMPLACE_TV_HUB) { /* rien */ }
+        else if (otfFilmCategories.isNotEmpty()) folders.add("🎬 OTF Films (VF)" to {
             displayCategories(ctx, "OTF Films (VF)", otfFilmCategories, onChannelSelected) })
         else if (paresseux) folders.add("🎬 OTF Films (VF)" to { ouvrirParesseux("OTF Films (VF)") {
             LiveTvHubProvider.fetchOtfFilmsCategoriesPublic() } })

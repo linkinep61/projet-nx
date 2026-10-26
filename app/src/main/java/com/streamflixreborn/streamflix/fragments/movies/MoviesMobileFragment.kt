@@ -227,6 +227,13 @@ class MoviesMobileFragment : Fragment() {
      */
     fun ouvrirFiltres() {
         if (!isAdded) return
+        // 2026-10-26 : ONYX Films → choix de la source (Ma bibliothèque, OTF, communauté…).
+        if (com.streamflixreborn.streamflix.utils.OnyxFiltre.concerne()) {
+            com.streamflixreborn.streamflix.utils.OnyxFiltre.show(
+                requireContext(), viewLifecycleOwner.lifecycleScope, series = false,
+            ) { viewModel.getMovies() }
+            return
+        }
         showGenreFilterPicker()
     }
 

@@ -50,6 +50,10 @@ object VidaraLibrary {
         val dossier: String = "",
         /** Affiche eventuelle (l'index publie n'en fournit pas -> null, comble par TMDB). */
         val poster: String? = null,
+        /** 2026-10-26 : date de dépôt sur Vidara (« 2026-10-22 », vide si l'index ne la donne pas). */
+        val ajout: String = "",
+        /** Numéro interne Vidara, croissant : départage les dépôts d'un même jour. */
+        val vid: Long = 0L,
     ) {
         /** Nom sans extension : sert au rattachement (il garde l'identifiant TMDB). */
         val titre: String get() = nomBrut.substringBeforeLast('.', nomBrut).trim()
@@ -546,6 +550,9 @@ object VidaraLibrary {
                 val nom = o.optString("titre").ifBlank { o.optString("nom") }
                 if (nom.isBlank()) continue
                 val chemin = normaliseChemin(o.optString("dossier").trim())
+                // 2026-10-26 (user : « tout ce qui est en dehors de ces dossiers ne devrait
+                //   pas être là ») : un fichier sans dossier dans l'index n'est jamais affiché.
+                if (chemin.isBlank()) continue
                 val estClipDossier = java.text.Normalizer
                     .normalize(chemin, java.text.Normalizer.Form.NFD)
                     .replace(Regex("\\p{Mn}+"), "").lowercase()
@@ -557,6 +564,8 @@ object VidaraLibrary {
                     dureeSec = o.optInt("duree", 0),
                     estClip = estClipDossier,
                     dossier = chemin.ifBlank { "Sans dossier" },
+                    ajout = o.optString("ajout").trim(),
+                    vid = o.optLong("vid", 0L),
                 )
             }
             // Un échec (liste vide) ne doit JAMAIS écraser un cache garni.
@@ -602,6 +611,10 @@ object VidaraLibrary {
             val cheminEnfant = if (chemin.isBlank()) enfant else chemin + SEP + enfant
             sousDossiers[cheminEnfant] = (sousDossiers[cheminEnfant] ?: 0) + 1
         }
+        // 2026-10-26 (user : « dans le TV Hub, il devrait plus rester que mon dossier clip et
+        //   série TV ») : les films sont désormais dans le provider ONYX Films → le dossier
+        //   « Films » n'est plus proposé à la racine du TV Hub.
+        if (chemin.isBlank() && com.streamflixreborn.streamflix.providers.OnyxFilmsProvider.REMPLACE_TV_HUB) sousDossiers.keys.removeAll { it.trim().equals("Films", ignoreCase = true) }
         return sousDossiers.entries.sortedBy { it.key.lowercase() }.map { it.key to it.value } to
             fichiersIci.sortedBy { titrePour(it).lowercase() }
     }
@@ -731,7 +744,7 @@ object VidaraLibrary {
     }
 
     /** Cle de fiche : « 12345 » pour un film, « tv12345 » pour une serie (cf. RE_TV_TETE). */
-    private fun idTmdbDe(f: Fichier): String? =
+    fun idTmdbDe(f: Fichier): String? =
         RE_ID_TETE.find(f.titre)?.groupValues?.get(1)
             ?: RE_TV_TETE.find(f.titre)?.groupValues?.get(1)?.let { "tv$it" }
 

@@ -873,7 +873,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 kotlinx.coroutines.withTimeoutOrNull(6_000L) {
                     val allItems = categories.flatMap { it.list }
                     // Titres uniques à enrichir (hors featured déjà TMDB)
-                    val uniqueTitles = mutableMapOf<String, String>() // title → poster TMDB
+                    val uniqueTitles = mutableMapOf<String, Boolean>() // title → est un film
                     val seen = mutableSetOf<String>()
                     for (item in allItems) {
                         val title = when (item) {
@@ -883,22 +883,27 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                         } ?: continue
                         val key = title.lowercase().trim()
                         if (key.isNotBlank() && seen.add(key)) {
-                            uniqueTitles[title] = "" // placeholder
+                            uniqueTitles[title] = item is Movie
                         }
                     }
                     // Recherche TMDB en parallèle (sem=8, timeout par recherche 2s)
                     val sem = Semaphore(8)
-                    val results = uniqueTitles.keys.map { title ->
+                    val results = uniqueTitles.entries.map { (title, estFilm) ->
                         async(Dispatchers.IO) {
                             sem.withPermit {
                                 try {
                                     val resp = kotlinx.coroutines.withTimeoutOrNull(2_000L) {
                                         TMDb3.Search.multi(query = title, language = "fr-FR", page = 1)
                                     }
+                                    // 2026-10-26 (user : « des jaquettes de vrais films coréens ou
+                                    //   japonais à la place d'un dessin animé ») : le 1er résultat
+                                    //   était souvent l'adaptation en prises de vue réelles. On exige
+                                    //   le genre Animation (16) ET le bon type (film / série) ;
+                                    //   sinon on garde la jaquette d'AnimeSama.
                                     val best = resp?.results?.firstOrNull { r ->
                                         when (r) {
-                                            is TMDb3.Tv -> r.posterPath != null
-                                            is TMDb3.Movie -> r.posterPath != null
+                                            is TMDb3.Tv -> !estFilm && r.posterPath != null && 16 in r.genresIds
+                                            is TMDb3.Movie -> estFilm && r.posterPath != null && 16 in r.genresIds
                                             else -> false
                                         }
                                     }

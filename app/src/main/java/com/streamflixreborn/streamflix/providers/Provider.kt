@@ -131,6 +131,10 @@ interface Provider {
             NetMirrorProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // 2026-10-20 (user) : micro-séries verticales (minutedrama.com), mobile uniquement.
             MiniDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false, mobileOnly = true),
+            // 2026-10-26 (user) : catalogue maison « ONYX Films » (bibliothèque Vidara, partage de la
+            //   communauté, Ciné Films, films OTF). Placé EN BAS, juste avant TMDb (ajouté à
+            //   l'exécution par ProvidersViewModel) — user : « je l'aurais mis en bas à côté de TMDB ».
+            OnyxFilmsProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // ─── Anime (onglet Animés) — ordre interne inchangé ───
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),

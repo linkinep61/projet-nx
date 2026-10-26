@@ -351,6 +351,13 @@ class TvShowsMobileFragment : Fragment() {
      */
     fun ouvrirFiltres() {
         if (!isAdded) return
+        // 2026-10-26 : ONYX Films → choix de la source (Ciné Films, Plus de séries…).
+        if (com.streamflixreborn.streamflix.utils.OnyxFiltre.concerne()) {
+            com.streamflixreborn.streamflix.utils.OnyxFiltre.show(
+                requireContext(), viewLifecycleOwner.lifecycleScope, series = true,
+            ) { viewModel.getTvShows() }
+            return
+        }
         showGenreFilterPicker()
     }
 

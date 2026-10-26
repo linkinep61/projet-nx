@@ -5059,6 +5059,11 @@ class PlayerTvFragment : Fragment() {
                     || wvUrl.contains("luluvid") || wvUrl.contains("luluvdoo")
         }
 
+        /** Dropload : flux dropcdn lu par la WebView partagée de DroploadExtractor. */
+        private fun estDropcdnWebView(video: Video): Boolean =
+            video.source.contains("dropcdn.io") &&
+                com.streamflixreborn.streamflix.extractors.DroploadExtractor.sharedWebView != null
+
         private fun isNetuCfglobalcdn(video: Video): Boolean {
             return video.webViewUrl != null &&
                    com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView != null &&
@@ -5245,6 +5250,8 @@ class PlayerTvFragment : Fragment() {
                 && video.source.startsWith("data:")
                 && com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView != null)
                 || isNetuCfglobalcdn(video)
+                // 2026-10-26 (Dropload) : lien fabriqué pour le navigateur intégré → lu par lui.
+                || estDropcdnWebView(video)
             if (isLuluVdoCdn(video) || isNetuCfglobalcdn(video)) {
                 Log.d("PlayerNetwork", "WebView bypass: source is ${if (video.source.startsWith("data:")) "data URI" else "CDN URL"}, webViewDs=$needsWebViewDs, lulu=${isLuluVdoCdn(video)}, netu=${isNetuCfglobalcdn(video)}")
             }
@@ -5548,7 +5555,8 @@ class PlayerTvFragment : Fragment() {
             }
 
             if (needsWebViewDs) {
-                val wv = com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView
+                val wv = (if (estDropcdnWebView(video)) com.streamflixreborn.streamflix.extractors.DroploadExtractor.sharedWebView else null)
+                    ?: com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView
                     ?: com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView
                     ?: error("needsWebViewDs but no sharedWebView available")
                 val webViewDsFactory = DefaultDataSource.Factory(
@@ -9260,6 +9268,8 @@ class PlayerTvFragment : Fragment() {
             // 2026-10-25 : streamed.pk (dossier Sport) — `lb*.strmd.st` : 403 hors empreinte Chrome.
             return url.contains(".strmd.st", ignoreCase = true)
                 || url.contains("vidzy.", ignoreCase = true)
+                // 2026-10-26 : FSVid (s1.fsvid.lol) rend un master LEURRE hors empreinte Chrome.
+                || url.contains("fsvid.", ignoreCase = true)
                 || url.contains("cfglobalcdn.com", ignoreCase = true)
                 || url.contains("anime-sama.", ignoreCase = true)
                 || url.contains("uqload.is", ignoreCase = true)

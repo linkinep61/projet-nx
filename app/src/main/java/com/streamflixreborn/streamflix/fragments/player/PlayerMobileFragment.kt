@@ -5030,6 +5030,11 @@ class PlayerMobileFragment : Fragment() {
                 || wvUrl.contains("luluvid") || wvUrl.contains("luluvdoo")
     }
 
+    /** Dropload : flux dropcdn lu par la WebView partagée de DroploadExtractor. */
+    private fun estDropcdnWebView(video: Video): Boolean =
+        video.source.contains("dropcdn.io") &&
+            com.streamflixreborn.streamflix.extractors.DroploadExtractor.sharedWebView != null
+
     /** Netu cfglobalcdn — ISP blocks the IP, WebView bypasses it */
     private fun isNetuCfglobalcdn(video: Video): Boolean {
         return video.webViewUrl != null &&
@@ -5260,6 +5265,8 @@ class PlayerMobileFragment : Fragment() {
             && video.source.startsWith("data:")
             && com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView != null)
             || isNetuCfglobalcdn(video)
+            // 2026-10-26 (Dropload) : lien fabriqué pour le navigateur intégré → lu par lui.
+            || estDropcdnWebView(video)
         if (isLuluVdoCdn(video) || isNetuCfglobalcdn(video)) {
             Log.d("PlayerNetwork", "WebView bypass: source is ${if (video.source.startsWith("data:")) "data URI" else "CDN URL"}, webViewDs=$needsWebViewDs, lulu=${isLuluVdoCdn(video)}, netu=${isNetuCfglobalcdn(video)}")
         }
@@ -5508,7 +5515,8 @@ class PlayerMobileFragment : Fragment() {
 
         if (needsWebViewDs) {
             // Route .ts segment requests through WebView's network stack
-            val wv = com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView
+            val wv = (if (estDropcdnWebView(video)) com.streamflixreborn.streamflix.extractors.DroploadExtractor.sharedWebView else null)
+                ?: com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView
                 ?: com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView
                 ?: error("needsWebViewDs but no sharedWebView available")
             val webViewDsFactory = DefaultDataSource.Factory(
@@ -5519,7 +5527,7 @@ class PlayerMobileFragment : Fragment() {
                 .createMediaSource(mediaItem)
             player.setMediaSource(hlsSource)
             usingWebView = true
-            Log.d("PlayerNetwork", "WebView bypass: using WebViewDataSource for HLS playback (${if (isLuluVdoCdn(video)) "LuluVdo" else "Netu"})")
+            Log.d("PlayerNetwork", "WebView bypass: using WebViewDataSource for HLS playback (${if (estDropcdnWebView(video)) "Dropload" else if (isLuluVdoCdn(video)) "LuluVdo" else "Netu"})")
         } else {
             // Route HLS sources (live IPTV AND VOD .m3u8) through TeeDataSource so
             // LiveRecorder can capture played segments on demand. This lets the
@@ -7947,6 +7955,10 @@ class PlayerMobileFragment : Fragment() {
         // 2026-10-25 : streamed.pk (dossier Sport) — `lb*.strmd.st` : 403 hors empreinte Chrome.
         return url.contains(".strmd.st", ignoreCase = true) ||
             url.contains("vidzy.", ignoreCase = true)
+            // 2026-10-26 (serveur rouge « FS · FSVid ») : hors empreinte Chrome, s1.fsvid.lol
+            //   rend un LEURRE (master à une seule variante `index.m3u8` qui renvoie le même
+            //   master → « Loaded playlist has unexpected type »). La page passait déjà par Cronet.
+            || url.contains("fsvid.", ignoreCase = true)
             // 2026-07-30 : vmwesa.online retiré de Cronet (cert rejeté par vieux CA store,
             //   Cronet impose son magasin de CA) → routé needsDoH (OkHttp trust-all).
             // (vmwesa.online géré via needsDoH)

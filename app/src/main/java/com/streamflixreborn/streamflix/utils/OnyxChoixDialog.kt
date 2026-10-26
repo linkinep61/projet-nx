@@ -48,6 +48,8 @@ object OnyxChoixDialog {
         val libelle: String,
         val selectionne: Boolean = false,
         val separateurApres: Boolean = false,
+        /** Petit intitulé affiché AU-DESSUS de la ligne (« SOURCE », « TRIER PAR »…). */
+        val section: String? = null,
     )
 
     private fun Context.dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -139,7 +141,16 @@ object OnyxChoixDialog {
             setPadding(0, ctx.dp(12), 0, 0)
         }
         var aFocaliser: View? = null
+        var focusSurSelection = false
         options.forEachIndexed { index, option ->
+            if (!option.section.isNullOrBlank()) liste.addView(TextView(ctx).apply {
+                text = option.section.uppercase()
+                textSize = 11f
+                letterSpacing = 0.14f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setTextColor(TEXTE_FAIBLE)
+                setPadding(ctx.dp(4), ctx.dp(2), 0, ctx.dp(6))
+            })
             val ligne = TextView(ctx).apply {
                 text = if (option.selectionne) "✓  ${option.libelle}" else option.libelle
                 textSize = 16f
@@ -165,18 +176,29 @@ object OnyxChoixDialog {
                     ViewGroup.LayoutParams.MATCH_PARENT, ctx.dp(1)
                 ).apply { bottomMargin = ctx.dp(10) })
             }
-            if (aFocaliser == null || option.selectionne) aFocaliser = ligne
+            // Focus sur la PREMIÈRE ligne cochée (une feuille peut en cocher une par partie).
+            if (aFocaliser == null || (option.selectionne && !focusSurSelection)) {
+                aFocaliser = ligne
+                if (option.selectionne) focusSurSelection = true
+            }
         }
 
+        // 2026-10-26 (user : « sur mobile, le menu est tout écrasé ») : 62 % × 80 % convient à
+        //   un écran en largeur (TV), pas à un téléphone tenu droit — fenêtre étroite, titre sur
+        //   deux lignes, grand vide sous la liste. En portrait : presque toute la largeur et une
+        //   hauteur ajustée au contenu (la liste défile si elle dépasse l'écran).
+        val dm = ctx.resources.displayMetrics
+        val portrait = dm.heightPixels > dm.widthPixels
         racine.addView(ScrollView(ctx).apply {
             isFillViewport = true
             addView(liste)
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        }, if (portrait) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+           else LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         dialog.setContentView(racine)
         dialog.window?.setLayout(
-            (ctx.resources.displayMetrics.widthPixels * 0.62f).toInt(),
-            (ctx.resources.displayMetrics.heightPixels * 0.80f).toInt()
+            (dm.widthPixels * (if (portrait) 0.92f else 0.62f)).toInt(),
+            if (portrait) ViewGroup.LayoutParams.WRAP_CONTENT else (dm.heightPixels * 0.80f).toInt()
         )
         dialog.show()
         // Focus sur l'élément sélectionné : à la télécommande, on repart d'où on en est.

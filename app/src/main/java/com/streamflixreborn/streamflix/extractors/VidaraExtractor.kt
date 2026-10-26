@@ -82,6 +82,10 @@ class VidaraExtractor : Extractor() {
         "https://vidar.cc",
         // 2026-10-22 : front vers lequel vidara.to/e/<id> redirige (vérifié dans Chrome).
         "https://gaqghe.com",
+        // 2026-10-26 (logcat Oppo, FrenchStream « RedirectProxy » VFQ et VOSTFR) : « HOTE NON
+        //   COUVERT: ykfrtza.com ». Vérifié dans Chrome : jwplayer `abouttext:"Vidara"`, même
+        //   POST /api/stream avec filecode — c'est un nouveau front Vidara.
+        "https://ykfrtza.com",
     )
 
     /**

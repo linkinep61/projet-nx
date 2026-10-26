@@ -1558,11 +1558,32 @@ class PlayerViewModel(
             //   un backup lent (émission dès qu'un lot arrive). tmdbId si l'id est numérique
             //   (backups par id : Movix/Cloudstream/Nakios/Webflix/Embed), sinon backups par
             //   TITRE seuls (matching STRICT). exclude = le provider courant (pas de doublon).
+            // 2026-10-26 (user : « les séries de ce provider… une fois qu'on a connecté un compte
+            //   TF1+, M6+… qu'ils apparaissent aussi en serveur backup ») : ONYX Films passe par le
+            //   registre (replays TV Hub compris), limité aux sources du TV Hub (cf. `seulement`).
+            //   Ses films à clé TMDB (« onyx::f::t<id> ») transmettent l'identifiant.
+            val estOnyxFilms = provider === com.streamflixreborn.streamflix.providers.OnyxFilmsProvider
             val tmdbForBackup = id.takeIf { it.isNotBlank() && it.all { c -> c.isDigit() } }
+                ?: id.removePrefix("onyx::f::t").takeIf { estOnyxFilms && id.startsWith("onyx::f::t") && it.isNotEmpty() && it.all { c -> c.isDigit() } }
             val backupFlow = com.streamflixreborn.streamflix.utils.BackupRegistry.fetchAll(
                 tmdbId = tmdbForBackup,
                 videoType = videoType,
                 exclude = setOf(providerName),
+                // 2026-10-26 (user : « le but c'est de ne pas faire participer les autres, c'est
+                //   vraiment tout ce qu'il y a sur le TV Hub ; on ne devrait pas voir Movix,
+                //   Cloudstream ») : ONYX Films ne reçoit QUE les secours issus du TV Hub —
+                //   replays (TF1+/M6+ si connecté, France TV, Arte), Pluto, Plex. Pour un ÉPISODE,
+                //   s'y ajoutent ses propres sources (bibliothèque, partage, Ciné Films, Cinélux,
+                //   OTF) : l'épisode n'a que sa source d'origine en serveur natif. Pour un FILM,
+                //   elles y sont déjà → pas redemandées.
+                // 2026-10-26 (user : « j'hésite à mettre une seule source externe… elle est
+                //   plutôt complète ») : Cloudstream, SEULE source externe admise en secours.
+                seulement = if (!estOnyxFilms) null
+                    // « Mon IPTV ce n'est pas dérangeant » (user) : gardé aussi.
+                    else if (videoType is Video.Type.Movie) setOf("TV Hub", "Pluto", "Plex", "Mon IPTV", "Cloudstream")
+                    else setOf("TV Hub", "Pluto", "Plex", "Mon IPTV", "Cloudstream", "ONYX", "Partage", "Ciné Films", "Cinélux", "OTF TV"),
+                // « Qu'elle soit checkée en dernier, le petit truc de rattrapage au cas où » (user).
+                enDernier = if (estOnyxFilms) setOf("Cloudstream") else emptySet(),
                 titleHint = com.streamflixreborn.streamflix.utils.BackupRegistry.titleFromId(id),
                 isAnimeProvider = isAnimeProvider,
                 episodeIdHint = id,
@@ -2631,7 +2652,12 @@ class PlayerViewModel(
                             subLanguageId = lang,
                         )
                     }
-                    perLang[lang] = res.sortedByDescending { it.subDownloadsCnt }
+                    // 2026-10-26 (user : « ce message, je veux plus le voir quoi qu'il arrive ») :
+                    //   traductions automatiques (ai.OpenSubtitles) retirées de la liste aussi.
+                    perLang[lang] = res.filter {
+                        it.subAutoTranslation != "1" &&
+                            !com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre.traductionMachine(it.subFileName + " " + it.subTranslator.orEmpty())
+                    }.sortedByDescending { it.subDownloadsCnt }
                 }
                 // Concatène langue par langue (tri downloads DESC dans chaque groupe).
                 val subtitles = perLang.values.flatten()
@@ -2723,6 +2749,10 @@ class PlayerViewModel(
         _subtitleState.emit(SubtitleState.DownloadingOpenSubtitle)
         try {
             val uri = OpenSubtitles.download(subtitle)
+            // Traduction automatique repérée dans le fichier lui-même → refusé, on passe au suivant.
+            if (runCatching { java.io.File(uri.path!!).readText(Charsets.UTF_8) }.getOrNull()
+                    ?.let { com.streamflixreborn.streamflix.utils.OpenSubtitlesLibre.traductionMachine(it) } == true)
+                throw IllegalStateException("traduction automatique (ai.OpenSubtitles) écartée")
             Log.d("PlayerViewModel", "Download OpenSubtitles completato: $uri")
             _subtitleState.emit(SubtitleState.SuccessDownloadingOpenSubtitle(subtitle, uri))
         } catch (e: Exception) {

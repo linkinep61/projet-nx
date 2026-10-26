@@ -345,6 +345,7 @@ abstract class Extractor {
             ShareCloudyExtractor(),
             StreamrubyExtractor(),
             VidaraExtractor(),
+            EmbedoriginExtractor(),
             VidsonicExtractor(),
             HxfileExtractor(),
             ZillaExtractor(),

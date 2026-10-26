@@ -1678,6 +1678,11 @@ object MiniPlayerController {
         //   serveur qui ne répond pas — et celui-là est ensuite relégué (HotesEnEchec).
         val uriAtArm = try { player?.currentMediaItem?.localConfiguration?.uri?.toString() } catch (_: Throwable) { null }
         val effectiveWatchdogMs = when {
+            // 2026-10-26 (user : « je viens d'avoir une image, il y a une réparation à faire ») :
+            //   les chaînes WorldWide passent par stream1.freetv.fun, derrière Cloudflare, dont
+            //   l'origine saturée répond en 20-40 s (ou 522 au bout de 19 s). Coupées à 15 s,
+            //   elles démarraient juste après l'abandon. On leur laisse 45 s.
+            HOTES_LENTS.any { uriAtArm?.contains(it) == true } -> 45_000L
             availableServers.size <= 1 -> 15_000L
             estFichierVod(uriAtArm) -> 15_000L
             // 2026-10-25 (tri du dossier Sport) : relais damitv (morceaux de 2-3 Mo déguisés en
@@ -2338,6 +2343,10 @@ object MiniPlayerController {
 
     /** Hôtes qui n'acceptent que l'empreinte TLS de Chrome → lus par Cronet (cf. exigeCronet). */
     internal val HOTES_EMPREINTE_CHROME = listOf("strmd.st")
+
+    /** 2026-10-26 : hôtes lents à démarrer (origine saturée derrière Cloudflare) → chien de
+     *  garde de démarrage porté à 45 s (cf. effectiveWatchdogMs). */
+    internal val HOTES_LENTS = listOf("freetv.fun")
 
     /**
      * 2026-08-11 — Hôtes qui refusent la pile HTTP d'Android (`HttpURLConnection`).

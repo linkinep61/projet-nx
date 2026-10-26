@@ -214,6 +214,14 @@ private fun ImageView.copieSure(d: Drawable?): Drawable? = runCatching {
     android.graphics.drawable.BitmapDrawable(resources, copie)
 }.getOrNull()
 
+/** 2026-10-26 (user : « sur Anime-Sama, plein de jaquettes ne correspondent pas au contenu ») :
+ *  dernier chargement demandé pour chaque vue. Une grille RÉUTILISE ses vues : une relance
+ *  différée (3/8/20 s), le 2ᵉ essai en direct ou la réparation TMDB d'un ANCIEN titre
+ *  arrivaient après que la vue avait été rebindée sur un autre → mauvaise jaquette.
+ *  Chaque suite asynchrone vérifie donc qu'elle concerne toujours le chargement en cours.
+ *  (Thread principal uniquement : bind, callbacks Glide et post{}.) */
+private val chargementCourant = java.util.WeakHashMap<ImageView, Any>()
+
 private fun ImageView.loadRecoverableArtwork(
     initialUrl: String?,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable>,
@@ -221,6 +229,9 @@ private fun ImageView.loadRecoverableArtwork(
     memoryOptions: RequestOptions? = null,
     targetWidthPx: Int = 400,
 ) {
+    val jeton = Any()
+    chargementCourant[this] = jeton
+    fun toujoursActuel() = chargementCourant[this] === jeton
     var hasRequestedRepairForBlankUrl = false
     var retryCount = 0
     // 2026-05-21 : une fois basculé sur l'URL DIRECTE (sans proxy weserv), on ne
@@ -239,11 +250,13 @@ private fun ImageView.loadRecoverableArtwork(
         //   attachée (il attend le layout). On ne garde le check que pour les retries
         //   asynchrones (où la vue a pu être recyclée entre-temps).
         if (isRetry && !isAttachedToWindow) return
+        // Vue rebindée sur un autre titre depuis : cette suite ne la concerne plus.
+        if (!toujoursActuel()) return
 
         if (requestedUrl.isNullOrBlank() && !hasRequestedRepairForBlankUrl) {
             hasRequestedRepairForBlankUrl = true
             onRepair("") { refreshedUrl ->
-                if (!isAttachedToWindow || refreshedUrl.isBlank()) return@onRepair
+                if (!isAttachedToWindow || refreshedUrl.isBlank() || !toujoursActuel()) return@onRepair
                 submit(refreshedUrl)
             }
         }
@@ -307,7 +320,7 @@ private fun ImageView.loadRecoverableArtwork(
                     // 1) Tenter une réparation (nouvelle URL TMDB)
                     if (ArtworkRepairCoordinator.shouldRepair(requestedUrl, e)) {
                         onRepair(requestedUrl.orEmpty()) { refreshedUrl ->
-                            if (!isAttachedToWindow) return@onRepair
+                            if (!isAttachedToWindow || !toujoursActuel()) return@onRepair
                             if (refreshedUrl.isNotBlank() && refreshedUrl != requestedUrl) {
                                 retryCount = 0 // nouvelle URL → reset compteur
                                 triedDirect = false // nouvelle URL → on pourra re-tenter direct

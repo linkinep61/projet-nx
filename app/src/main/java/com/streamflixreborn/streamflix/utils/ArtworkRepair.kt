@@ -59,6 +59,7 @@ object ArtworkRepair {
                     currentMovie = fetchedMovie,
                     fallbackTitle = movie.title,
                     providerLanguage = provider.language,
+                    animeSeulement = estAnime(provider),
                 )
             }
             withContext(Dispatchers.IO) {
@@ -96,6 +97,7 @@ object ArtworkRepair {
                     currentTvShow = fetchedTvShow,
                     fallbackTitle = tvShow.title,
                     providerLanguage = provider.language,
+                    animeSeulement = estAnime(provider),
                 )
             }
             withContext(Dispatchers.IO) {
@@ -161,6 +163,13 @@ object ArtworkRepair {
         // No initialization needed for archived providers
     }
 
+    /** 2026-10-26 (user : « des jaquettes de vrais films coréens ou japonais à la place d'un
+     *  dessin animé » sur Anime-Sama) : pour ce provider, une jaquette TMDB n'est acceptée que
+     *  si la fiche est classée Animation — sinon c'est souvent l'adaptation en prises de vue
+     *  réelles. */
+    private fun estAnime(provider: Provider): Boolean =
+        provider === com.streamflixreborn.streamflix.providers.AnimeSamaProvider
+
     private fun hasUsableArtwork(poster: String?, banner: String?): Boolean {
         return isRemoteArtworkUrl(poster) && (banner.isNullOrBlank() || isRemoteArtworkUrl(banner))
     }
@@ -169,6 +178,7 @@ object ArtworkRepair {
         currentMovie: Movie,
         fallbackTitle: String?,
         providerLanguage: String?,
+        animeSeulement: Boolean = false,
     ) {
         if (hasUsableArtwork(currentMovie.poster, currentMovie.banner)) return
 
@@ -176,6 +186,7 @@ object ArtworkRepair {
         if (lookupTitle.isBlank()) return
 
         val tmdbMovie = TmdbUtils.getMovie(lookupTitle, language = providerLanguage) ?: return
+        if (animeSeulement && tmdbMovie.genres.none { it.id == "16" }) return
         if (!isRemoteArtworkUrl(currentMovie.poster) && isRemoteArtworkUrl(tmdbMovie.poster)) {
             currentMovie.poster = tmdbMovie.poster
         }
@@ -191,6 +202,7 @@ object ArtworkRepair {
         currentTvShow: TvShow,
         fallbackTitle: String?,
         providerLanguage: String?,
+        animeSeulement: Boolean = false,
     ) {
         if (hasUsableArtwork(currentTvShow.poster, currentTvShow.banner)) return
 
@@ -198,6 +210,7 @@ object ArtworkRepair {
         if (lookupTitle.isBlank()) return
 
         val tmdbTvShow = TmdbUtils.getTvShow(lookupTitle, language = providerLanguage) ?: return
+        if (animeSeulement && tmdbTvShow.genres.none { it.id == "16" }) return
         if (!isRemoteArtworkUrl(currentTvShow.poster) && isRemoteArtworkUrl(tmdbTvShow.poster)) {
             currentTvShow.poster = tmdbTvShow.poster
         }

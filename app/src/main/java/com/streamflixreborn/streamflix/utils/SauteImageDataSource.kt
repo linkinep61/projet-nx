@@ -56,8 +56,13 @@ class SauteImageDataSource(private val amont: DataSource) : DataSource {
             return amont.open(dataSpec)
         }
         decodes[cle]?.let { ts -> return servir(ts, 0, dataSpec.length) }
-        val longueur = amont.open(dataSpec)
+        // 2026-10-26 (FSVid, Oppo : « Unexpected IllegalStateException » dans DefaultDataSource.open
+        //   juste après un 403 sur seg-20) : si amont.open() LÈVE (403…), ExoPlayer appelle quand
+        //   même close() — mais amontOuvert restait false → l'amont n'était jamais fermé, et au
+        //   nouvel essai DefaultDataSource refusait de se rouvrir (checkState) → lecture arrêtée.
+        //   Contrat DataSource : close() doit libérer l'amont MÊME si open() a échoué.
         amontOuvert = true
+        val longueur = amont.open(dataSpec)
         val debut = ByteArray(8)
         val lus = lireAuMoins(debut, 0, 8)
         if (!estImage(debut, lus)) { garder(debut, 0, lus); return longueur }

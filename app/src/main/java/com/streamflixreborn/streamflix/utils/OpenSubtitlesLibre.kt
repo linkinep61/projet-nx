@@ -52,6 +52,27 @@ object OpenSubtitlesLibre {
         return MOT_COMMENTAIRE.containsMatchIn(debut)
     }
 
+    /**
+     * 2026-10-26 (user : « ce message, je veux plus le voir quoi qu'il arrive ») — fichiers
+     * TRADUITS PAR MACHINE (« ai.OpenSubtitles.com ») : français approximatif, réplique hors
+     * contexte (« Vérification de l'étalonnage. » sur Spider-Man) et pub en tête (« Do you want
+     * subtitles for any video? », « Abonnés par … »). Écartés : un vrai sous-titre, ou rien.
+     */
+    private val MARQUE_MACHINE = Regex("""(?i)(ai\.opensubtitles|machine[ -]?translat|traduction automatique)""")
+    fun traductionMachine(texte: String): Boolean = MARQUE_MACHINE.containsMatchIn(texte.take(4000))
+    private fun annonceeMachine(c: org.json.JSONObject): Boolean =
+        c.optString("SubAutoTranslation") == "1" || c.optString("SubMachineTranslated") == "1" ||
+            MARQUE_MACHINE.containsMatchIn(c.optString("SubFileName") + " " + c.optString("SubTranslator"))
+
+    /** Pub glissée par OpenSubtitles dans les fichiers (« Support us and become VIP… ») : la
+     *  réplique entière est retirée, le reste du fichier est gardé tel quel. */
+    private val PUB = Regex("""(?i)(opensubtitles|osdb\.link|do you want subtitles for any video|advertise your product|become vip member)""")
+    fun sansPub(texte: String): String {
+        if (!PUB.containsMatchIn(texte)) return texte
+        val blocs = texte.replace("\r\n", "\n").split(Regex("\n{2,}"))
+        return blocs.filterNot { b -> b.contains("-->") && PUB.containsMatchIn(b) }.joinToString("\n\n")
+    }
+
     /** Liens déjà reconnus comme pistes de commentaires (écartés des listes pour la session). */
     val rejetes: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet())
 
@@ -85,8 +106,8 @@ object OpenSubtitlesLibre {
                 .onFailure { Log.w(TAG, "secours, téléchargement : ${it.message}") }.getOrNull() ?: continue
             val brut = runCatching { File(uri.path!!).readText() }.getOrNull() ?: continue
             val ass = ConversionAss.versVtt(brut)
-            val texte = ass ?: brut
-            if (!texte.contains("-->") || texteCommentaires(texte)) continue
+            val texte = sansPub(ass ?: brut)
+            if (!texte.contains("-->") || texteCommentaires(texte) || traductionMachine(brut)) continue
             val f = File(dossier, "$cle.${if (ass != null) "vtt" else "srt"}")
             f.writeText(texte)
             surLangue?.invoke(when (langue) { "fre" -> "fr"; "eng" -> "en"; else -> langue })
@@ -122,6 +143,14 @@ object OpenSubtitlesLibre {
         TraductionSousTitres.menage(dossier)
         val cle = "$langue-${chemin.replace('/', '_')}"
         dossier.listFiles()?.firstOrNull { it.name.startsWith("$cle.") && it.length() > 50 }?.let {
+            // Fichier gardé AVANT le filtre des traductions automatiques → supprimé (avec ses
+            //   copies recalées), et on cherche un vrai sous-titre.
+            if (runCatching { traductionMachine(it.readText()) }.getOrDefault(false)) {
+                it.delete()
+                File(dossier.parentFile, "st_recales").listFiles()?.filter { r -> r.name.startsWith(cle) }?.forEach { r -> r.delete() }
+                Log.i(TAG, "écarté du cache (traduction automatique) : ${it.name}")
+                return@let
+            }
             // « all » : la langue est inscrite dans le nom (cle.<iso>.ext).
             if (langue == "all") surLangue?.invoke(it.name.removePrefix("$cle.").substringBefore('.'))
             return@withContext it
@@ -138,6 +167,7 @@ object OpenSubtitlesLibre {
         val candidats = (0 until liste.length()).map { liste.getJSONObject(it) }
             .filter { it.optString("SubSumCD", "1") == "1" && it.optString("SubFormat").lowercase() in setOf("srt", "vtt", "ssa", "ass") }
             .filter { !nomCommentaires(it.optString("SubFileName") + " " + it.optString("MovieReleaseName")) && it.optString("SubDownloadLink") !in rejetes }
+            .filter { !annonceeMachine(it) }
             .filter { filtreIso == null || filtreIso(it.optString("ISO639").lowercase()) }
             .let { liste0 ->
                 // 2026-10-22 : comme le lecteur Vidsrc — si on connaît le nom du fichier vidéo, le
@@ -171,8 +201,13 @@ object OpenSubtitlesLibre {
             // 2026-10-22 (AnimeSama) : les animes sont souvent en .ass (pas de « --> ») — ils étaient
             //   écartés ici, d'où « pas de français » alors qu'un fichier existait. Convertis en VTT.
             val ass = ConversionAss.versVtt(brut)
-            val texte = ass ?: brut
+            val texte = sansPub(ass ?: brut)
             if (!texte.contains("-->")) { Log.w(TAG, "aucune réplique lisible : ${c.optString("SubFileName")} (${brut.take(60).replace('\n', ' ')})"); continue }
+            if (traductionMachine(brut)) {
+                rejetes.add(lien)
+                Log.i(TAG, "écarté (traduction automatique) : ${c.optString("SubFileName")}")
+                continue
+            }
             if (texteCommentaires(texte)) {
                 rejetes.add(lien)
                 Log.i(TAG, "écarté (piste de commentaires) : ${c.optString("SubFileName")}")
