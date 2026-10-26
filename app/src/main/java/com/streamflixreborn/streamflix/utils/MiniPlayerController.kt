@@ -2027,6 +2027,9 @@ object MiniPlayerController {
                     val uri = withContext(Dispatchers.Main) {
                         player?.currentMediaItem?.localConfiguration?.uri
                     } ?: continue
+                    // 2026-10-28 (analyse GLM C2) : jamais de HEAD sans Referer / avec un autre UA sur
+                    //   un lien WiTV à jeton — WiTV bascule alors sur son écran leurre.
+                    if (uri.host?.endsWith("witv.eu") == true) continue
                     val request = okhttp3.Request.Builder()
                         .url(uri.toString())
                         .head()
@@ -2357,6 +2360,10 @@ object MiniPlayerController {
      */
     private val HOTES_REFUSANT_PILE_ANDROID = listOf(
         "rtp.pt",
+        // 2026-10-28 (user : DAZN « pointe vers WiTV », analyse GLM C1) : le jeton `tk` de WiTV est
+        //   lié au client qui l'a obtenu (OkHttp, ChaineDirect.fluxDirect) ; lu par la pile Android,
+        //   WiTV sert son écran leurre dès la première image.
+        "witv.eu",
         // 2026-09-16 (user « la chaîne Fun Radio n'est pas lue ») : CDN Dailymotion.
         //   Le jeton `sec=` du manifeste est signé sur la route IP/DNS de l'appel
         //   JSON d'extraction, qui passe par OkHttp + DoH. `DefaultHttpDataSource`
@@ -3734,7 +3741,12 @@ object MiniPlayerController {
                         if (autres.isNotEmpty()) setDefaultRequestProperties(autres)
                     }
                     Log.d(TAG, "OkHttpDataSource sur NetworkClient.default (hôte $hoteFlux refuse la pile Android) ua=$ua")
-                    fabriqueOkHttp
+                    // 2026-10-27 (user : « tu as peut-être fait le grand lecteur et pas le mini ») : c'était
+                    //   ça — ce chemin OkHttp n'avait PAS le réparateur de flux. Les chaînes Xtream à jeton
+                    //   (89.248.162.217/play/mpegts/…, hôte « appris » par RoutesLecture) passaient ici
+                    //   et coupaient toutes les 10 s. Le wrapper laisse tout le reste passer tel quel.
+                    if (isLiveChannel) com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(fabriqueOkHttp)
+                    else fabriqueOkHttp
                 } else {
                     httpDataSourceFactory
                 }
@@ -4026,7 +4038,9 @@ object MiniPlayerController {
             // Le CDN stm.linkip.org ne supporte pas 2 connexions simultanées avec offset
             // → le backup cause un Source error → servers exhausted → retry loop infini.
             val isOtfChannel = channelId.startsWith("livehub::otf::")
-            if (isLiveChannel && (isHls || isDash) && !isOtfChannel) {
+            // 2026-10-28 (analyse GLM C3) : pas de 2e session sur le même jeton WiTV.
+            val isWitv = video.source.contains("/player/source2/")
+            if (isLiveChannel && (isHls || isDash) && !isOtfChannel && !isWitv) {
                 // 2026-06-16 (user "mini lecteur a toujours des micro coupures
                 //   mais c'est mieux") : MIRROR EXACT du grand PlayerTvFragment
                 //   ligne 3608 — "v47 FORCED PERIODIC SWAP désactivé : causait

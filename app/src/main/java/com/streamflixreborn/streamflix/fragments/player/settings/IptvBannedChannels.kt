@@ -83,10 +83,37 @@ object IptvBannedChannels {
     fun unban(channelKey: String) {
         val key = normalize(channelKey)
         if (key.isBlank()) return
-        prefs.edit().remove(KEY_PREFIX + key).apply()
+        prefs.edit().remove(KEY_PREFIX + key).remove(NOM_PREFIX + key).apply()
     }
 
-    /** Returns la liste des channelKeys (normalisés) bannis. */
+    // 2026-10-28 (user : « masquer complètement les chaînes qu'on ne veut plus voir… un menu
+    //   dans les paramètres du TV Hub, Chaînes masquées ») : on garde aussi le NOM affiché, pour
+    //   la liste des réglages d'où on fait revenir une chaîne. Quelques octets par chaîne.
+    private const val NOM_PREFIX = "iptv_bannom::"
+
+    /** Masque la chaîne et retient son nom pour le menu « Chaînes masquées ». */
+    fun masquer(channelKey: String, nom: String) {
+        val key = normalize(channelKey)
+        if (key.isBlank()) return
+        prefs.edit().putLong(KEY_PREFIX + key, System.currentTimeMillis())
+            .putString(NOM_PREFIX + key, nom).apply()
+    }
+
+    /** Chaînes masquées pour le menu des réglages : (clé normalisée, nom), plus récentes d'abord. */
+    fun liste(): List<Pair<String, String>> {
+        val tout = prefs.all
+        return tout.keys.filter { it.startsWith(KEY_PREFIX) }
+            .map { it.removePrefix(KEY_PREFIX) }
+            .sortedByDescending { (tout[KEY_PREFIX + it] as? Long) ?: 0L }
+            .map { k -> k to ((tout[NOM_PREFIX + k] as? String)?.ifBlank { null } ?: k) }
+    }
+
+    /** Fait revenir une chaîne à partir de sa clé normalisée (menu des réglages). */
+    fun reafficher(cleNormalisee: String) {
+        prefs.edit().remove(KEY_PREFIX + cleNormalisee).remove(NOM_PREFIX + cleNormalisee).apply()
+    }
+
+    /** Returns la liste des channelKeys (normalisés) bannis (sans les noms retenus). */
     fun getAllBannedKeys(): Set<String> {
         return prefs.all.keys
             .filter { it.startsWith(KEY_PREFIX) }

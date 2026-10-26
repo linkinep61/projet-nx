@@ -31,6 +31,19 @@ object LiveHubFolderDialog {
      *  espaces, apostrophes et ponctuation. Ainsi "90 IS GOOD", "90's", "90 s"
      *  et "90s" deviennent comparables ("90isgood" / "90s"), et taper "90"
      *  matche toutes ces variantes. Mieux que le simple `contains` lowercase. */
+    /**
+     * 2026-10-27 (user : « que les dossiers s'ouvrent les uns après les autres pour éviter les
+     *   gros chargements ») : FILE D'ATTENTE COMMUNE. Un dossier ouvert pendant qu'un autre charge
+     *   attend son tour (au plus 20 s, puis il passe quand même : jamais bloqué).
+     */
+    private val fileChargement = kotlinx.coroutines.sync.Mutex()
+
+    private fun chargerUnParUn(bloc: suspend CoroutineScope.() -> Unit): kotlinx.coroutines.Job =
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            val obtenu = kotlinx.coroutines.withTimeoutOrNull(20_000L) { fileChargement.lock(); true } == true
+            try { bloc() } finally { if (obtenu) fileChargement.unlock() }
+        }
+
     /** 2026-08-14 : une recherche reseau qui echoue previent l'utilisateur — et ne
      *  fait jamais tomber l'appli (cf. crash YouTube constate sur un Samsung). */
     private fun avertirRechercheKO(ctx: Context, t: Throwable) {
@@ -380,6 +393,39 @@ private fun normSearch(s: String): String =
         return null
     }
 
+
+    /**
+     * 2026-10-27 (user : « quand je descends tout en bas, ma télécommande n'atteint jamais le
+     * bouton retour… si je remonte, ça part directement sur l'historique — un bug sans fin ») :
+     * le RETOUR recevait bien le focus, mais SANS aucun repère visuel (pas d'état « focus » sur
+     * son fond) ; et, posé PAR-DESSUS le bas de la grille, la remontée cherchait une vue
+     * entièrement au-dessus de lui → elle sautait la grille et tombait sur la recherche.
+     * Ici : contour visible au focus, et HAUT depuis RETOUR = retour dans la liste/grille.
+     */
+    private fun retourAtteignable(btn: android.view.View, dp: Float, liste: android.view.View?) {
+        val repos = android.graphics.drawable.GradientDrawable().apply {
+            setColor(android.graphics.Color.argb(0xCC, 0x18, 0x18, 0x18)); cornerRadius = 6 * dp
+        }
+        val actif = android.graphics.drawable.GradientDrawable().apply {
+            setColor(android.graphics.Color.parseColor("#33FFFFFF"))
+            setStroke((2 * dp).toInt(), android.graphics.Color.parseColor("#E23B3B"))
+            cornerRadius = 6 * dp
+        }
+        btn.background = android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), actif)
+            addState(intArrayOf(android.R.attr.state_pressed), actif)
+            addState(intArrayOf(), repos)
+        }
+        btn.isFocusable = true
+        if (liste != null) {
+            if (btn.id == android.view.View.NO_ID) btn.id = android.view.View.generateViewId()
+            if (liste.id == android.view.View.NO_ID) liste.id = android.view.View.generateViewId()
+            btn.nextFocusUpId = liste.id
+            btn.nextFocusLeftId = liste.id
+            liste.nextFocusDownId = btn.id
+        }
+    }
+
     /** Dossiers en cours de chargement : un seul chargement a la fois par dossier. */
     private val chargementsEnCours = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -570,6 +616,14 @@ private fun normSearch(s: String): String =
             displayCategories(ctx, folderName, listOf(asCategory), onChannelSelected)
             return
         }
+        // 2026-10-27 (user) : dossier « Chaînes TV » — grille des thèmes + Live MIX, affichée tout de
+        //   suite ; chaque thème (sous-dossier `sportdos_tv~n` / `sportdos_livemix`) charge au clic.
+        //   AVANT la lecture du cache : ce dossier capte les sections favoris (Généraliste, Info…),
+        //   qui ne doivent pas s'afficher à la place de la grille.
+        if (folderKey == com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY_TV) {
+            displayCategories(ctx, folderName, com.streamflixreborn.streamflix.utils.SportHub.accueilTv(), onChannelSelected)
+            return
+        }
         val cached = LiveTvHubProvider.folderContents[folderKey] ?: emptyList()
         // 2026-06-20 : OTF utilise son propre dialog avec bouton 🌍 Langue.
         //   Si on a un cache OTF, on affiche direct les chaînes (pas de
@@ -579,8 +633,7 @@ private fun normSearch(s: String): String =
             val currentGroup = svc.selectedGroup.ifBlank { "France" }
             // On a besoin de allChannels + groupNames pour le picker langue.
             //   On les récupère depuis le cache OtfTvService.
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 val allChannels = try {
                     kotlinx.coroutines.withTimeoutOrNull(15_000L) {
                         svc.fetchChannels()
@@ -609,9 +662,11 @@ private fun normSearch(s: String): String =
         //   pas choisir toutes les catégories ») : le dossier s'ouvre TOUT DE SUITE, et chaque
         //   sous-dossier (Replays, Mix FR, WorldWide, Rakuten, Sony, OTF Films) n'est chargé qu'au
         //   clic. Avant, les 5 sources étaient téléchargées d'un coup (10-30 s, 20-40 Mo gardés).
+        // 2026-10-27 (user : « qu'il apparaisse comme notre nouveau dossier Chaînes TV ») : grille de
+        //   tuiles comme Chaînes TV (cf. AutresReplaysTuiles), chaque tuile charge au clic.
         if (folderKey == "autres_replay") {
-            displayCategoriesWithMixFr(ctx, folderName, emptyList(), emptyList(),
-                onChannelSelected, paresseux = true)
+            displayCategories(ctx, folderName,
+                com.streamflixreborn.streamflix.utils.AutresReplaysTuiles.accueil(folderName), onChannelSelected)
             return
         }
         // Si on a du contenu cache (= WiTV/Adrar déjà chargés au boot, ou
@@ -679,8 +734,7 @@ private fun normSearch(s: String): String =
                 chargementsEnCours.remove(folderKey)
                 try { attente?.dismiss() } catch (_: Throwable) {}
             }
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 try {
                     val allReplays = LiveTvHubProvider.fetchReplayCategoriesPublic()
                     android.util.Log.d("LiveHubFolderDialog",
@@ -775,8 +829,7 @@ private fun normSearch(s: String): String =
             android.widget.Toast.makeText(
                 ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT
             ).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 try {
                     val cats = LiveTvHubProvider.fetchPlexLivePublic()
                     if (cats.isNotEmpty()) {
@@ -809,8 +862,7 @@ private fun normSearch(s: String): String =
             android.widget.Toast.makeText(
                 ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT
             ).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 try {
                     val cats = LiveTvHubProvider.fetchPlutoFolderCategoriesPublic()
                     if (cats.isNotEmpty()) LiveTvHubProvider.folderContents[folderKey] = cats
@@ -839,8 +891,7 @@ private fun normSearch(s: String): String =
             android.widget.Toast.makeText(
                 ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT
             ).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 try {
                     // Chaînes musicales déjà présentes (Vegeta : MTV/MCM/M6 Music/
                     //   Trace/NRJ Hits…), regroupées par getHome dans la section "Musique".
@@ -884,8 +935,7 @@ private fun normSearch(s: String): String =
         //   dossier → scrape LIVE. Si le CF échoue → fallback BAKED (53 chaînes, instant).
         if (folderKey == "stream4cf") {
             android.widget.Toast.makeText(ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 try {
                     // 2026-08-15 (user : « tu quittes tu reviens c'est aussi long ») — MESURÉ SUR
                     //   L'OPPO : 12,5 s à la 2e ouverture alors que la liste était déjà en cache.
@@ -927,18 +977,73 @@ private fun normSearch(s: String): String =
         // 2026-10-25 (user : « tant qu'il n'y a rien dedans, tu ne devrais pas afficher la tuile ») :
         //   l'accueil ne montre que les rubriques qui ont du contenu ; il faut pour ça les matchs
         //   (préchargés en fond à l'entrée du TV Hub). Pas encore prêts → on les attend.
+        // 2026-10-27 (plantages Android TV au clic sur Sport) : l'accueil s'affiche TOUT DE SUITE,
+        //   sans charger les matchs d'abord (ce chargement tirait Mix FR + FAST + damitv, ~+80 Mo).
+        //   Les tuiles déjà connues comme vides restent masquées ; les autres s'affichent et chaque
+        //   sous-dossier ne charge que son contenu, au clic.
+        // 2026-10-27 (suite, user : « tu as fait réapparaître les dossiers où il n'y a rien ») :
+        //   les matchs se chargent AU CLIC sur Sport (jamais à l'entrée du TV Hub), via la file
+        //   d'attente commune ; sur appareil < 3 Go les sources passent une par une (pic réduit).
+        //   Les tuiles vides restent ainsi masquées. Déjà chargés et frais → affichage immédiat.
         if (folderKey == com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY) {
             val sh = com.streamflixreborn.streamflix.utils.SportHub
             if (sh.matchsPrets()) {
                 displayCategories(ctx, folderName, sh.accueil(), onChannelSelected)
                 return
             }
-            android.widget.Toast.makeText(ctx, "Chargement des matchs…", android.widget.Toast.LENGTH_SHORT).show()
-            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            android.widget.Toast.makeText(ctx, "Chargement du sport…", android.widget.Toast.LENGTH_SHORT).show()
+            chargerUnParUn {
                 val cats = runCatching { sh.accueilCharge() }.getOrElse { sh.accueil() }
                 withContext(Dispatchers.Main) { displayCategories(ctx, folderName, cats, onChannelSelected) }
             }
             return
+        }
+        // 2026-10-28 (user, cf. RELAIS « CHAÎNES TV xonaflix ») : plateforme XonaFlix du dossier
+        //   Chaînes TV — grille des catégories du site, lue au clic (rien en mémoire avant).
+        //   PAS de redirection (contrairement à Stream4Free & co) : chaque catégorie
+        //   `sportdos_xona_<clé>` charge ses chaînes au clic par la branche générique
+        //   ci-dessous (cf. SportHub.accueilXonaFlix / collecter).
+        if (folderKey == com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER +
+                com.streamflixreborn.streamflix.utils.SportHub.SOUS_DOSSIER_XONA
+        ) {
+            val sh = com.streamflixreborn.streamflix.utils.SportHub
+            val deja = sh.accueilXonaFlixSiPret()
+            if (deja.isNotEmpty()) {
+                displayCategories(ctx, folderName, deja, onChannelSelected)
+                return
+            }
+            android.widget.Toast.makeText(ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT).show()
+            chargerUnParUn {
+                val cats = runCatching { sh.accueilXonaFlix() }.getOrDefault(emptyList())
+                withContext(Dispatchers.Main) {
+                    if (cats.isEmpty()) {
+                        android.widget.Toast.makeText(
+                            ctx, "Rien dans $folderName pour le moment", android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        displayCategories(ctx, folderName, cats, onChannelSelected)
+                    }
+                }
+            }
+            return
+        }
+        // 2026-10-27 : plateformes de Chaînes TV (Stream4Free, OTF, Samsung TV+, Pluto, Plex, LG,
+        //   Rakuten, Sony One) → leurs dossiers d'origine, chargés à l'ouverture (rien de plus en
+        //   mémoire). Le code parental a déjà été vérifié au clic avec la clé du dossier d'origine
+        //   (cf. SportHub.cleVerrou).
+        // 2026-10-27 : tuiles d'Autres Replays et petits dossiers de Mix FR (cf. AutresReplaysTuiles).
+        if (folderKey.startsWith(com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER) &&
+            com.streamflixreborn.streamflix.utils.AutresReplaysTuiles.estTuile(
+                folderKey.removePrefix(com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER))) {
+            ouvrirTuileAutresReplays(ctx,
+                folderKey.removePrefix(com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER),
+                folderName, onChannelSelected)
+            return
+        }
+        if (folderKey.startsWith(com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER)) {
+            com.streamflixreborn.streamflix.utils.SportHub.REDIRECTIONS_TV[
+                folderKey.removePrefix(com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER)
+            ]?.let { cible -> show(ctx, cible, folderName, onChannelSelected); return }
         }
         if (folderKey.startsWith(com.streamflixreborn.streamflix.utils.SportHub.PREFIXE_SOUS_DOSSIER)) {
             val sh = com.streamflixreborn.streamflix.utils.SportHub
@@ -948,8 +1053,7 @@ private fun normSearch(s: String): String =
                 return
             }
             android.widget.Toast.makeText(ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 val cats = try {
                     sh.sousDossier(folderKey)
                 } catch (t: Throwable) {
@@ -978,8 +1082,7 @@ private fun normSearch(s: String): String =
             android.widget.Toast.makeText(
                 ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT
             ).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 try {
                     val allFast = LiveTvHubProvider.fetchFastCategoriesPublic()
                     android.util.Log.d("LiveHubFolderDialog",
@@ -1023,8 +1126,7 @@ private fun normSearch(s: String): String =
                 ctx, "Chargement de la playlist $folderName…",
                 android.widget.Toast.LENGTH_SHORT
             ).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 try {
                     showOtfWithGroupPicker(ctx, folderName, onChannelSelected)
                 } catch (t: Throwable) {
@@ -1050,8 +1152,7 @@ private fun normSearch(s: String): String =
                 ctx, "Chargement du dossier $folderName…",
                 android.widget.Toast.LENGTH_SHORT
             ).show()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope.launch {
+            chargerUnParUn {
                 try {
                     val sections = WorldLiveTvProvider.getHome()
                     val matching = sections.firstOrNull { cat ->
@@ -1415,7 +1516,9 @@ private fun normSearch(s: String): String =
     // 2026-09-24 : + les autres chaînes de BFM Play (RMC Radio, 100% Docs, 100% Crime,
     //   Top Mecanic, Exclus BFM Play), qui tombaient dans Autres Replays → « Replays ».
     //   Doit rester aligné sur le FolderDef "bfmplay" de LiveTvHubProvider.
-    private val bfmPlayRegex = Regex("^Replay (BFM TV|BFM Business|RMC Story|RMC Découverte|RMC Life|RMC Radio|100% DOCS|100% Crime|Top Mecanic|Exclus BFM Play)(\\s.*)?$", RegexOption.IGNORE_CASE)
+    // 2026-10-27 : + Brut et Tech & Co (BFM Play), qui tombaient dans Autres Replays → « Replays ».
+    //   ⚠ Copie du motif de LiveTvHubProvider (FolderDef "bfmplay") : les garder identiques.
+    private val bfmPlayRegex = Regex("^Replay (BFM TV|BFM Business|RMC Story|RMC Découverte|RMC Life|RMC Radio|100% DOCS|100% Crime|Top Mecanic|Exclus BFM Play|Brut|Tech & Co)(\\s.*)?$", RegexOption.IGNORE_CASE)
 
     private fun filterReplayByFolder(
         allReplays: List<Category>,
@@ -1627,6 +1730,7 @@ private fun normSearch(s: String): String =
             .create()
         dlgCatRef = dlg
         connectDragCat(dlg)
+        retourAtteignable(retourBtnCat, dp, listView)
         retourBtnCat.setOnClickListener { dlg.dismiss() }
         try { dlg.show() } catch (_: android.view.WindowManager.BadTokenException) { return }
         pushDialog(dlg)
@@ -1640,7 +1744,61 @@ private fun normSearch(s: String): String =
      *  catégories Replay normales + une entrée imbriquée "📁 Mix FR" qui ouvre
      *  un sous-dialog avec les groupes de data.m3u (Premium FR, Sport, etc.).
      *  N'altère PAS l'affichage existant d'Autres Replays (les replays restent
-     *  une liste à plat), Mix FR est juste une entrée supplémentaire en bas. */
+     *  une liste à plat), Mix FR est juste une entrée supplémentaire en bas.
+     *  2026-10-27 : plus appelé pour Autres Replays (grille de tuiles, cf. ouvrirTuileAutresReplays). */
+    /* ---- */
+    /** 2026-10-27 : clic sur une tuile d'Autres Replays ou sur un petit dossier de Mix FR
+     *  (cf. AutresReplaysTuiles). Même chargement au clic que l'ancienne liste. */
+    private fun ouvrirTuileAutresReplays(
+        ctx: Context,
+        id: String,
+        folderName: String,
+        onChannelSelected: (TvShow) -> Unit,
+    ) {
+        val ar = com.streamflixreborn.streamflix.utils.AutresReplaysTuiles
+        val titre = folderName.replace(Regex("^[^\\p{L}\\p{N}]+"), "")
+        fun charger(rendu: (Context, List<Category>) -> Unit, source: suspend () -> List<Category>) {
+            android.widget.Toast.makeText(ctx, "Chargement de $titre…", android.widget.Toast.LENGTH_SHORT).show()
+            chargerUnParUn {
+                val cats = try { source() } catch (e: Throwable) {
+                    android.util.Log.w("LiveHubFolderDialog", "$titre KO : ${e.message}")
+                    emptyList()
+                }
+                withContext(Dispatchers.Main) {
+                    val ctx2 = ctxVivant(ctx)
+                    if (cats.isEmpty()) {
+                        android.widget.Toast.makeText(ctx2, "Rien dans $titre pour le moment",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                    } else rendu(ctx2, cats)
+                }
+            }
+        }
+        fun enListe(source: suspend () -> List<Category>) =
+            charger({ c, cats -> displayCategories(c, titre, cats, onChannelSelected) }, source)
+        suspend fun mix() = LiveTvHubProvider.fetchMixFrCategoriesPublic()
+        when {
+            id == ar.MULTI_LIVE -> enListe { mix().filter { it.name.startsWith("Multi Live", ignoreCase = true) } }
+            id == ar.REPLAYS -> enListe {
+                LiveTvHubProvider.folderContents["autres_replay"]?.takeIf { it.isNotEmpty() }
+                    ?: filterReplayByFolder(LiveTvHubProvider.fetchReplayCategoriesPublic(), "autres_replay")
+            }
+            id == ar.MIX_FR -> charger({ c, cats -> displayCategories(c, "Mix FR", ar.grilleMix(cats), onChannelSelected) }) { mix() }
+            id == ar.WORLDWIDE -> enListe { LiveTvHubProvider.fetchWorldwideCategoriesPublic() }
+            id == ar.CLIP -> show(ctx, "ma_bibliotheque", "Clip / série", onChannelSelected)
+            id == ar.IPTV_WEB -> enListe { WorldLiveTvProvider.categoriesIptvDuWebFr() }
+            id == ar.OTF_FILMS -> enListe { LiveTvHubProvider.fetchOtfFilmsCategoriesPublic() }
+            id.startsWith(ar.PREFIXE_MIX) -> charger({ c, cats ->
+                val trouve = ar.contenuMix(cats, id)
+                if (trouve == null) {
+                    android.widget.Toast.makeText(c, "Rien dans $titre pour le moment",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                } else {
+                    showChannelsList(c, Category(name = trouve.first, list = trouve.second), onChannelSelected)
+                }
+            }) { mix() }
+        }
+    }
+
     private fun displayCategoriesWithMixFr(
         ctx: Context,
         folderName: String,
@@ -1683,7 +1841,7 @@ private fun normSearch(s: String): String =
         //   fetch*Public : les clics suivants sont instantanés). Même ordre que ci-dessous.
         fun ouvrirParesseux(titre: String, charger: suspend () -> List<Category>) {
             android.widget.Toast.makeText(ctx, "Chargement de $titre…", android.widget.Toast.LENGTH_SHORT).show()
-            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            chargerUnParUn {
                 val cats = try { charger() } catch (e: Throwable) {
                     android.util.Log.w("LiveHubFolderDialog", "$titre KO : ${e.message}")
                     emptyList()
@@ -1710,15 +1868,12 @@ private fun normSearch(s: String): String =
             folders.add("📁 Mix FR" to { ouvrirParesseux("Mix FR") {
                 chargerMix().filter { !it.name.equals("Live MIX", ignoreCase = true) &&
                     !it.name.startsWith("Multi Live", ignoreCase = true) } } })
-            folders.add("📺 Live MIX" to { ouvrirParesseux("Live MIX") {
-                chargerMix().filter { it.name.equals("Live MIX", ignoreCase = true) } } })
+            // 2026-10-27 (user) : Live MIX, Rakuten TV et Sony One quittent Autres Replays — ils sont
+            //   dans le dossier Chaînes TV. Restent ici : Multi Live, Replays, Mix FR, Clip / série,
+            //   IPTV du web.
             // 2026-10-26 (user) : WorldWide retiré (cf. LiveTvHubProvider.WORLDWIDE_ACTIF).
             if (LiveTvHubProvider.WORLDWIDE_ACTIF) folders.add("🌍 WorldWide" to { ouvrirParesseux("WorldWide") {
                 LiveTvHubProvider.fetchWorldwideCategoriesPublic() } })
-            folders.add("🎬 Rakuten TV" to { ouvrirParesseux("Rakuten TV") {
-                filterFastByFolder(LiveTvHubProvider.fetchFastCategoriesPublic(), "rakuten_tv") } })
-            folders.add("📡 Sony One" to { ouvrirParesseux("Sony One") {
-                filterFastByFolder(LiveTvHubProvider.fetchFastCategoriesPublic(), "sony_one") } })
         }
         // EN PREMIER (demande user) : le bouquet Multi Live.
         if (multiLiveCategories.isNotEmpty()) folders.add("📡 Multi Live" to {
@@ -1727,16 +1882,12 @@ private fun normSearch(s: String): String =
             displayCategories(ctx, "Replays", baseCategories, onChannelSelected) })
         if (pureMixCategories.isNotEmpty()) folders.add("📁 Mix FR" to {
             displayCategories(ctx, "Mix FR", pureMixCategories, onChannelSelected) })
-        if (liveMixCategories.isNotEmpty()) folders.add("📺 Live MIX" to {
-            displayCategories(ctx, "Live MIX", liveMixCategories, onChannelSelected) })
+        // 2026-10-27 : Live MIX → dossier Chaînes TV (plus ici).
         if (worldwideCategories.isNotEmpty()) folders.add("🌍 WorldWide" to {
             displayCategories(ctx, "WorldWide", worldwideCategories, onChannelSelected) })
         // 2026-09-16 (user « l'onglet Sport, tout ce qui est dedans ne fonctionne
         //   plus — supprime l'onglet ET les liens ») : entrée « 🏆 Sport » RETIRÉE.
-        if (rakutenCategories.isNotEmpty()) folders.add("🎬 Rakuten TV" to {
-            displayCategories(ctx, "Rakuten TV", rakutenCategories, onChannelSelected) })
-        if (sonyCategories.isNotEmpty()) folders.add("📡 Sony One" to {
-            displayCategories(ctx, "Sony One", sonyCategories, onChannelSelected) })
+        // 2026-10-27 : Rakuten TV et Sony One → dossier Chaînes TV (plus ici).
         // 2026-08-28 (user : « le dossier je te l'ai montre, il s'appelle Partage de la
         //   communaute, et dedans le comportement doit etre comme Film / serie ») :
         //   entree TOUJOURS presente, meme cache froid — sinon elle disparaitrait a la
@@ -1826,7 +1977,7 @@ private fun normSearch(s: String): String =
             android.widget.Toast.makeText(
                 ctx, "Chargement d'IPTV du web\u2026", android.widget.Toast.LENGTH_SHORT,
             ).show()
-            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            chargerUnParUn {
                 val cats = try {
                     com.streamflixreborn.streamflix.providers.WorldLiveTvProvider.categoriesIptvDuWebFr()
                 } catch (e: Throwable) {
@@ -1925,7 +2076,7 @@ private fun normSearch(s: String): String =
                         sourcesRecherche = true
                         android.widget.Toast.makeText(ctx, "Recherche dans tous les sous-dossiers…",
                             android.widget.Toast.LENGTH_SHORT).show()
-                        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                        chargerUnParUn {
                             val toutes = ArrayList<Category>()
                             for (charge in listOf<suspend () -> List<Category>>(
                                 { chargerReplays() }, { chargerMix() },
@@ -1995,6 +2146,7 @@ private fun normSearch(s: String): String =
         }
         val dlg = android.app.AlertDialog.Builder(ctx).setView(contentCol).create()
         connectDrag(dlg)
+        retourAtteignable(retourBtn, dp, folderList)
         retourBtn.setOnClickListener { dlg.dismiss() }
         try { dlg.show() } catch (_: android.view.WindowManager.BadTokenException) { return }
         pushDialog(dlg)
@@ -2027,7 +2179,7 @@ private fun normSearch(s: String): String =
                         .setCancelable(true)
                         .create().also { it.show() }
                 } catch (_: Throwable) { null }
-                CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                chargerUnParUn {
                     val cats = try { strip(charger(), prefix) } catch (_: Throwable) { emptyList() }
                     withContext(Dispatchers.Main) {
                         chargementsEnCours.remove(cle)
@@ -2281,6 +2433,7 @@ private fun normSearch(s: String): String =
         }
         val dlg = android.app.AlertDialog.Builder(ctx).setView(contentCol).create()
         connectDrag(dlg)
+        retourAtteignable(retourBtn, dp, listView)
         retourBtn.setOnClickListener { dlg.dismiss() }
         try { dlg.show() } catch (_: android.view.WindowManager.BadTokenException) { return }
         pushDialog(dlg)
@@ -2727,6 +2880,7 @@ private fun normSearch(s: String): String =
             .setView(containerAgg)
             .create()
         dlgAggRef = dlg
+        retourAtteignable(retourBtnAgg, ctx.resources.displayMetrics.density, listView)
         retourBtnAgg.setOnClickListener { dlg.dismiss() }
         try { dlg.show() } catch (_: android.view.WindowManager.BadTokenException) { return }
         pushDialog(dlg)
@@ -2746,7 +2900,10 @@ private fun normSearch(s: String): String =
         category: Category,
         onChannelSelected: (TvShow) -> Unit,
     ) {
+        // 2026-10-28 (user : « faire disparaître » les chaînes masquées, pour tout le TV Hub) :
+        //   toutes les grilles de chaînes des dossiers passent ici → un seul filtre.
         val channels = (category.list as? List<*>)?.filterIsInstance<TvShow>().orEmpty()
+            .filterNot { com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels.isBanned(it.id) }
         if (channels.isEmpty()) {
             android.widget.Toast.makeText(
                 ctx, "Aucune chaîne dans ${category.name}", android.widget.Toast.LENGTH_SHORT
@@ -3260,6 +3417,13 @@ private fun normSearch(s: String): String =
                     }
                     tvTitle.maxLines = titreLignesTv
                 }
+                // 2026-10-27 (user : « bug d'interface avec tes logos », rangées superposées puis
+                //   défilement vers une page noire) : la GridView d'Android place la rangée suivante
+                //   d'après UNE cellule ; avec des titres de 1, 2 ou 3 lignes, les hauteurs différaient
+                //   et les rangées se chevauchaient. Titre à hauteur FIXE → toutes les cellules égales.
+                val lignesTitre = if (isTV) titreLignesTv else 2
+                tvTitle.maxLines = lignesTitre
+                tvTitle.minLines = lignesTitre
                 // 2026-06-20 (user "L&apos;Étudiante") : décoder les entités
                 //   HTML qui traînent dans certains M3U (L&apos;, &amp;, etc.).
                 val decodedTitle = try {
@@ -3374,6 +3538,27 @@ private fun normSearch(s: String): String =
         // v13 : clics via onItemClickListener (D-pad + touch compatible)
         gridView.onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, pos, _ ->
             val ch = filteredChannels[pos]
+            // 2026-10-27 (user : « garder le verrouillage des dossiers dans Chaînes TV ») : une
+            //   tuile-DOSSIER dans une grille (sous-dossiers de Chaînes TV, de Sport…) vérifie le code
+            //   parental comme les cartes du TV Hub (cf. TvShowViewHolder). Avant, la grille ouvrait
+            //   le dossier sans rien demander : un dossier verrouillé en haut s'ouvrait par ici.
+            if (ch.id.startsWith("livehub::folder::")) {
+                val cleVerrou = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.folderKeyFromId(ch.id)
+                if (cleVerrou != null &&
+                    !com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isAccessible(ctx, cleVerrou)) {
+                    com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                        context = ctxVivant(ctx),
+                        title = "🔒 ${com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.folderLabel(cleVerrou)} — Code parental",
+                        onSuccess = {
+                            com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.unlockForSession(cleVerrou)
+                            onChannelSelected(ch)
+                        },
+                        onCancel = null,
+                    )
+                    return@OnItemClickListener
+                }
+                if (cleVerrou != null) com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.touchSessionUnlock(cleVerrou)
+            }
             // 2026-09-19 : on ouvre un résultat → la requête tapée a servi, on la mémorise.
             //   (Rutube garde son propre historique, d'où le garde sur networkSearch.)
             if (networkSearch == null) memoriserRecherche(ctx, searchInput)
@@ -3409,8 +3594,52 @@ private fun normSearch(s: String): String =
             gridAdapter.notifyDataSetChanged()
         }
         // Long-press pour favoris replay
-        gridView.onItemLongClickListener = android.widget.AdapterView.OnItemLongClickListener { _, _, pos, _ ->
+        // 2026-10-28 : l'ancien appui long (favori direct) devient l'action « ★ Favori » du menu
+        //   ci-dessous (cf. gridView.onItemLongClickListener plus bas).
+        val basculerFavori: (Int) -> Boolean = basculer@{ pos ->
             val ch = filteredChannels[pos]
+            // 2026-10-27 (user : « pouvoir rester appuyé sur n'importe lequel pour le verrouiller ») :
+            //   appui long sur une tuile-DOSSIER → contrôle parental, comme sur les cartes du TV Hub
+            //   (PIN créé au premier usage, puis demandé pour verrouiller / déverrouiller).
+            if (ch.id.startsWith("livehub::folder::")) {
+                val cleVerrou = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.folderKeyFromId(ch.id)
+                    ?: return@basculer false
+                val verrouille = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.isLocked(ctx, cleVerrou)
+                val libelle = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.folderLabel(cleVerrou)
+                // 2026-10-27 (user : « mettre un dossier en favori ») : + rangée « Dossiers favoris ».
+                val favStore = com.streamflixreborn.streamflix.utils.DossiersFavorisStore
+                val optionFav = if (favStore.estFavori(ch.id)) "📁 Retirer des dossiers favoris" else "📁 Ajouter aux dossiers favoris"
+                androidx.appcompat.app.AlertDialog.Builder(ctxVivant(ctx))
+                    .setTitle(ch.title)
+                    .setItems(arrayOf(optionFav, if (verrouille) "🔓 Retirer le contrôle parental" else "🔒 Contrôle parental (verrouiller)")) { _, choix ->
+                        if (choix == 0) {
+                            val ajoute = favStore.basculer(ch)
+                            android.widget.Toast.makeText(ctxVivant(ctx),
+                                if (ajoute) "${ch.title} — Ajouté aux dossiers favoris" else "${ch.title} — Retiré des dossiers favoris",
+                                android.widget.Toast.LENGTH_SHORT).show()
+                            try {
+                                LiveTvHubProvider.clearHomeCache()
+                                com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.let {
+                                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctx, it)
+                                }
+                            } catch (_: Throwable) {}
+                            return@setItems
+                        }
+                        com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                            context = ctxVivant(ctx),
+                            title = if (verrouille) "Retirer le contrôle parental" else "Activer le contrôle parental",
+                            onSuccess = {
+                                val maintenant = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore.toggleLock(ctx, cleVerrou)
+                                android.widget.Toast.makeText(ctxVivant(ctx),
+                                    if (maintenant) "🔒 $libelle verrouillé" else "🔓 $libelle déverrouillé",
+                                    android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                            onCancel = null,
+                        )
+                    }
+                    .show()
+                return@basculer true
+            }
             // 2026-06-27 (user "dans Musique j'ai voulu mettre un favori, ça marche
             //   pas") : l'appui long ne gérait que les ids replay. Les chaînes
             //   Musique/WorldWide/FAST sont des ids `livehub::fast::` → on les
@@ -3517,6 +3746,37 @@ private fun normSearch(s: String): String =
                 gridAdapter.notifyDataSetChanged()
                 true
             } else false
+        }
+        // 2026-10-28 (user : « un appui long ferait dire de mettre en favori ou masquer… la faire
+        //   disparaître ») : menu « ★ Favori » / « 🙈 Masquer ». Une chaîne masquée disparaît de la
+        //   grille tout de suite et de tout le TV Hub (cf. showChannelsList) ; elle revient par
+        //   Paramètres › Chaînes masquées. Les tuiles-DOSSIER gardent leur menu à elles.
+        gridView.onItemLongClickListener = android.widget.AdapterView.OnItemLongClickListener { _, _, pos, _ ->
+            val ch = filteredChannels.getOrNull(pos) ?: return@OnItemLongClickListener false
+            if (ch.id.startsWith("livehub::folder::")) return@OnItemLongClickListener basculerFavori(pos)
+            androidx.appcompat.app.AlertDialog.Builder(ctxVivant(ctx))
+                .setTitle(ch.title)
+                .setItems(arrayOf("★ Favori (ajouter / retirer)", "🙈 Masquer cette chaîne")) { _, choix ->
+                    if (choix == 0) {
+                        basculerFavori(pos)
+                        return@setItems
+                    }
+                    com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels
+                        .masquer(ch.id, ch.title ?: ch.id)
+                    filteredChannels.remove(ch)
+                    gridAdapter.notifyDataSetChanged()
+                    runCatching {
+                        LiveTvHubProvider.clearHomeCache()
+                        com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.let {
+                            com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctx, it)
+                        }
+                    }
+                    android.widget.Toast.makeText(ctxVivant(ctx),
+                        "🙈 ${ch.title} masquée — Paramètres › Chaînes masquées pour la faire revenir",
+                        android.widget.Toast.LENGTH_LONG).show()
+                }
+                .show()
+            true
         }
 
         // ── 2026-06-22 v3 (user "pas de barre noire en haut/en bas, juste
@@ -3875,6 +4135,7 @@ private fun normSearch(s: String): String =
         //   retombait sur la recherche d'avant au lieu de sortir. Pour le dossier à recherche
         //   réseau (Rutube), RETOUR ferme donc TOUTE la pile → on revient droit au menu.
         //   Les autres dossiers gardent leur comportement d'origine (fermeture simple).
+        retourAtteignable(retourBtn, dp, gridView)
         retourBtn.setOnClickListener {
             if (networkSearch != null) dismissAllDialogs() else dlg.dismiss()
         }
@@ -4041,6 +4302,7 @@ private fun normSearch(s: String): String =
                 }
                 itemsAdapter.notifyDataSetChanged()
             }
+        retourAtteignable(retourBtn, dp, listView)
         retourBtn.setOnClickListener { dlg.dismiss() }
 
         listView.setOnItemClickListener { _, _, idx, _ ->

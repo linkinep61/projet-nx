@@ -51,7 +51,6 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.navigation.fragment.findNavController
 import androidx.navigation.fragment.navArgs
 import com.streamflixreborn.streamflix.R
-import com.streamflixreborn.streamflix.activities.tools.BypassWebViewActivity
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.databinding.ContentExoControllerMobileBinding
 import com.streamflixreborn.streamflix.databinding.FragmentPlayerMobileBinding
@@ -773,37 +772,9 @@ class PlayerMobileFragment : Fragment() {
             }
         }
     }
-    private var waitingForBypass = false
-    private var bypassDone = false
     private var nextEpisodePrefetchTargetId: String? = null
     private var nextEpisodePrefetchJob: Job? = null
     private var nextEpisodeOverlayDismissed = false
-
-    private val bypassWebViewLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val cookies =
-                result.data?.getStringExtra(BypassWebViewActivity.EXTRA_COOKIE_HEADER)?.trim()
-
-            if (result.resultCode != android.app.Activity.RESULT_OK || cookies.isNullOrBlank()) {
-                waitingForBypass = false
-                return@registerForActivityResult
-            }
-
-            val bypassUrl = servers.firstOrNull { isSerienStreamBypassUrl(it.id) }?.id
-            if (bypassUrl.isNullOrBlank()) {
-                waitingForBypass = false
-                return@registerForActivityResult
-            }
-
-            applyBypassCookies(bypassUrl, cookies)
-            waitingForBypass = false
-            bypassDone = true
-
-            lifecycleScope.launch {
-                delay(300)
-                viewModel.reloadServersAfterBypass()
-            }
-        }
 
     // 2026-06-30 : true si la case "toujours utiliser ce lecteur" était cochée
     //   au moment de lancer le sélecteur → on mémorise le lecteur choisi + on
@@ -1432,24 +1403,7 @@ class PlayerMobileFragment : Fragment() {
                     }
                     is PlayerViewModel.State.SuccessLoadingServers -> {
                         servers = state.servers
-                        val sToServer = servers.firstOrNull {
-                            isSerienStreamBypassUrl(it.id)
-                        }
-
-                        if (sToServer != null && !waitingForBypass && !bypassDone) {
-                            val bypassUrl = buildSerienStreamBypassUrl()
-                            if (bypassUrl.isNullOrBlank()) {
-                                waitingForBypass = false
-                                Toast.makeText(requireContext(), "Unable to open s.to bypass page.", Toast.LENGTH_SHORT).show()
-                                return@collect
-                            }
-
-                            waitingForBypass = true
-                            bypassWebViewLauncher.launch(
-                                Intent(requireContext(), BypassWebViewActivity::class.java)
-                                    .putExtra(BypassWebViewActivity.EXTRA_URL, bypassUrl)
-                            )
-                        } else {
+                        run {
                             val providerName = UserPreferences.currentProvider?.name ?: ""
                             val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
@@ -2190,6 +2144,11 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        // 2026-10-27 (photo mémoire sur la télé) : le lecteur fermé restait en mémoire avec son
+        //   écran, retenu par ces rappels globaux (« Recaler maintenant », sous-titre suivant).
+        com.streamflixreborn.streamflix.utils.SyncSousTitres.demandeRecalage = null
+        com.streamflixreborn.streamflix.utils.SyncSousTitres.surCalageEchoue = null
+        com.streamflixreborn.streamflix.utils.EcouteVoix.oublier()
         if (redirectionScan) return
         com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(false)
         // 2026-08-02 : on sort du lecteur → plus d'hébergeur courant. Sans ça, un changement de
@@ -5157,6 +5116,10 @@ class PlayerMobileFragment : Fragment() {
         com.streamflixreborn.streamflix.utils.SyncSousTitres.reinitialiser()
         com.streamflixreborn.streamflix.utils.SyncSousTitres.videoCourante = video
         com.streamflixreborn.streamflix.utils.EcouteVoix.oublier()
+        // 2026-10-27 : index de recherche relâchés pendant la lecture (télés justes en mémoire).
+        kotlin.concurrent.thread(isDaemon = true, name = "index-lecture") {
+            runCatching { com.streamflixreborn.streamflix.providers.OnyxFilmsProvider.libererPourLecture() }
+        }
         dernierCalageAuto = null
         installerCalageAuto()
         binding.root.postDelayed({ if (_binding != null) installerCalageAuto() }, 1500)
@@ -5335,7 +5298,13 @@ class PlayerMobileFragment : Fragment() {
             //   détaillé dans PlayerTvFragment. L'UA reste posé par
             //   `setDefaultRequestProperties` plus bas.
             val exigeDoh = needsDoH(video.source)
-            if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !exigeDoh &&
+            // 2026-10-29 : SendVid → téléchargement parallèle (l'UA de l'extracteur passe par
+            //   setDefaultRequestProperties plus bas, ParallelRangeDataSource le respecte).
+            if (sourceHost.contains("sendvid")) {
+                httpDataSource = com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default)
+                dataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(requireContext(), httpDataSource)
+                Log.d("PlayerNetwork", "SendVid → téléchargement parallèle (4 connexions)")
+            } else if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !exigeDoh &&
                 !(sourceHost.contains("uqload") || sourceHost.contains("abyssa") || sourceHost.contains("abysscdn")
                     || sourceHost.contains("citron-edge") || sourceHost.contains("vidzy"))) {
                 try {
@@ -5505,6 +5474,18 @@ class PlayerMobileFragment : Fragment() {
                             setSelectUndeterminedTextLanguage(true)
                         }
                         if (isPlexPlutoVod) {
+                            setPreferredAudioLanguages("fr", "fre", "fra")
+                        } else if (!serveurVf) {
+                            // 2026-10-27 (user : « privilégier le japonais avant le hindi ») :
+                            //   serveur VO/VOSTFR à plusieurs pistes → la langue d'origine
+                            //   de l'œuvre d'abord (doublages hindi, etc. ensuite).
+                            val vo = com.streamflixreborn.streamflix.utils.BackupRegistry.langueOriginaleCourante
+                            if (vo != null) setPreferredAudioLanguages(vo) else setPreferredAudioLanguages()
+                        } else {
+                            // 2026-10-28 (user, NetMirror : « serveur VF avec l'audio anglais, obligé
+                            //   d'aller dans la liste des langues ») : serveur VF à plusieurs pistes →
+                            //   le français d'abord (sinon la piste « par défaut » du flux, souvent
+                            //   l'anglais). Une seule piste ou pas de FR : rien ne change.
                             setPreferredAudioLanguages("fr", "fre", "fra")
                         }
                     }
@@ -6038,6 +6019,8 @@ class PlayerMobileFragment : Fragment() {
                 // (we forced it to 0 during IPTV extraction so the controls
                 // would be visible immediately). Also mark IPTV server as sticky.
                 if (playbackState == Player.STATE_READY) {
+                    // 2026-10-27 : la lecture tourne → index de recherche rendus 1 min après.
+                    com.streamflixreborn.streamflix.utils.MemoireAppareil.lectureDemarree()
                     if (binding.pvPlayer.controllerShowTimeoutMs == 0) {
                         binding.pvPlayer.controllerShowTimeoutMs = 2000
                     }
@@ -7809,7 +7792,40 @@ class PlayerMobileFragment : Fragment() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory)))
             .setLoadControl(loadControl)
             .build()
-            .also { p -> installerDiagDecodeur(p) }
+            .also { p -> installerDiagDecodeur(p); diagChargementsVidara(p) }
+    }
+
+    // 2026-10-28 (diagnostic, user : « répare Vidara d'abord ») : image (97bf1.com) et son
+    //   (s1q2105.com) viennent de deux serveurs ; on note chaque chargement pour voir lequel bloque.
+    private fun diagChargementsVidara(p: ExoPlayer) {
+        // Pour diagnostiquer un autre serveur : élargir ce filtre (ex. `u.host.orEmpty().isNotEmpty()`).
+        fun vise(u: android.net.Uri) = u.host.orEmpty().let { it.contains("97bf1") || it.contains("s1q2105") }
+        fun court(u: android.net.Uri) = "${u.host}${u.path.orEmpty().takeLast(45)}"
+        p.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+            override fun onLoadStarted(e: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                i: androidx.media3.exoplayer.source.LoadEventInfo, d: androidx.media3.exoplayer.source.MediaLoadData) {
+                if (vise(i.uri)) Log.d("DiagVidara", "DÉBUT type=${d.trackType} ${court(i.uri)}")
+            }
+            override fun onLoadCompleted(e: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                i: androidx.media3.exoplayer.source.LoadEventInfo, d: androidx.media3.exoplayer.source.MediaLoadData) {
+                if (vise(i.uri)) {
+                    val media = if (d.mediaStartTimeMs != androidx.media3.common.C.TIME_UNSET && d.mediaEndTimeMs != androidx.media3.common.C.TIME_UNSET)
+                        d.mediaEndTimeMs - d.mediaStartTimeMs else -1L
+                    Log.d("DiagVidara", "FINI type=${d.trackType} ${i.bytesLoaded} o en ${i.loadDurationMs} ms (média ${media} ms, à ${d.mediaStartTimeMs / 1000} s) " +
+                        "avance=${(p.bufferedPosition - p.currentPosition) / 1000} s ${court(i.uri)}")
+                }
+            }
+            override fun onLoadError(e: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                i: androidx.media3.exoplayer.source.LoadEventInfo, d: androidx.media3.exoplayer.source.MediaLoadData,
+                error: java.io.IOException, wasCanceled: Boolean) {
+                if (vise(i.uri)) Log.w("DiagVidara", "ERREUR type=${d.trackType} ${court(i.uri)} : $error")
+            }
+            override fun onLoadCanceled(e: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                i: androidx.media3.exoplayer.source.LoadEventInfo, d: androidx.media3.exoplayer.source.MediaLoadData) {
+                if (vise(i.uri)) Log.w("DiagVidara", "ANNULÉ type=${d.trackType} après ${i.loadDurationMs} ms ${court(i.uri)}")
+            }
+        })
     }
 
     /**
@@ -8091,6 +8107,12 @@ class PlayerMobileFragment : Fragment() {
     private fun hostOf(url: String?): String? = runCatching { android.net.Uri.parse(url).host }.getOrNull()
 
     private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
+        // 2026-10-29 (user) : SendVid plafonne chaque connexion à ~250 Ko/s → téléchargement
+        //   sur 4 connexions en parallèle (cf. ParallelRangeDataSource).
+        if (videoUrl.contains("sendvid.com", ignoreCase = true)) {
+            Log.d("PlayerNetwork", "SendVid → téléchargement parallèle (4 connexions)")
+            return com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default)
+        }
         // Hôte connu comme DNS-bloqué par le FAI → DoT-OkHttp d'office (résout via dot.sb).
         val vHost = hostOf(videoUrl)
         if (vHost != null && dnsBlockedHosts.contains(vHost)) {
@@ -9654,35 +9676,4 @@ class PlayerMobileFragment : Fragment() {
         daddyLiveProxyWebView = null
     }
 
-    private fun isSerienStreamBypassUrl(url: String): Boolean {
-        return runCatching {
-            Uri.parse(url).host.equals("s.to", ignoreCase = true)
-        }.getOrDefault(false)
-    }
-
-    private fun buildSerienStreamBypassUrl(): String? {
-        return null
-    }
-
-    private fun applyBypassCookies(url: String, cookieHeader: String) {
-        val host = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
-        val targets = linkedSetOf<String>().apply {
-            add(url)
-            if (host.isNotBlank()) {
-                add("https://$host/")
-                add("http://$host/")
-            }
-        }
-
-        val cookieManager = CookieManager.getInstance()
-        cookieHeader.split(";")
-            .map { it.trim() }
-            .filter { it.contains("=") }
-            .forEach { cookie ->
-                targets.forEach { target ->
-                    cookieManager.setCookie(target, cookie)
-                }
-            }
-        cookieManager.flush()
-    }
 }

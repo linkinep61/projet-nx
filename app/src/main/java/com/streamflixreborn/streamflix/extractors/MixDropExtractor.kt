@@ -32,7 +32,13 @@ class MixDropExtractor : Extractor() {
         // 2026-06-13 (porté upstream v1.7.220-v1.7.221) : miroirs avec typo
         //   (i en plus) — protègent si MixDrop change pour ces variantes.
         "https://miixdrop.net",
-        "https://miiixdrop.net"
+        "https://miiixdrop.net",
+        // 2026-10-26 (vérifié depuis le PC du user) : mxdrop.to et mixdrop.si redirigent
+        //   vers mxdrop.top ; mxdrop.click répond avec le lecteur (MDCore).
+        //   mixdrop.vip répond 404 → pas repris.
+        "https://mxdrop.top",
+        "https://mxdrop.click",
+        "https://mixdrop.si"
     )
     override val rotatingDomain = listOf(
         Regex("^md[3bfyz][a-z0-9]*\\.[a-z0-9]+", RegexOption.IGNORE_CASE)
@@ -49,6 +55,8 @@ class MixDropExtractor : Extractor() {
         val document = service.get(
             url = link
                 .replace("/f/", "/e/")
+                // 2026-10-26 : variante de lien « /emb/ » = même lecteur que « /e/ ».
+                .replace("/emb/", "/e/")
                 .replace(".club/", ".ag/")
                 .replace(Regex("^(https?://[^/]+/e/[^/?#]+).*$", RegexOption.IGNORE_CASE), "$1")
         )

@@ -1524,9 +1524,28 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             // 2026-05-22 : timeouts augmentés — le site 1Jour1Film est souvent
             // lent (Cloudflare, CDN variable). 10s causait des SocketTimeoutException
             // fréquentes sur le home. 20s laisse le temps au site de répondre.
+            // 2026-10-28 (user : « 1Jour1Film ne revient pas ») : les pages /films/ répondaient
+            //   403 en 47 ms à l'appli (pare-feu du site) alors que Chrome les ouvre, même sans
+            //   cookie ; l'API wp-json passait. On se présente comme un navigateur récent.
             private val client = NetworkClient.default.newBuilder()
                 .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .addInterceptor { chain ->
+                    val r = chain.request()
+                    val page = r.method == "GET" && !r.url.encodedPath.contains("/wp-json/")
+                    chain.proceed(r.newBuilder()
+                        .header("User-Agent", com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA)
+                        .apply {
+                            if (page) {
+                                header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+                                header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+                                header("Sec-Fetch-Dest", "document")
+                                header("Sec-Fetch-Mode", "navigate")
+                                header("Sec-Fetch-Site", "none")
+                                header("Upgrade-Insecure-Requests", "1")
+                            }
+                        }.build())
+                }
                 .build()
 
             fun buildAddressFetcher(): Service {

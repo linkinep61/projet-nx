@@ -44,6 +44,33 @@ class ShowOptionsTvDialog(
     private val database: AppDatabase
         get() = AppDatabase.getInstance(context)
 
+
+    // 2026-10-28 (user : « pour retirer un favori il faut re-appuyer sur Ajouter ») : le clic bascule
+
+    //   sur le fournisseur de l'élément (checkProviderAndRun) et écrit dans SA base ; l'affichage
+
+    //   lisait la base du fournisseur EN COURS → « Ajouter » sur un favori d'un autre fournisseur.
+
+    private fun nomFournisseur(item: AppAdapter.Item): String? = when (item) {
+
+        is Movie -> item.providerName
+
+        is TvShow -> item.providerName
+
+        is Episode -> item.tvShow?.providerName
+
+        else -> null
+
+    }?.takeIf { it.isNotBlank() }
+
+    private fun baseDe(item: AppAdapter.Item): AppDatabase =
+
+        nomFournisseur(item)?.let { runCatching { AppDatabase.getInstanceForProvider(it, context) }.getOrNull() } ?: database
+
+    private fun fournisseurDe(item: AppAdapter.Item): Provider? =
+
+        nomFournisseur(item)?.let { n -> Provider.providers.keys.find { it.name == n } } ?: UserPreferences.currentProvider
+
     private fun checkProviderAndRun(show: AppAdapter.Item, action: () -> Unit) {
         val providerName = when(show){
             is Movie -> show.providerName
@@ -157,8 +184,9 @@ class ShowOptionsTvDialog(
             if (tvShow != null) {
                 var freshTvShow = tvShow
 
-                context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
-                    freshTvShow = database.tvShowDao().getById(tvShow.id) ?: tvShow
+                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                    freshTvShow = baseDe(tvShow).tvShowDao().getById(tvShow.id) ?: tvShow
+                    if (!freshTvShow.isFavorite && fournisseurDe(tvShow)?.let { com.streamflixreborn.streamflix.utils.UserDataCache.estSerieFavorite(context, it, tvShow.id) } == true) freshTvShow.isFavorite = true
                     withContext(Dispatchers.Main) {
                         text = if (freshTvShow.isFavorite) {
                             context.getString(R.string.option_show_unfavorite)
@@ -173,7 +201,7 @@ class ShowOptionsTvDialog(
                         val provider = UserPreferences.currentProvider ?: return@checkProviderAndRun
                         context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
                             val dao = database.tvShowDao()
-                            val current = dao.getById(tvShow.id)?.isFavorite ?: false
+                            val current = (dao.getById(tvShow.id)?.isFavorite ?: false) || (fournisseurDe(tvShow)?.let { com.streamflixreborn.streamflix.utils.UserDataCache.estSerieFavorite(context, it, tvShow.id) } == true)
                             val newValue = !current
                             val resolvedTvShow = ArtworkRepair.resolveTvShowForFavorite(context, tvShow, newValue)
 
@@ -351,10 +379,14 @@ class ShowOptionsTvDialog(
 
         binding.btnOptionEpisodeOpenTvShow.visibility = View.GONE
 
+
+        binding.btnOptionEpisodeMarkAllPreviousWatched.visibility = View.GONE // 2026-10-28 : épisodes seulement
+
         var freshMovie = movie
 
-        context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
-            freshMovie = database.movieDao().getById(movie.id) ?: movie
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            freshMovie = baseDe(movie).movieDao().getById(movie.id) ?: movie
+            if (!freshMovie.isFavorite && fournisseurDe(movie)?.let { com.streamflixreborn.streamflix.utils.UserDataCache.estFilmFavori(context, it, movie.id) } == true) freshMovie.isFavorite = true
             withContext(Dispatchers.Main) {
                 binding.btnOptionShowFavorite.text = when {
                     freshMovie.isFavorite -> context.getString(R.string.option_show_unfavorite)
@@ -369,7 +401,7 @@ class ShowOptionsTvDialog(
                     val provider = UserPreferences.currentProvider ?: return@checkProviderAndRun
                     context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
                         val dao = database.movieDao()
-                        val current = dao.getById(movie.id)?.isFavorite ?: false
+                        val current = (dao.getById(movie.id)?.isFavorite ?: false) || (fournisseurDe(movie)?.let { com.streamflixreborn.streamflix.utils.UserDataCache.estFilmFavori(context, it, movie.id) } == true)
                         val newValue = !current
                         val resolvedMovie = ArtworkRepair.resolveMovieForFavorite(context, movie, newValue)
                         dao.upsertFavorite(resolvedMovie, newValue)
@@ -457,10 +489,14 @@ class ShowOptionsTvDialog(
 
         binding.btnOptionEpisodeOpenTvShow.visibility = View.GONE
 
+
+        binding.btnOptionEpisodeMarkAllPreviousWatched.visibility = View.GONE // 2026-10-28 : épisodes seulement
+
         var freshTvShow = tvShow
 
-        context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
-            freshTvShow = database.tvShowDao().getById(tvShow.id) ?: tvShow
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            freshTvShow = baseDe(tvShow).tvShowDao().getById(tvShow.id) ?: tvShow
+            if (!freshTvShow.isFavorite && fournisseurDe(tvShow)?.let { com.streamflixreborn.streamflix.utils.UserDataCache.estSerieFavorite(context, it, tvShow.id) } == true) freshTvShow.isFavorite = true
             withContext(Dispatchers.Main) {
                 binding.btnOptionShowFavorite.text = when {
                     freshTvShow.isFavorite -> context.getString(R.string.option_show_unfavorite)
@@ -475,7 +511,7 @@ class ShowOptionsTvDialog(
                     val provider = UserPreferences.currentProvider ?: return@checkProviderAndRun
                     context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
                         val dao = database.tvShowDao()
-                        val current = dao.getById(tvShow.id)?.isFavorite ?: false
+                        val current = (dao.getById(tvShow.id)?.isFavorite ?: false) || (fournisseurDe(tvShow)?.let { com.streamflixreborn.streamflix.utils.UserDataCache.estSerieFavorite(context, it, tvShow.id) } == true)
                         val newValue = !current
                         val resolvedTvShow = ArtworkRepair.resolveTvShowForFavorite(context, tvShow, newValue)
 

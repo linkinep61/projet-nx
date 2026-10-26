@@ -47,18 +47,30 @@ object OlaVod {
     private const val UA_LECTURE = "Mozilla/5.0"
 
     data class Portail(val base: String, val mac: String)
-    data class Film(
-        val id: String, val titre: String, val annee: Int, val tmdb: Int, val img: String?,
+    // 2026-10-27 (photo mémoire Oppo : index OLA = 22 Mo) : rangement COMPACT. La commande
+    //   Stalker d'un film (~150 caractères en base64) est gardée sous sa forme courte « ~id~ext »
+    //   et reconstruite à la demande ; l'affiche garde son préfixe partagé ; les catégories
+    //   sont partagées (ensemble à un élément quand il n'y en a qu'une) ; plus de table id → film.
+    class Film(
+        val id: String, val titre: String, val annee: Int, val tmdb: Int,
+        private val imgp: String, private val imRaw: String?,
         val cats: Set<String>,
+        private val groupesSrc: IntArray, private val cmdsSrc: Array<String>,
+    ) {
+        val img: String? get() = imRaw?.let { if (imgp.isEmpty()) it else imgp + it }
+        val sansImage: Boolean get() = imRaw.isNullOrEmpty()
         /** (groupe, commande Stalker) */
-        val sources: List<Pair<Int, String>>,
-    )
-    data class Serie(
+        val sources: List<Pair<Int, String>> get() = List(groupesSrc.size) { groupesSrc[it] to deplier(cmdsSrc[it]) }
+    }
+    class Serie(
         val id: String, val titre: String, val annee: Int, val tmdb: Int, val img: String?,
         val cats: Set<String>,
+        private val groupesSrc: IntArray, private val idsSrc: Array<String>,
+    ) {
+        val sansImage: Boolean get() = img.isNullOrBlank()
         /** (groupe, id série Stalker « 34414:34414 ») */
-        val sources: List<Pair<Int, String>>,
-    )
+        val sources: List<Pair<Int, String>> get() = List(groupesSrc.size) { groupesSrc[it] to idsSrc[it] }
+    }
     /** Saison lue sur le portail : commande Stalker de la saison + numéros d'épisodes. */
     data class Saison(val num: Int, val groupe: Int, val cmd: String, val episodes: List<Int>)
     class Index(
@@ -66,10 +78,8 @@ object OlaVod {
         /** Groupes de portails des SÉRIES (numérotation propre au fichier des séries). */
         val sgroupes: Map<Int, List<Portail>> = emptyMap(),
     ) {
-        val seriesParId: Map<String, Serie> = series.associateBy { it.id }
-        val seriesParTmdb: Map<Int, List<Serie>> = series.filter { it.tmdb > 0 }.groupBy { it.tmdb }
-        val parId: Map<String, Film> = films.associateBy { it.id }
-        val parTmdb: Map<Int, List<Film>> = films.filter { it.tmdb > 0 }.groupBy { it.tmdb }
+        val seriesParTmdb: Map<Int, List<Serie>> by lazy { series.filter { it.tmdb > 0 }.groupBy { it.tmdb } }
+        val parTmdb: Map<Int, List<Film>> by lazy { films.filter { it.tmdb > 0 }.groupBy { it.tmdb } }
     }
 
     @Volatile private var cache: Index? = null
@@ -93,8 +103,9 @@ object OlaVod {
     }
 
     suspend fun index(forcer: Boolean = false): Index? = withContext(Dispatchers.IO) {
+        MemoireAppareil.libererPlusTard("index OLA") { alleger() }
         cache?.let { if (!leger && !forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withContext it }
-        verrou.withLock {
+        MemoireAppareil.unParUn { verrou.withLock {
             cache?.let { if (!leger && !forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withLock it }
             val h = System.currentTimeMillis() / 3_600_000L
             // Films et séries chargés séparément : l'un peut manquer sans bloquer l'autre.
@@ -121,7 +132,7 @@ object OlaVod {
             cacheTs = System.currentTimeMillis()
             Log.i(TAG, "index chargé : ${idx.films.size} films, ${idx.series.size} séries")
             idx
-        }
+        } }
     }
 
     fun prechauffer() {
@@ -147,7 +158,19 @@ object OlaVod {
         }
     }
 
-    private class Brut(val g: Int, val cmd: String, val t: String, val y: Int, val tmdb: Int, val img: String, val c: String)
+    /** [cmd] = commande complète OU forme courte « ~id~ext » (cf. [deplier]) ; affiche = [imgp] + [im]. */
+    private class Brut(val g: Int, val cmd: String, val t: String, val y: Int, val tmdb: Int, val imgp: String, val im: String, val c: String)
+
+    /** Forme courte « ~id~ext » du format compact → commande Stalker complète. */
+    private fun deplier(c: String): String {
+        if (!c.startsWith("~")) return c
+        val p = c.substring(1).split('~')
+        return cmdStandard(p[0], p.getOrElse(1) { "mkv" })
+    }
+
+    private fun <T> ensemble(l: List<T>): Set<T> = when (l.size) {
+        0 -> emptySet(); 1 -> java.util.Collections.singleton(l[0]); else -> l.toSet()
+    }
 
     /** Commande Stalker standard d'un film, identique octet pour octet à celle du portail
      *  (vérifié par compacter_ola_vod.py sur tout le catalogue avant publication). */
@@ -205,16 +228,13 @@ object OlaVod {
                             val ci = jr.nextInt()
                             while (jr.hasNext()) jr.skipValue()
                             jr.endArray()
-                            val cmd = if (cc.startsWith("~")) {
-                                val p = cc.substring(1).split('~')
-                                cmdStandard(p[0], p.getOrElse(1) { "mkv" })
-                            } else cc
-                            val img = when {
-                                im.isEmpty() -> ""
-                                im.startsWith("!") -> im.substring(1)
-                                else -> imgp + im
+                            // Forme courte « ~id~ext » GARDÉE telle quelle (dépliée à la lecture).
+                            val (p, i2) = when {
+                                im.isEmpty() -> "" to ""
+                                im.startsWith("!") -> "" to im.substring(1)
+                                else -> imgp to im
                             }
-                            if (g >= 0 && cmd.isNotBlank() && t.isNotBlank()) bruts += Brut(g, cmd, t, y, tmdb, img, cats.getOrElse(ci) { "" })
+                            if (g >= 0 && cc.isNotBlank() && t.isNotBlank()) bruts += Brut(g, cc, t, y, tmdb, p, i2, cats.getOrElse(ci) { "" })
                             continue
                         }
                         var g = -1; var cmd = ""; var t = ""; var y = 0; var tmdb = 0; var img = ""; var c = ""
@@ -232,7 +252,7 @@ object OlaVod {
                             }
                         }
                         jr.endObject()
-                        if (g >= 0 && cmd.isNotBlank() && t.isNotBlank()) bruts += Brut(g, cmd, t, y, tmdb, img, c)
+                        if (g >= 0 && cmd.isNotBlank() && t.isNotBlank()) bruts += Brut(g, cmd, t, y, tmdb, "", img, c)
                     }
                     jr.endArray()
                 }
@@ -254,7 +274,7 @@ object OlaVod {
                             }
                         }
                         jr.endObject()
-                        if (g >= 0 && sid.isNotBlank() && t.isNotBlank()) sbruts += Brut(g, sid, t, y, tmdb, img, c)
+                        if (g >= 0 && sid.isNotBlank() && t.isNotBlank()) sbruts += Brut(g, sid, t, y, tmdb, "", img, c)
                     }
                     jr.endArray()
                 }
@@ -270,12 +290,13 @@ object OlaVod {
             sParCle.getOrPut(cle) { ArrayList(2) } += b
         }
         val series = sParCle.map { (cle, liste) ->
-            val ref = liste.firstOrNull { it.img.isNotBlank() } ?: liste.first()
+            val ref = liste.firstOrNull { it.im.isNotBlank() } ?: liste.first()
+            val src = liste.map { it.g to it.cmd }.distinct()
             Serie(
                 id = cle, titre = ref.t, annee = liste.maxOf { it.y }, tmdb = ref.tmdb,
-                img = ref.img.ifBlank { null },
-                cats = liste.map { categorie(it.c) }.filter { it.isNotBlank() }.toSet(),
-                sources = liste.map { it.g to it.cmd }.distinct(),
+                img = ref.im.ifBlank { null },
+                cats = ensemble(liste.map { categorie(it.c) }.filter { it.isNotBlank() }.distinct()),
+                groupesSrc = IntArray(src.size) { src[it].first }, idsSrc = Array(src.size) { src[it].second },
             )
         }
         // Un même film est servi par plusieurs catalogues : une seule tuile, plusieurs sources.
@@ -286,12 +307,13 @@ object OlaVod {
             parCle.getOrPut(cle) { ArrayList(2) } += b
         }
         val films = parCle.map { (cle, liste) ->
-            val ref = liste.firstOrNull { it.img.isNotBlank() } ?: liste.first()
+            val ref = liste.firstOrNull { it.im.isNotBlank() } ?: liste.first()
+            val src = liste.map { it.g to it.cmd }.distinct()
             Film(
                 id = cle, titre = ref.t, annee = liste.maxOf { it.y }, tmdb = ref.tmdb,
-                img = ref.img.ifBlank { null },
-                cats = liste.map { categorie(it.c) }.filter { it.isNotBlank() }.toSet(),
-                sources = liste.map { it.g to it.cmd }.distinct(),
+                imgp = ref.imgp, imRaw = ref.im.ifBlank { null },
+                cats = ensemble(liste.map { categorie(it.c) }.filter { it.isNotBlank() }.distinct()),
+                groupesSrc = IntArray(src.size) { src[it].first }, cmdsSrc = Array(src.size) { src[it].second },
             )
         }
         Log.d(TAG, "analyse : lecture ${tLu - tDebut} ms, regroupement ${System.currentTimeMillis() - tLu} ms (${bruts.size} lignes)")
@@ -328,8 +350,13 @@ object OlaVod {
         (cache?.films ?: emptyList()).filter { cat in it.cats }
             .sortedWith(compareByDescending<Film> { it.annee }.thenBy { it.titre.lowercase() })
 
-    fun filmDe(id: String): Film? = cache?.parId?.get(id)
-    fun serieDe(id: String): Serie? = cache?.seriesParId?.get(id)
+    fun filmDe(id: String): Film? = cache?.films?.firstOrNull { it.id == id }
+    fun serieDe(id: String): Serie? = cache?.series?.firstOrNull { it.id == id }
+
+    /** Repousse la libération de l'index (l'index de recherche ONYX Films pointe vers ses films). */
+    fun garderEnVie() {
+        if (cache != null && !leger) MemoireAppareil.libererPlusTard("index OLA") { alleger() }
+    }
 
     fun categoriesSeries(): List<Pair<String, Int>> {
         val idx = cache ?: return emptyList()

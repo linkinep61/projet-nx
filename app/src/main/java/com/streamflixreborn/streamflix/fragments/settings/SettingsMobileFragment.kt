@@ -189,35 +189,6 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         }
     }
 
-    private val scanResolverQrLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode != Activity.RESULT_OK) {
-            return@registerForActivityResult
-        }
-
-        val rawValue = result.data?.getStringExtra(QrScannerActivity.EXTRA_QR_VALUE).orEmpty()
-        val uri = rawValue
-            .takeIf { it.startsWith("streamflix://resolve") }
-            ?.let(Uri::parse)
-
-        if (uri == null) {
-            Toast.makeText(
-                requireContext(),
-                getString(R.string.settings_scan_resolver_invalid_qr),
-                Toast.LENGTH_SHORT
-            ).show()
-            return@registerForActivityResult
-        }
-
-        val intent = Intent(requireContext(), MainMobileActivity::class.java).apply {
-            action = Intent.ACTION_VIEW
-            data = uri
-            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }
-        startActivity(intent)
-    }
-
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         // 2026-06-09 : force le même SharedPreferences que UserPreferences
         //   (sinon mismatch storage et le toggle ne sauve pas où on lit).
@@ -704,11 +675,6 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         //   serait irréversible. Réactivation à l'unité ou en bloc.
         findPreference<Preference>("p_settings_liens_desactives")?.setOnPreferenceClickListener {
             afficherLiensDesactives()
-            true
-        }
-
-        findPreference<Preference>("p_scan_resolver_qr")?.setOnPreferenceClickListener {
-            scanResolverQrLauncher.launch(Intent(requireContext(), QrScannerActivity::class.java))
             true
         }
 
@@ -1290,6 +1256,8 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         cat.isVisible = true
         // Cache "Aucune option de fournisseur disponible" — on a 2 options.
         findPreference<PreferenceCategory>("pc_provider_empty_state")?.isVisible = false
+        // 2026-10-28 (user) : « Chaînes masquées » pour faire revenir les chaînes masquées.
+        com.streamflixreborn.streamflix.utils.ChainesMasquees.ajouter(requireContext(), cat)
         // TF1+
         val tf1Key = "tvhub_account_tf1"
         if (findPreference<Preference>(tf1Key) == null) {

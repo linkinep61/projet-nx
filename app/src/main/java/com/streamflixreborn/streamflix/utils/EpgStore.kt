@@ -138,8 +138,16 @@ object EpgStore {
      * plusieurs jours ; on n'en garde que de quoi répondre « en cours » et « à suivre »
      * pendant une journée d'utilisation, sinon la Chromecast souffre.
      */
-    private const val AVANT_MS = 6L * 60 * 60 * 1000
-    private const val APRES_MS = 30L * 60 * 60 * 1000
+    // 2026-10-27 (photo mémoire, Oppo en lecture : le guide pesait 12,5 Mo, 1er poste de l'appli) :
+    //   l'appli n'affiche que « en cours » et « à suivre ». Une émission en cours est gardée quel
+    //   que soit son début (on filtre sur sa FIN), donc 1 h avant suffit ; après, il faut couvrir
+    //   la durée de vie du guide (FRAICHEUR_MS = 12 h) + l'émission suivante → 14 h (avant : 6 h / 30 h).
+    private const val AVANT_MS = 1L * 60 * 60 * 1000
+    private const val APRES_MS = 14L * 60 * 60 * 1000
+    /** Le résumé n'est affiché que sur quelques lignes, dans la jaquette de la chaîne en cours
+     *  (EpgJaquette, téléphone) : inutile d'en garder plus. Sur la TV il n'est jamais affiché
+     *  (HomeTvFragment n'utilise que le titre et l'horaire) → pas gardé du tout. */
+    private const val RESUME_MAX = 200
 
     data class Programme(
         val debutMs: Long,
@@ -149,6 +157,18 @@ object EpgStore {
     )
 
     @Volatile private var parChaine: Map<String, List<Programme>> = emptyMap()
+
+    /**
+     * 2026-10-27 (user : « va dans le TV Hub ou ailleurs trouver des bugs comme ça ») — photo
+     *   mémoire sur la télé : le guide des programmes (~13 Mo) restait chargé après avoir quitté le
+     *   TV Hub. Libéré à la sortie du Hub sur un appareil juste en mémoire ; il est relu depuis son
+     *   cache disque au prochain besoin (prechargerSiNecessaire).
+     */
+    fun vider() {
+        if (parChaine.isEmpty()) return
+        parChaine = emptyMap(); chargeA = 0L
+        android.util.Log.i("EpgStore", "guide des programmes libéré")
+    }
     @Volatile private var chargeA: Long = 0L
     private val verrou = Mutex()
 
@@ -254,7 +274,7 @@ object EpgStore {
                         ?: runCatching { cache.takeIf { c -> c.exists() }?.readBytes() }.getOrNull()
                 }
                 if (octets == null) { Log.w(TAG, "guide ${guide.code} indisponible (réseau et cache vides)"); continue }
-                val table = analyser(octets, guide.decalageMs)
+                val table = analyser(octets, guide.decalageMs, garderResumes = !estTv(context))
                 for ((k, liste) in table) {
                     val actuelle = fusion[k]
                     if (actuelle == null || liste.size > actuelle.size) fusion[k] = liste
@@ -392,13 +412,22 @@ object EpgStore {
      * Les `<channel>` et les `<programme>` sont collectés séparément puis rapprochés à la
      * fin, pour ne dépendre d'aucun ordre d'apparition dans le fichier.
      */
-    private fun analyser(octets: ByteArray, decalageSourceMs: Long): Map<String, List<Programme>> {
+    private fun estTv(context: Context): Boolean = runCatching {
+        (context.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+            android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    }.getOrDefault(false)
+
+    private fun analyser(octets: ByteArray, decalageSourceMs: Long, garderResumes: Boolean = true): Map<String, List<Programme>> {
         val maintenant = System.currentTimeMillis()
         val borneBasse = maintenant - AVANT_MS
         val borneHaute = maintenant + APRES_MS
 
         val nomParId = HashMap<String, String>(700)
         val progParId = HashMap<String, MutableList<Programme>>(700)
+        // 2026-10-27 : les mêmes titres et résumés reviennent sans cesse (même émission sur
+        //   plusieurs chaînes ou plusieurs créneaux) → une seule copie de chaque texte.
+        val textes = HashMap<String, String>(4096)
+        fun unique(s: String): String = textes.getOrPut(s) { s }
 
         try {
             flux(octets).use { entree ->
@@ -464,7 +493,10 @@ object EpgStore {
                                     fin > borneBasse && debut < borneHaute
                                 ) {
                                     progParId.getOrPut(id) { ArrayList(48) }.add(
-                                        Programme(debut, fin, t, description?.takeIf { it.isNotBlank() }),
+                                        Programme(debut, fin, unique(t),
+                                            description?.takeIf { garderResumes && it.isNotBlank() }?.let {
+                                                unique(if (it.length > RESUME_MAX) it.take(RESUME_MAX).trimEnd() + "..." else it)
+                                            }),
                                     )
                                 }
                                 idProg = null; titre = null; description = null

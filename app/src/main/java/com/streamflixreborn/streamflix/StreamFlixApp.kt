@@ -206,6 +206,8 @@ class StreamFlixApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // 2026-10-26 : version de diagnostic seulement (compilée avec -Pdiag) — relevés + rapport.
+        if (BuildConfig.DIAGNOSTIC) com.streamflixreborn.streamflix.utils.Diagnostic.demarrer(this)
         // 2026-09-27 : session mobile NetMirror préparée au démarrage (≈1 min en arrière-plan,
         //   une fois toutes les ~11 h) → la 1re lecture NetMirror n'attend pas. 10 s de délai pour
         //   laisser les préférences s'initialiser et ne pas concurrencer le démarrage.

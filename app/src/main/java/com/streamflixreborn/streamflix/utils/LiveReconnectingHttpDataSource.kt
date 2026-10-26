@@ -30,6 +30,7 @@ class LiveReconnectingHttpDataSource(
 
     override fun open(dataSpec: DataSpec): Long {
         currentSpec = dataSpec
+        raccord = TsRaccord() // nouvelle ouverture demandée par le lecteur : il gère lui-même sa position
         val urlFull = dataSpec.uri.toString().lowercase()
         val urlPath = urlFull.substringBefore('?')
 
@@ -84,9 +85,18 @@ class LiveReconnectingHttpDataSource(
             urlFull.contains("plutotv.net") ||
             urlFull.contains("pluto.tv")
 
-        enableReconnect = !hasHlsMarker &&
-            urlPath.contains("/live/") &&
-            urlPath.endsWith(".ts")
+        // 2026-10-27 (user : « Auto Moto charge 10 secondes et coupe — on doit bien avoir une
+        //   mécanique pour réparer ce genre de flux ») : c'est CE wrapper, mais il ne
+        //   reconnaissait que la forme longue `/live/USER/PASS/ID.ts`. Dric4rTV (World Live, et
+        //   maintenant le dossier Sport) donne la forme COURTE `http://hôte:PORT/USER/PASS/ID`,
+        //   sans /live/ ni extension — même flux TS continu, que le panel coupe toutes les
+        //   ~10 s. Mesuré sur la TV : STATE_ENDED toutes les 10-13 s, puis rechargement complet
+        //   du lecteur → coupure visible (et 403 si la reconnexion est trop rapide).
+        val estXtreamCourt = Regex("""^https?://[^/]+:\d+/[^/]+/[^/]+/\d+/?$""").matches(urlPath)
+        val aRelais = XtreamRelais.origineDe(dataSpec.uri.toString()) != null
+        enableReconnect = aRelais || (!hasHlsMarker && (
+            (urlPath.contains("/live/") && urlPath.endsWith(".ts")) || estXtreamCourt ||
+                urlPath.contains("/play/mpegts/")))
         reconnectAttempts = 0
         if (enableReconnect) {
             Log.d(TAG, "Live progressive (Xtream) detected, auto-reconnect enabled for ${dataSpec.uri}")
@@ -97,7 +107,40 @@ class LiveReconnectingHttpDataSource(
         // v64 : si Stalker play.php renvoie 456 (MAC rate-limit), désactive
         //   reconnect — sinon boucle infinie de retry qui sature le CPU.
         try {
-            return wrapped.open(dataSpec)
+            val longueur = try {
+                wrapped.open(dataSpec)
+            } catch (e: androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+                // 2026-10-27 (user : « j'ai eu une coupure ») — mesuré sur la TV : quand le lecteur
+                //   REPART DE ZÉRO (passage mini → grand lecteur, interruption, nouvel essai), il
+                //   rouvre l'adresse de son MediaItem, c.-à-d. le PREMIER jeton, périmé → 403 en
+                //   boucle (6 essais), écran noir. Adresse à jeton connue du relais → on redemande
+                //   un jeton neuf et on ouvre celui-là. Toute autre adresse : erreur rendue telle quelle.
+                val orig = if (e.responseCode in setOf(401, 403, 404, 410))
+                    XtreamRelais.origineDe(dataSpec.uri.toString()) else null
+                val neuf = orig?.let { XtreamRelais.nouveauJeton(it, dataSpec.httpRequestHeaders["User-Agent"]) }
+                    ?: throw e
+                Log.d(TAG, "Jeton périmé (HTTP ${e.responseCode}) à l'ouverture → jeton neuf")
+                try { wrapped.close() } catch (_: Exception) {}
+                val specNeuve = dataSpec.buildUpon().setUri(android.net.Uri.parse(neuf)).build()
+                currentSpec = specNeuve
+                wrapped.open(specNeuve)
+            }
+            // 2026-10-27 (user : « attention, c'est du générique, faut pas casser autre chose ») :
+            //   garde-fou sur les formes ajoutées ce jour (adresse courte, /play/mpegts/, relais).
+            //   On ne garde la reconnexion que si le serveur annonce bien un FLUX (TS / binaire) :
+            //   playlist HLS, DASH, page HTML ou JSON → comportement d'avant, EOF rendu tel quel.
+            if (enableReconnect && !(urlPath.contains("/live/") && urlPath.endsWith(".ts"))) {
+                val ct = runCatching {
+                    wrapped.responseHeaders.entries.firstOrNull { it.key.equals("Content-Type", true) }
+                        ?.value?.firstOrNull().orEmpty().lowercase()
+                }.getOrDefault("")
+                if (ct.contains("mpegurl") || ct.contains("dash") || ct.contains("html") ||
+                    ct.contains("json") || ct.contains("xml") || ct.startsWith("text/")) {
+                    Log.d(TAG, "Pas un flux continu (Content-Type=$ct) — reconnexion désactivée")
+                    enableReconnect = false
+                }
+            }
+            return longueur
         } catch (e: androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
             if (e.responseCode == 456 || e.responseCode == 401 || e.responseCode == 402 || e.responseCode == 451) {
                 Log.w(TAG, "Hard fail HTTP ${e.responseCode} on ${dataSpec.uri} — disabling reconnect to prevent CPU saturation")
@@ -107,47 +150,118 @@ class LiveReconnectingHttpDataSource(
         }
     }
 
+    /** 2026-10-27 : raccord TS après reconnexion (jette les doublons du tampon serveur, cf. TsRaccord). */
+    private var raccord = TsRaccord()
+
     override fun read(buffer: ByteArray, offset: Int, readLength: Int): Int {
-        var result = try {
+        if (readLength == 0) return 0
+        while (true) {
+            if (raccord.aSortie()) return raccord.servir(buffer, offset, readLength)
+            if (!(enableReconnect && raccord.enFiltrage())) break
+            val r = try {
+                raccord.filtrer { b, o, l -> wrapped.read(b, o, l) }
+            } catch (e: Exception) {
+                val annule = Thread.currentThread().isInterrupted ||
+                    generateSequence(e as Throwable?) { it.cause }.any {
+                        it is java.io.InterruptedIOException && it.message?.contains("interrupted", true) == true ||
+                            it is InterruptedException
+                    }
+                if (annule) throw e
+                C.RESULT_END_OF_INPUT
+            }
+            if (r == C.RESULT_END_OF_INPUT) return lireApresFin(buffer, offset, readLength)
+            if (r > 0) reconnectAttempts = 0
+        }
+        val result = lireDirect(buffer, offset, readLength)
+        if (result == C.RESULT_END_OF_INPUT) return lireApresFin(buffer, offset, readLength)
+        return result
+    }
+
+    private fun lireDirect(buffer: ByteArray, offset: Int, readLength: Int): Int {
+        val result = try {
             wrapped.read(buffer, offset, readLength)
         } catch (e: Exception) {
             // 2026-05-10 v2 : ÉLARGI à toutes les exceptions réseau (pas juste
             // HttpDataSourceException). Connection: close peut déclencher
             // SocketException, IOException, EOFException, etc. — toutes doivent
             // déclencher le reconnect sur live progressive.
+            // 2026-10-27 : « interrupted » = c'est le LECTEUR qui annule ce chargement (changement
+            //   de chaîne, passage au grand lecteur, seek). Se reconnecter là ouvrait une connexion
+            //   fantôme sur le compte Xtream (mesuré à 14:07:58 : reconnexion réussie… puis 403 en
+            //   boucle sur la reprise). On rend l'annulation telle quelle.
+            val annule = Thread.currentThread().isInterrupted ||
+                generateSequence(e as Throwable?) { it.cause }.any {
+                    it is java.io.InterruptedIOException && it.message?.contains("interrupted", true) == true ||
+                        it is InterruptedException
+                }
+            if (enableReconnect && annule) throw e
             if (enableReconnect) {
                 Log.d(TAG, "Read exception (${e.javaClass.simpleName}) on live URL → treating as EOF for reconnect: ${e.message}")
                 C.RESULT_END_OF_INPUT
             } else throw e
         }
+        if (result > 0 && enableReconnect) {
+            raccord.observer(buffer, offset, result)
+            reconnectAttempts = 0
+        }
+        return result
+    }
 
-        if (result == C.RESULT_END_OF_INPUT && enableReconnect && reconnectAttempts < MAX_RECONNECTS) {
-            val spec = currentSpec ?: return result
+    /** Fin de flux : reconnexion (jeton neuf, raccord TS), puis lecture via [read]. */
+    private fun lireApresFin(buffer: ByteArray, offset: Int, readLength: Int): Int {
+        if (!enableReconnect || reconnectAttempts >= MAX_RECONNECTS) return C.RESULT_END_OF_INPUT
+        run {
+            val spec = currentSpec ?: return C.RESULT_END_OF_INPUT
             reconnectAttempts++
             try {
                 Log.d(TAG, "EOF on live URL — reconnecting (attempt #$reconnectAttempts)")
                 try { wrapped.close() } catch (_: Exception) {}
                 // Nouvelle requête sur la même URL — le serveur ouvre une nouvelle session.
                 // Pas de Range header — on veut le live edge frais.
+                // 2026-10-27 : adresse à jeton Xtream (/play/mpegts/<jeton>) → le jeton ne
+                //   resservira pas (403). On en redemande un neuf à l'adresse d'origine.
+                val uriFraiche = XtreamRelais.origineDe(spec.uri.toString())?.let { orig ->
+                    val ua = spec.httpRequestHeaders["User-Agent"]
+                    XtreamRelais.nouveauJeton(orig, ua)?.also { Log.d(TAG, "Jeton Xtream neuf obtenu pour la reconnexion") }
+                }?.let { android.net.Uri.parse(it) } ?: spec.uri
                 val freshSpec = DataSpec.Builder()
-                    .setUri(spec.uri)
+                    .setUri(uriFraiche)
                     .setHttpRequestHeaders(spec.httpRequestHeaders)
                     .setHttpMethod(DataSpec.HTTP_METHOD_GET)
                     .build()
-                wrapped.open(freshSpec)
-                // Retry the read with the fresh connection.
-                result = wrapped.read(buffer, offset, readLength)
-                if (result > 0) {
-                    Log.d(TAG, "Reconnect success — read $result bytes")
-                    reconnectAttempts = 0
+                // 2026-10-27 : le panel peut refuser une reconnexion IMMÉDIATE (HTTP 403 : l'ancienne
+                //   connexion du compte est encore comptée quelques instants). On réessaie 4 fois en
+                //   espaçant (0,3 / 0,6 / 1,2 / 2,4 s) : le tampon du lecteur couvre l'attente, l'image
+                //   ne s'arrête pas.
+                var ouvert = false
+                var derniere: Exception? = null
+                for (essai in 0 until 5) {
+                    try {
+                        wrapped.open(freshSpec)
+                        ouvert = true
+                        break
+                    } catch (e: Exception) {
+                        derniere = e
+                        try { wrapped.close() } catch (_: Exception) {}
+                        if (essai == 4) break
+                        val attente = 300L shl essai
+                        Log.d(TAG, "Reconnexion refusée (${e.message?.take(60)}) — nouvel essai dans $attente ms")
+                        Thread.sleep(attente)
+                    }
                 }
+                if (!ouvert) throw derniere ?: java.io.IOException("reconnexion impossible")
+                currentSpec = freshSpec // le jeton neuf sert de base à la coupure suivante
+                Log.d(TAG, "Reconnect success — raccord TS en cours")
+                raccord.commencer()
             } catch (e: Exception) {
+                if (e is InterruptedException) throw java.io.InterruptedIOException("interrupted")
                 Log.w(TAG, "Reconnect failed: ${e.message}")
                 // Don't throw — let ExoPlayer handle EOF normally if reconnect fails.
                 return C.RESULT_END_OF_INPUT
             }
         }
-        return result
+        // Lecture sur la connexion neuve (filtrée par le raccord si des PTS étaient connus).
+        return read(buffer, offset, readLength)
     }
 
     companion object {

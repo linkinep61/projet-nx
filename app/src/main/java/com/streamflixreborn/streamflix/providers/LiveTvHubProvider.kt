@@ -398,6 +398,16 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return "https://ui-avatars.com/api/?name=$encoded&background=7C3AED&color=fff&size=128&bold=true&format=png"
     }
 
+    /** 2026-10-27 : catalogue complet des chaînes du TV Hub hors sport (et hors bannies), avec leur
+     *  catégorie — source du dossier « Chaînes TV » (cf. SportHub.accueilTv). */
+    fun chainesHubHorsSport(): List<Pair<String, TvShow>> = channels
+        .filter { it.category != "Sport" }
+        .filterNot {
+            com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.isBanned("livehub::${it.witvKey}")
+        }
+        .map { it.category to channelToTvShow(it) }
+
     private fun channelToTvShow(c: HubChannel): TvShow = TvShow(
         id = "livehub::${c.witvKey}",
         title = c.displayName,
@@ -463,7 +473,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all()
                 .joinToString(",") { it.id }
         } catch (_: Throwable) { "" }
-        return "$favSig|$otfGroup|$bannedHash|$catFilter|$replayFavSig"
+        val dossiersSig = try { com.streamflixreborn.streamflix.utils.DossiersFavorisStore.signature() } catch (_: Throwable) { "" }
+        return "$favSig|$otfGroup|$bannedHash|$catFilter|$replayFavSig|$dossiersSig"
     }
 
     fun clearHomeCache() {
@@ -472,9 +483,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
     }
 
     override suspend fun getHome(): List<Category> {
-        // 2026-10-25 : matchs du dossier Sport chargés en fond dès l'entrée dans le TV Hub, pour
-        //   que le dossier s'ouvre déjà trié (tuiles vides masquées, cf. SportHub.accueil).
-        com.streamflixreborn.streamflix.utils.SportHub.prechargerMatchs()
+        // 2026-10-27 (user : « l'ouverture du TV Hub doit être neutre pour tous les dossiers ») :
+        //   plus AUCUN préchargement du dossier Sport ici. Mesuré sur l'Oppo : il chargeait Mix FR
+        //   en entier (3 723 chaînes), les FAST, RéNéVéo et sondait damitv → +75 à +90 Mo dès
+        //   l'entrée dans le TV Hub, de quoi faire tuer l'appli sur les TV à ~500 Mo libres.
         val tHomeStart = System.currentTimeMillis()
         val favs = favoriteChannels()
         // Cache hit ? 95% des refresh tombent ici.
@@ -740,6 +752,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 sections.add(insertIdx, Category(name = "Favoris Replay", list = replayFavShows))
             }
         } catch (_: Throwable) {}
+        // 2026-10-27 (user : dossiers en favori, « sur une nouvelle ligne, pas avec les autres
+        //   favoris ») : rangée à part, juste après les favoris (chaînes puis replays).
+        try {
+            val dossiers = com.streamflixreborn.streamflix.utils.DossiersFavorisStore.cartes()
+            if (dossiers.isNotEmpty()) {
+                val apres = sections.indexOfLast {
+                    it.name.equals("Favoris", ignoreCase = true) || it.name.equals("Favoris Replay", ignoreCase = true)
+                }
+                sections.add(if (apres >= 0) apres + 1 else 0, Category(
+                    name = com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE, list = dossiers))
+            }
+        } catch (_: Throwable) {}
 
         // 2026-06-19 v35 (user "ce ne sont pas les bonnes catégories... ça
         //   devrait être tout ce qu'il y a dans le TV Hub en catégorie") :
@@ -754,7 +778,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     .BoxXtemusCategorySettings.ALL_CODE) {
                 val filtered = sections.filter {
                     it.name.equals(currentCode, ignoreCase = true) ||
-                    it.name.equals("Favoris Replay", ignoreCase = true)
+                    it.name.equals("Favoris Replay", ignoreCase = true) ||
+                    it.name == com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE
                 }
                 // Cache le résultat filtré aussi
                 cachedHome = filtered
@@ -802,6 +827,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
         val grouped = groupSectionsIntoFolders(sectionsAvecVoe).toMutableList()
         val idxDossiers = grouped.indexOfFirst { cat ->
+            cat.name != com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE &&
             (cat.list as? List<*>)?.any { it is TvShow && it.id.startsWith("livehub::folder::") } == true
         }
         if (idxDossiers >= 0) {
@@ -1128,7 +1154,10 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   BFM Play (RMC Radio, 100% Docs, 100% Crime, Top Mecanic, Exclus BFM Play) tombaient
         //   dans Autres Replays → « Replays ». Une fois rangées ici, ce sous-dossier est vide
         //   et n'est plus affiché.
-        FolderDef("bfmplay", "Replay BFM Play", Regex("^Replay (BFM TV|RMC Story|RMC Découverte|BFM Business|RMC Life|RMC Radio|100% DOCS|100% Crime|Top Mecanic|Exclus BFM Play)(\\s.*)?$", RegexOption.IGNORE_CASE)),
+        // 2026-10-27 (user : « un petit dossier Replay plein de choses, je ne sais pas d'où ça vient ») :
+        //   mesuré sur data-replay.m3u — 466 programmes BFM Play non rangés : Brut (429) et
+        //   Tech & Co (37), nouvelles chaînes de la plateforme. Ajoutées ici → « Replays » redevient vide.
+        FolderDef("bfmplay", "Replay BFM Play", Regex("^Replay (BFM TV|RMC Story|RMC Découverte|BFM Business|RMC Life|RMC Radio|100% DOCS|100% Crime|Top Mecanic|Exclus BFM Play|Brut|Tech & Co)(\\s.*)?$", RegexOption.IGNORE_CASE)),
             // 2026-09-12 (user « Option A » : un bon dossier « Mix FR » rangé) :
             //   dossier dédié pour des sources ParaTV que nx-data ne tirait pas
             //   (famille TF1+ + famille RMC/BFM, pointeurs github auto-rafraîchis).
@@ -1173,6 +1202,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   Clic sur le dossier → dialog liste les chaînes.
             // 2026-07-13 : "Généraliste" WiTV RETIRÉ du home (user "qu'est-ce qu'il fout là")
             //   → absorbé par le catch-all "autres_replay" ci-dessous.
+            // 2026-10-27 (user) : dossier « Chaînes TV » — tout le direct hors sport, par thème
+            //   (cf. SportHub.accueilTv, contenu chargé au clic). Placé AVANT Cinéma/Info/… : il capte
+            //   les sections favoris Généraliste, Cinéma, Info, Documentaire et Enfants, qui ne sont
+            //   plus des dossiers séparés (le premier motif qui correspond l'emporte). Musique reste
+            //   à part : c'est aussi le dossier des clips.
+            FolderDef(com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY_TV, "Chaînes TV",
+                Regex("^(Généraliste|Cinéma|Info|Documentaire|Enfants)$")),
             FolderDef("cinema", "Cinéma", Regex("^Cinéma$")),
             FolderDef("info", "Info", Regex("^Info$")),
             FolderDef("sport", "Sport", Regex("^Sport$")),
@@ -1232,6 +1268,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         fun isVisibleDirect(name: String): Boolean {
             if (name.equals("Favoris", ignoreCase = true)) return true
             if (name.equals("Favoris Replay", ignoreCase = true)) return true
+            if (name == com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE) return true
             if (name.startsWith("Live ")) return true
             if (name.startsWith("✕")) return true
             return false
@@ -1333,7 +1370,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY) +
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf", com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY,
+            com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY_TV) +
             // 2026-10-26 (user) : « Ciné Films » quitte le TV Hub — son contenu est dans le
             //   provider ONYX Films. Interrupteur : OnyxFilmsProvider.REMPLACE_TV_HUB.
             (if (OnyxFilmsProvider.REMPLACE_TV_HUB) emptySet() else setOf("vegetavod")) +
@@ -1377,22 +1415,42 @@ object LiveTvHubProvider : Provider, IptvProvider {
             // 2026-09-06 : dossier RénéVéo (favicon du site).
             // 2026-10-25 : la carte RénéVéo est devenue « Sport » (cf. SportHub).
             com.streamflixreborn.streamflix.utils.ReneveoTv.FOLDER_KEY to com.streamflixreborn.streamflix.utils.SportHub.LOGO,
+            // 2026-10-27 : dossier « Chaînes TV » (télévision).
+            com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY_TV to com.streamflixreborn.streamflix.utils.SportHub.LOGO_TV,
             // 2026-08-17 : dossier des fichiers perso (icone bibliotheque).
             "ma_bibliotheque" to "https://cdn-icons-png.flaticon.com/512/2991/2991108.png",
             // 2026-09-06 : carte « Ciné Films » (clap de cinéma).
             "vegetavod" to "https://cdn-icons-png.flaticon.com/512/1179/1179069.png",
+            // 2026-10-27 : carte « Autres Replays » (lecture + flèche de retour).
+            "autres_replay" to com.streamflixreborn.streamflix.utils.AutresReplaysTuiles.LOGO,
         )
         // 2026-06-27 (user "mets Rakuten TV, Sony One et Sport dans Autres Replays") :
         //   ces 3 dossiers ne s'affichent plus en haut du TV Hub ; ils deviennent
         //   des sous-dossiers du dialog "Autres Replays" (cf LiveHubFolderDialog).
         // 2026-09-06 : « Film / série » (ma_bibliotheque) y descend aussi, à la place de Ciné Films.
         val nestedInAutresReplay = setOf("sport", "rakuten_tv", "sony_one", "ma_bibliotheque")
-        val folderShows = defs.mapNotNull { def ->
-            if (def.key in nestedInAutresReplay) return@mapNotNull null
+        // 2026-10-27 (user : « moins de dossiers, mieux rangé ») : ces dossiers de direct quittent la
+        //   rangée — ils sont dans Chaînes TV → Plateformes (cf. SportHub.REDIRECTIONS_TV). Leur
+        //   contenu et leur code parental ne changent pas.
+        val dansChainesTv = setOf("stream4cf", "otf", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels")
+        // Ordre de la rangée : le direct, puis les replays, puis le reste (ordre d'origine).
+        //   2026-10-27 (user) : Musique (+ Rutube, inséré juste après) AVANT TF1+/M6+/BFM — ils
+        //   marchent sans connexion à un compte, contrairement à ces replays.
+        val ordreRangee = listOf(
+            com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY_TV,
+            com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY,
+            "francetv", "arte", "musique", "tf1plus", "m6plus", "bfmplay",
+        )
+        val folderShows = defs.sortedBy { d ->
+            ordreRangee.indexOf(d.key).let { i -> if (i < 0) ordreRangee.size else i }
+        }.mapNotNull { def ->
+            if (def.key in nestedInAutresReplay || def.key in dansChainesTv) return@mapNotNull null
             val secs = folderContents[def.key]
             val totalChans = secs?.sumOf { (it.list as? List<*>)?.size ?: 0 } ?: 0
             if (secs.isNullOrEmpty() && def.key !in alwaysShowKeys) return@mapNotNull null
-            val title = if (totalChans > 0)
+            // 2026-10-27 : pas de compteur sur Chaînes TV (ses sections captées ne sont que les favoris,
+            //   le vrai contenu — bien plus large — se charge au clic).
+            val title = if (totalChans > 0 && def.key != com.streamflixreborn.streamflix.utils.SportHub.FOLDER_KEY_TV)
                 "📁 ${def.label} ($totalChans)"
             else
                 "📁 ${def.label}"
@@ -3465,6 +3523,26 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val channelName = fastChannelNames[server.id] ?: "FAST"
             Log.w(TAG, "FAST getVideo: $channelName src=${src.take(100)}")
 
+            // 2026-10-27 (user : « le TV Hub n'a pas le réglage qu'on a fait sur World Live ») :
+            //   chaînes Xtream à adresse COURTE (Dric4rTV dans le dossier Sport :
+            //   ultimateiptv.me:8080/<user>/<pass>/<id>). Lancée telle quelle, la lecture restait
+            //   bloquée 20 s : le DNS de la box FAUSSE ultimateiptv.me (mesuré sur la TV : connexion
+            //   jamais établie, watchdog 15 s). World Live marchait parce que son résolveur passe
+            //   par notre DoH et rend l'adresse à JETON (89.248.162.217:25461/play/mpegts/…). On fait
+            //   pareil ici : jeton demandé via DoH, origine retenue par XtreamRelais → à chaque
+            //   coupure du serveur (~10 s) le lecteur redemande un jeton neuf.
+            if (com.streamflixreborn.streamflix.utils.XtreamUrl.estCourte(src)) {
+                val jeton = com.streamflixreborn.streamflix.utils.XtreamRelais.nouveauJeton(src, CHROME_UA)
+                if (jeton != null) {
+                    Log.i(TAG, "FAST Xtream : jeton obtenu via DoH pour $channelName")
+                    return Video(
+                        source = jeton, subtitles = emptyList(), type = "video/mp2t",
+                        headers = mapOf("User-Agent" to CHROME_UA),
+                    )
+                }
+                Log.w(TAG, "FAST Xtream : pas de jeton pour $channelName — adresse d'origine tentée")
+            }
+
             // ── html.bet wrapper → résolution directe ──
             if (src.contains("html.bet", ignoreCase = true)) {
                 val betIdx = src.indexOf("html.bet/?")
@@ -4107,6 +4185,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
         "https://raw.githubusercontent.com/rikital/onyxia-data/main/data-replay.m3u"
     @Volatile private var replayCacheTs: Long = 0L
     @Volatile private var replayCacheSections: List<Category> = emptyList()
+        set(v) {
+            field = v
+            // 2026-10-27 (photo mémoire sur la télé) : ~5 Mo chargés dès l'accueil, gardés même sans
+            //   jamais ouvrir le TV Hub → relâchés 5 min après le dernier chargement (appareil juste),
+            //   relus depuis le cache disque au besoin.
+            if (v.isNotEmpty()) com.streamflixreborn.streamflix.utils.MemoireAppareil
+                .libererPlusTard("sections de replay du TV Hub", 300_000L) { replayCacheSections = emptyList() }
+        }
+
+    /**
+     * 2026-10-27 (user : économiser la mémoire des télés) : on QUITTE le TV Hub → les sections de
+     *   replay (~5 Mo, rechargées à la demande) et le guide des programmes (~13 Mo) sont libérés sur
+     *   un appareil juste en mémoire. Les tables titre/adresse des programmes (replayProgram*) sont
+     *   gardées : la reprise de lecture et les favoris s'en servent.
+     */
+    fun quitter() {
+        if (!com.streamflixreborn.streamflix.utils.MemoireAppareil.juste) return
+        replayCacheSections = emptyList()
+        com.streamflixreborn.streamflix.utils.EpgStore.vider()
+        android.util.Log.i("LiveTvHub", "TV Hub quitté : sections de replay et guide libérés")
+    }
 
     /** 2026-10-17 (box Bouygues, MemDiag : TV Hub gardait ~38 Mo après une recherche de serveurs) :
      *  sur appareil très faible, on lâche le catalogue replay en RAM après la recherche. Le cache
@@ -5037,7 +5136,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                         "http-origin" -> pendingHeaders["Origin"] = v
                     }
                 }
-                pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://") || t.startsWith("brightcove://") || t.startsWith("adulttv://")) -> {
+                pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://") || t.startsWith("brightcove://") || t.startsWith("adulttv://") || t.startsWith("oxax://")) -> {
                     val ext = pendingExtinf!!
                     val url = t
                     val title = ext.substringAfterLast(",").trim()
@@ -5725,7 +5824,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 //   modeste ni multiplier les WebViews.
                 val debut = System.currentTimeMillis()
                 var ok = 0
-                srcs.chunked(4).forEach { paquet ->
+                srcs.chunked(if (com.streamflixreborn.streamflix.utils.MemoireAppareil.juste) 1 else 4).forEach { paquet -> // 2026-10-27 : 1 par 1 si mémoire juste
                     kotlinx.coroutines.coroutineScope {
                         paquet.map { src ->
                             async {

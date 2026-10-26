@@ -2,9 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 2026-10-22 : comme le manifeste principal — détection de voix (Silero, Android 7+) ;
-         le code ne la lance jamais sous Android 7 (EcouteVoix). -->
-    <uses-sdk tools:overrideLibrary="com.konovalov.vad.yamnet, com.konovalov.vad.silero, com.konovalov.vad.utils, ai.onnxruntime" />
 
 
     <uses-feature

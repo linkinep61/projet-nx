@@ -1092,7 +1092,27 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 .header("User-Agent", ua)
                 .header("Accept", "*/*")
                 .build()
-            val resp = resolveClient.newCall(req).execute()
+            var resp = resolveClient.newCall(req).execute()
+            // 2026-10-27 (user : « Auto Moto HD ne se lit pas dans World Live… ça marchait avant,
+            //   c'est au hasard ») : panel Xtream (ultimateiptv.me:8080/<user>/<pass>/<id>). Le HEAD
+            //   du résolveur générique voit bien `application/octet-stream`, mais le GET qui suit
+            //   reçoit une page HTML de 6 679 caractères : le panel limite les connexions
+            //   simultanées du compte, et la chaîne précédente (même compte) n'est pas encore
+            //   coupée au moment où on résout la suivante. Mesuré sur la TV : RMC NEWS SPORT jouait
+            //   encore quand AUTO MOTO a été résolu. → Sur une adresse Xtream, page HTML = on
+            //   laisse 1,5 s à l'ancienne connexion pour se fermer et on redemande une fois ; si
+            //   c'est encore du HTML, on garde quand même l'URL (le lecteur réessaiera) au lieu de
+            //   la vider.
+            val estXtream = Regex("""^https?://[^/]+:\d+/[^/]+/[^/]+/\d+/?$""")
+                .matches(src.substringBefore('?'))
+            if (estXtream && resp.header("Content-Type", "").orEmpty().lowercase().contains("text/html")) {
+                val apercu = runCatching { resp.peekBody(400).string() }.getOrNull().orEmpty()
+                    .replace(Regex("\\s+"), " ").take(160)
+                resp.close()
+                Log.w(TAG, "Xtream : page HTML au lieu du flux (connexion déjà prise ?) — nouvel essai dans 1,5 s. Aperçu : $apercu")
+                kotlinx.coroutines.delay(1_500L)
+                resp = resolveClient.newCall(req).execute()
+            }
             val finalUrl = resp.request.url.toString()
             val contentType = resp.header("Content-Type", "").orEmpty().lowercase()
             // 2026-09-24 (user « IPTV du web ne se lit pas ») : les serveurs Xtream servent
@@ -1104,6 +1124,11 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val body = if (fluxBinaire) "" else (resp.body?.string() ?: "")
             resp.close()
             Log.d(TAG, "Resolved $src → $finalUrl (Content-Type=$contentType, body=${body.length} chars)")
+            // 2026-10-27 : Xtream qui redirige vers une adresse à jeton (/play/mpegts/…) → on
+            //   retient l'origine pour que le lecteur redemande un jeton neuf à chaque coupure.
+            if (fluxBinaire && finalUrl != src) {
+                com.streamflixreborn.streamflix.utils.XtreamRelais.noter(src, finalUrl)
+            }
 
             // 2026-05-12 : DETECTION DECOY HTML → fail fast plutôt que de donner
             // une URL HTML à ExoPlayer qui se vautrera en UnrecognizedInputFormat
@@ -1248,7 +1273,10 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 s.contains(".m3u8") || s.contains(".mpd") || s.endsWith(".ts") ||
                     s.endsWith(".mp4") || s.endsWith(".webm")
             }
-            if (!srcLooksLikeStream && contentType.contains("text/html") && !isRss && !isDashOrHls) {
+            if (estXtream && contentType.contains("text/html")) {
+                Log.w(TAG, "Xtream : encore une page HTML après le nouvel essai — URL gardée, le lecteur tentera le flux")
+                src = finalUrl
+            } else if (!srcLooksLikeStream && contentType.contains("text/html") && !isRss && !isDashOrHls) {
                 Log.w(TAG, "Resolved to generic HTML page ($finalHost, ${body.length} chars) — not a stream, empty src to trigger fallback")
                 src = ""
             }

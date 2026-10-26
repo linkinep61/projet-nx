@@ -145,3 +145,9 @@
 -dontwarn org.codehaus.mojo.animal_sniffer.**
 -dontwarn sun.misc.Unsafe
 -dontwarn org.slf4j.impl.StaticLoggerBinder
+
+# 2026-10-27 : JNA (detecteur de voix TEN VAD)
+-keep class com.sun.jna.** { *; }
+-keep class * implements com.sun.jna.** { *; }
+-dontwarn java.awt.**
+-keep class com.streamflixreborn.streamflix.utils.TenVad** { *; }

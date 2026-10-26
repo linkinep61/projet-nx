@@ -419,9 +419,42 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
         }
     }
     private fun liberer(raison: String) {
-        if (cache == null) return
+        // 2026-10-27 : en plus du catalogue complet, les sources gardées et les deux gros index
+        //   (Ciné Films ~21 Mo, OLA ~25 Mo) — relus depuis le cache disque au besoin.
         cache = null; cacheTs = 0L
-        Log.i(TAG, "catalogue libéré ($raison)")
+        libererIndex()
+        Log.i(TAG, "catalogue et index libérés ($raison)")
+    }
+
+    private fun libererIndex() {
+        sourcesMemo = null; sourcesMemoTs = 0L
+        lignes = null
+        runCatching { com.streamflixreborn.streamflix.utils.VegetaVod.alleger() }
+        runCatching { com.streamflixreborn.streamflix.utils.OlaVod.alleger() }
+    }
+
+    /**
+     * 2026-10-27 (user : « faire redescendre la mémoire pendant la lecture », « le but c'est
+     *   d'économiser la mémoire des télés, sinon ça finit toujours par planter ») — photo mémoire
+     *   prise sur la télé pendant un film : l'index de recherche ONYX Films (~30 Mo, construit à la
+     *   1re recherche) et les index Ciné Films / OLA (~47 Mo) restaient chargés pendant toute la
+     *   lecture. Sur un appareil juste en mémoire, on les relâche dès qu'une vidéo démarre ; ils
+     *   sont relus depuis le disque à la prochaine recherche (quelques secondes).
+     */
+    fun libererPourLecture() {
+        if (!com.streamflixreborn.streamflix.utils.MemoireAppareil.juste) return
+        if (lignes == null && sourcesMemo == null) return
+        libererIndex()
+        Log.i(TAG, "lecture lancée : index de recherche et gros index libérés")
+    }
+
+    /** 2026-10-27 (user : mémoire, TV qui plantent) : on QUITTE ONYX Films pour une autre source →
+     *  tout est libéré (catalogue, accueil, sources, index) ; ~3 s pour tout relire au retour. */
+    fun quitter() {
+        cache = null; cacheTs = 0L
+        accueil = null; accueilIncomplet = null
+        libererIndex()
+        Log.i(TAG, "ONYX Films quitté : mémoire libérée")
     }
 
     /**
@@ -499,7 +532,7 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
             val k = cleRangee(rangee); totaux[k] = (totaux[k] ?: 0) + n
         }
         // Tuiles sans affiche (grises) en fin de rangée : l'accueil ne montre que les 40 premières.
-        val parAnnee = compareBy<VegetaVod.Film> { it.img.isNullOrBlank() }.thenByDescending { it.annee }.thenBy { it.titre }
+        val parAnnee = compareBy<VegetaVod.Film> { it.sansImage }.thenByDescending { it.annee }.thenBy { it.titre }
         val idxV = if (vegetaOk) VegetaVod.indexSiCharge() else null
         if (idxV != null) {
             val ordre = VegetaVod.categoriesFilms().map { it.first }
@@ -513,7 +546,7 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
             }
             val ordreS = VegetaVod.categoriesSeries().map { it.first }
             val (gs, totS) = grouper(idxV.series, { listOf(it.cat) },
-                compareBy<VegetaVod.Serie> { it.img.isNullOrBlank() }.thenByDescending { it.annee }.thenBy { it.titre }, limite)
+                compareBy<VegetaVod.Serie> { it.sansImage }.thenByDescending { it.annee }.thenBy { it.titre }, limite)
             for (cat in ordreS + (gs.keys - ordreS.toSet())) {
                 val r = "Séries · ${joli(cat)}"
                 compter(r, totS[cat] ?: 0)
@@ -534,7 +567,7 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
             val gardees = OlaVod.categories().map { it.first }
             val gardeesSet = gardees.toHashSet()   // catégories ≥ 5 films
             val (g, tot) = grouper(idxO.films, { f -> f.cats.filter { it in gardeesSet } },
-                compareBy<OlaVod.Film> { it.img.isNullOrBlank() }.thenByDescending { it.annee }.thenBy { it.titre }, limite)
+                compareBy<OlaVod.Film> { it.sansImage }.thenByDescending { it.annee }.thenBy { it.titre }, limite)
             for (cat in gardees) {
                 val r = joli(cat)
                 compter(r, tot[cat] ?: 0)
@@ -545,7 +578,7 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
             val gardeesS = OlaVod.categoriesSeries().map { it.first }
             val gardeesSSet = gardeesS.toHashSet()
             val (gs, totS) = grouper(idxO.series, { s -> s.cats.filter { it in gardeesSSet } },
-                compareBy<OlaVod.Serie> { it.img.isNullOrBlank() }.thenByDescending { it.annee }.thenBy { it.titre }, limite)
+                compareBy<OlaVod.Serie> { it.sansImage }.thenByDescending { it.annee }.thenBy { it.titre }, limite)
             for (cat in gardeesS) {
                 val r = "Séries · ${joli(cat)}"
                 compter(r, totS[cat] ?: 0)
@@ -576,11 +609,11 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
         if (sansAffiche.isNotEmpty()) {
             idxO?.parTmdb?.let { m ->
                 for ((tid, e) in sansAffiche)
-                    m[tid]?.firstOrNull { !it.img.isNullOrBlank() }?.let { e.poster = it.img }
+                    m[tid]?.firstOrNull { !it.sansImage }?.let { e.poster = it.img }
             }
             if (idxV != null && sansAffiche.values.any { it.poster.isNullOrBlank() })
                 for (f in idxV.films)
-                    if (f.tmdb > 0 && !f.img.isNullOrBlank())
+                    if (f.tmdb > 0 && !f.sansImage)
                         sansAffiche[f.tmdb]?.let { if (it.poster.isNullOrBlank()) it.poster = f.img }
         }
         // Ordre : Nouveaux films, Communauté, OTF, genres de films (les plus fournis d'abord),
@@ -656,13 +689,50 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
                 if (complet) { accueil = partiel; accueilIncomplet = null }
                 else { accueilIncomplet = partiel; accueilIncompletTs = System.currentTimeMillis() }
                 surveillerMemoire()
+                // 2026-10-27 : mode léger ou appareil < 3 Go → les gros index ne restent pas en
+                //   mémoire une fois l'accueil construit (relus au lancement d'un film, ~3 s).
+                if (complet && (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger ||
+                        com.streamflixreborn.streamflix.utils.MemoireAppareil.juste)) {
+                    libererIndex()
+                    Log.i(TAG, "mode léger / mémoire juste : index libérés après l'accueil")
+                }
                 partiel
             }
         }
     }
 
     // ─────────────────────────────────────────── recherche (index de titres léger)
-    private class Ligne(val n: String, val id: String, val titre: String, val poster: String?, val serie: Boolean, val origine: Origine)
+    // 2026-10-27 (photo mémoire Oppo : 78 852 lignes = 30 Mo) : une ligne Ciné Films / OLA ne
+    //   recopie plus l'identifiant, le titre affiché ni l'affiche — elle pointe vers le film de
+    //   l'index (déjà en mémoire) et les calcule à la demande. Seul le titre normalisé (n, la
+    //   clé de recherche) reste stocké. Les index sont gardés en vie tant que ces lignes le sont.
+    private abstract class Ligne(val n: String, val serie: Boolean, val origine: Origine) {
+        abstract val id: String
+        abstract val titre: String
+        abstract val poster: String?
+    }
+    private class LigneFixe(n: String, override val id: String, override val titre: String, override val poster: String?,
+                            serie: Boolean, origine: Origine) : Ligne(n, serie, origine)
+    private class LigneVegetaFilm(n: String, val f: VegetaVod.Film) : Ligne(n, false, Origine.VEGETA) {
+        override val id get() = P_FILM + (if (f.tmdb > 0) "t${f.tmdb}" else "n$n")
+        override val titre get() = propre(VegetaVod.titreFilm(f))
+        override val poster get() = f.img
+    }
+    private class LigneOlaFilm(n: String, val f: OlaVod.Film) : Ligne(n, false, Origine.OLA) {
+        override val id get() = P_FILM + (if (f.tmdb > 0) "t${f.tmdb}" else "n$n")
+        override val titre get() = propre(OlaVod.titreFilm(f))
+        override val poster get() = f.img
+    }
+    private class LigneVegetaSerie(n: String, val s: VegetaVod.Serie) : Ligne(n, true, Origine.VEGETA) {
+        override val id get() = P_SERIE + VegetaVod.PREFIX_SERIE + s.id
+        override val titre get() = propre(avecAnnee(s.titre, s.annee))
+        override val poster get() = s.img
+    }
+    private class LigneOlaSerie(n: String, val s: OlaVod.Serie) : Ligne(n, true, Origine.OLA) {
+        override val id get() = P_SERIE + OlaVod.PREFIX_SERIE + s.id
+        override val titre get() = propre(avecAnnee(s.titre, s.annee))
+        override val poster get() = s.img
+    }
     @Volatile private var lignes: List<Ligne>? = null
     private val verrouLignes = Mutex()
 
@@ -672,31 +742,36 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
     private fun lignesDe(s: Sources, serie: Boolean, filtre: String?): Sequence<Ligne> = sequence {
         fun ok(o: Origine) = filtre == null || groupe(o, serie).first == filtre
         if (!serie) {
-            if (ok(Origine.PERSO)) for (p in s.persoPrep) yield(Ligne(norm(p.titre), P_FILM + p.cle, p.titre, p.poster, false, Origine.PERSO))
-            if (ok(Origine.COMMU)) for (p in s.commuPrep) yield(Ligne(norm(p.titre), P_FILM + p.cle, p.titre, p.poster, false, Origine.COMMU))
+            if (ok(Origine.PERSO)) for (p in s.persoPrep) yield(LigneFixe(norm(p.titre), P_FILM + p.cle, p.titre, p.poster, false, Origine.PERSO))
+            if (ok(Origine.COMMU)) for (p in s.commuPrep) yield(LigneFixe(norm(p.titre), P_FILM + p.cle, p.titre, p.poster, false, Origine.COMMU))
             if (ok(Origine.OTF)) for (f in s.otf) { val n = norm(f.titreAffiche)
-                yield(Ligne(n, P_FILM + "n" + n, propre(f.titreAffiche), f.poster, false, Origine.OTF)) }
+                yield(LigneFixe(n, P_FILM + "n" + n, propre(f.titreAffiche), f.poster, false, Origine.OTF)) }
             if (ok(Origine.VEGETA)) VegetaVod.indexSiCharge()?.let { idx ->
-                for (f in idx.films) { val n = norm(propre(f.titre))
-                    yield(Ligne(n, P_FILM + (if (f.tmdb > 0) "t${f.tmdb}" else "n$n"), propre(VegetaVod.titreFilm(f)), f.img, false, Origine.VEGETA)) } }
+                for (f in idx.films) yield(LigneVegetaFilm(norm(propre(f.titre)), f)) }
             if (ok(Origine.OLA)) OlaVod.indexSiCharge()?.let { idx ->
-                for (f in idx.films) { val n = norm(propre(f.titre))
-                    yield(Ligne(n, P_FILM + (if (f.tmdb > 0) "t${f.tmdb}" else "n$n"), propre(OlaVod.titreFilm(f)), f.img, false, Origine.OLA)) } }
+                for (f in idx.films) yield(LigneOlaFilm(norm(propre(f.titre)), f)) }
         } else {
             if (ok(Origine.VEGETA)) VegetaVod.indexSiCharge()?.let { idx ->
-                for (se in idx.series) yield(Ligne(norm(se.titre), P_SERIE + VegetaVod.PREFIX_SERIE + se.id,
-                    propre(avecAnnee(se.titre, se.annee)), se.img, true, Origine.VEGETA)) }
+                for (se in idx.series) yield(LigneVegetaSerie(norm(se.titre), se)) }
             if (ok(Origine.OLA)) OlaVod.indexSiCharge()?.let { idx ->
-                for (se in idx.series) yield(Ligne(norm(se.titre), P_SERIE + OlaVod.PREFIX_SERIE + se.id,
-                    propre(avecAnnee(se.titre, se.annee)), se.img, true, Origine.OLA)) }
+                for (se in idx.series) yield(LigneOlaSerie(norm(se.titre), se)) }
         }
     }
 
     /** Tous les titres (~80 000), réduits à « titre normalisé → tuile » : sans sources ni
      *  rangées, bien plus léger que le catalogue complet. Construit à la 1ʳᵉ recherche. */
     private suspend fun lignesRecherche(): List<Ligne> {
-        lignes?.let { return it }
+        com.streamflixreborn.streamflix.utils.MemoireAppareil.libererPlusTard("index de recherche ONYX Films") { lignes = null }
+        lignes?.let {
+            // Les lignes pointent vers les films des index : ils vivent aussi longtemps qu'elles
+            //   (sinon un index relu pendant que les lignes gardent l'ancien = deux copies).
+            VegetaVod.garderEnVie(); OlaVod.garderEnVie()
+            return it
+        }
         return withContext(Dispatchers.Default) {
+            // PAS de MemoireAppareil.unParUn ici : chargerSources() charge lui-même les index
+            //   Ciné Films et OLA, qui prennent ce verrou (non réentrant) → blocage, puis index
+            //   incomplet (vu sur la télé : 1 853 titres au lieu de ~80 000).
             verrouLignes.withLock {
                 lignes?.let { return@withLock it }
                 val t0 = System.currentTimeMillis()

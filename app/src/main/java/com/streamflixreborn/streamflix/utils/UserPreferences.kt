@@ -506,6 +506,22 @@ object UserPreferences {
             //   Quand value=null (cold start boot), on SAUTE la lecture : null n'est
             //   pas MyIptv, donc le cleanup est inutile. Provider.providers sera chargé
             //   plus tard (1er accès home) quand le main thread est libre → zéro fige.
+            // 2026-10-27 (mémoire, TV qui plantent) : on QUITTE ONYX Films (vers une autre source OU
+            //   vers la liste des sources, value = null) → catalogues et gros index libérés (~130 Mo).
+            //   Comparaison sur le NOM enregistré : aucune source chargée pour rien.
+            try {
+                if (prefs.getString(currentProviderKey(), null) == "ONYX Films" && value?.name != "ONYX Films") {
+                    kotlin.concurrent.thread(isDaemon = true, name = "onyxfilms-release") {
+                        runCatching { com.streamflixreborn.streamflix.providers.OnyxFilmsProvider.quitter() }
+                    }
+                }
+                // 2026-10-27 : idem pour le TV Hub (sections de replay et guide des programmes).
+                if (prefs.getString(currentProviderKey(), null) == "TV Hub" && value?.name != "TV Hub") {
+                    kotlin.concurrent.thread(isDaemon = true, name = "tvhub-release") {
+                        runCatching { com.streamflixreborn.streamflix.providers.LiveTvHubProvider.quitter() }
+                    }
+                }
+            } catch (_: Throwable) {}
             if (value != null) {
                 try {
                     val previous = currentProvider
@@ -1118,12 +1134,6 @@ object UserPreferences {
         get() = Key.OPENSUBTITLES_API_KEY.getString() ?: ""
         set(value) {
             Key.OPENSUBTITLES_API_KEY.setString(value)
-        }
-
-    var bypassWsAdvertisedHost: String
-        get() = Key.BYPASS_WS_ADVERTISED_HOST.getString() ?: ""
-        set(value) {
-            Key.BYPASS_WS_ADVERTISED_HOST.setString(value.trim())
         }
 
     var hlsProxyUrl: String

@@ -154,7 +154,11 @@ object TvHubFolderLockStore {
             val separator = tail.indexOf("::")
             val key = if (separator >= 0) tail.substring(0, separator) else tail
             if (key.isBlank()) return null
-            return "folder:$key"
+            // 2026-10-27 : une tuile de Chaînes TV qui ouvre un dossier existant (Stream4Free, OTF,
+            //   Samsung TV+…) partage le verrou de ce dossier (cf. SportHub.cleVerrou).
+            // 2026-10-27 : petits dossiers de Mix FR → clé `agg:Mix FR::…` d'avant, sans « folder: ».
+            val cle = SportHub.cleVerrou(key)
+            return if (cle.startsWith("agg:")) cle else "folder:$cle"
         }
         // 2) Dossiers racine des services replay (sans ::show:: ni ::program/)
         val replayPrefix = "livehub::replay::"
@@ -230,7 +234,16 @@ object TvHubFolderLockStore {
             "sony_one" -> "Sony One"
             "autres_replay" -> "Autres Replays"
             "vavoo" -> "Vavoo"
-            else -> stripped.replaceFirstChar { it.uppercase() }
+            // 2026-10-27 : dossiers de la réorganisation du TV Hub.
+            SportHub.FOLDER_KEY_TV -> "Chaînes TV"
+            SportHub.FOLDER_KEY -> "Sport"
+            "stream4cf" -> "Stream4Free"
+            "samsung_tvplus" -> "Samsung TV+"
+            "plex_tv" -> "Plex TV"
+            "lg_channels" -> "LG Channels"
+            "rakuten_tv" -> "Rakuten TV"
+            else -> SportHub.titreSousDossier(stripped)?.replace(Regex("^[^\\p{L}\\p{N}]+"), "")
+                ?: stripped.replaceFirstChar { it.uppercase() }
         }
     }
 }

@@ -51,7 +51,11 @@ object SportAudit {
         val vus = HashSet<String>()
         for ((cle, e) in cibles) for (s in e.sources.filter { it.proprio !in IGNOREES }) {
             val estWeb = SportHub.estSourceWeb(s.proprio)
-            if (estWeb) { if (!e.live || web >= MAX_WEB) continue; web++ }
+            // 2026-10-28 (user : « il doit y avoir plein d'autres trucs comme ça à masquer ») :
+            //   ChaineDirect (WiTV) est testée en entier, sans la limite des sources web.
+            if (estWeb && s.proprio != com.streamflixreborn.streamflix.sport.providers.ChaineDirect.ID) {
+                if (!e.live || web >= MAX_WEB) continue; web++
+            }
             if (!vus.add("${s.proprio}|${s.id}")) continue // même chaîne dans deux rubriques
             val t0 = System.currentTimeMillis()
             val verdict = runCatching { tester(SportHub.idTuile(cle), e.nom, s, estWeb) }
@@ -118,6 +122,9 @@ object SportAudit {
             if (lignes.any { it.startsWith("#EXT-X-KEY") && !it.contains("METHOD=NONE") })
                 return "OK (segments chiffrés AES, manifeste valide)"
             val seg = lignes.lastOrNull { !it.startsWith("#") } ?: return "manifeste sans segment"
+            // 2026-10-28 : écran leurre de WiTV (« Ce site copie le catalogue de WiTV.eu ») = vraie
+            //   vidéo, mais playlist courte terminée dont les segments portent `notice_ts`.
+            if (seg.contains("notice_ts") || url.contains("vc=notice")) return "écran leurre WiTV"
             val r = lire(resoudre(rep.url, seg), v.headers, 4_096)
             if (r.code !in 200..299) return "HTTP ${r.code} sur segment"
             return verdictSegment(r, "HLS")

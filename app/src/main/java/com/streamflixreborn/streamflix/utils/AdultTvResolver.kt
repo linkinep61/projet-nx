@@ -26,7 +26,9 @@ object AdultTvResolver {
     private val RE_CFG = Regex("""window\.playerConfig\s*=\s*\{(.*?)\};""", RegexOption.DOT_MATCHES_ALL)
     private val RE_CHAMP = Regex("""(\w+)\s*:\s*"([^"]*)"""")
 
-    fun isAdultTvUrl(src: String): Boolean = src.startsWith(SCHEME)
+    // 2026-10-27 : les chaînes oxax:// (OxaxResolver) passent par la même route (lecture,
+    //   redemande d'un lien neuf quand il a expiré).
+    fun isAdultTvUrl(src: String): Boolean = src.startsWith(SCHEME) || OxaxResolver.isOxaxUrl(src)
 
     // 2026-10-25 (user : « les liens expirent et ne sont pas redemandés ») : le lien xlivetv est
     //   à durée limitée. Quand la lecture tombe en erreur, le lecteur réessayait le MÊME lien
@@ -61,7 +63,7 @@ object AdultTvResolver {
         }
     } catch (_: Exception) { false }
 
-    suspend fun resolve(src: String): Video? = withContext(Dispatchers.IO) {
+    suspend fun resolve(src: String): Video? = if (OxaxResolver.isOxaxUrl(src)) OxaxResolver.resolve(src) else withContext(Dispatchers.IO) {
         try {
             val slug = src.removePrefix(SCHEME).trim('/')
             val page = "$BASE/$slug/"

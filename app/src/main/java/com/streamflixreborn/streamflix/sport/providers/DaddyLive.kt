@@ -30,7 +30,12 @@ object DaddyLive {
     const val ID = "daddylive"
     private const val TAG = "SportDaddyLive"
     private val MIROIRS = listOf("https://thedaddy.pk", "https://dlhd.pk", "https://dlhd.st")
-    private val LONDRES = ZoneId.of("Europe/London")
+    // 2026-10-27 (vérifié dans le Chrome du user) : les horaires du planning sont en GMT FIXE (= UTC) —
+    //   le site les convertit lui-même avec un sélecteur « GMT +01:00 » (décalages purs, pas de fuseau
+    //   nommé) ; un utilisateur en France réglait « GMT+2 » cet été. Mesuré : data-time 11:00 affiché
+    //   12:00 sur un PC en heure de Paris (UTC+1). « Europe/London » donnait la même chose l'hiver mais
+    //   aurait avancé tous les matchs d'une heure de fin mars à fin octobre (heure d'été britannique).
+    private val LONDRES = ZoneId.of("UTC")
     /** Fenêtre montrée : commencé il y a moins de 3 h, ou commence dans moins de 12 h. */
     private const val AVANT_MS = 3 * 3600_000L
     private const val APRES_MS = 12 * 3600_000L

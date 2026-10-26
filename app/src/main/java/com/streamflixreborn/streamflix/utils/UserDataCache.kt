@@ -203,6 +203,15 @@ object UserDataCache {
         UserDataNotifier.notifyChanged()
     }
 
+    // 2026-10-28 (user : « pour retirer un favori il faut re-appuyer sur Ajouter ») : les rangées
+    //   « Films favoris / Séries TV favorites » lisent CE cache, le menu d'options lisait la base
+    //   Room seule. Quand les deux divergent, le menu proposait « Ajouter » sur un favori affiché.
+    fun estFilmFavori(context: Context, provider: Provider, id: String): Boolean =
+        runCatching { read(context, provider)?.favoritesMovies?.any { it.id == id } == true }.getOrDefault(false)
+
+    fun estSerieFavorite(context: Context, provider: Provider, id: String): Boolean =
+        runCatching { read(context, provider)?.favoritesTvShows?.any { it.id == id } == true }.getOrDefault(false)
+
     fun removeMovieFromFavorites(context: Context, provider: Provider, id: String) {
         val current = read(context, provider) ?: return
 

@@ -57,15 +57,12 @@ import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.providers.ProviderConfigUrl
 import com.streamflixreborn.streamflix.providers.ProviderPortalUrl
 import com.streamflixreborn.streamflix.providers.TmdbProvider
-import com.streamflixreborn.streamflix.utils.BypassWebSocketEndpointHelper
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
-import com.streamflixreborn.streamflix.utils.QrUtils
 import com.streamflixreborn.streamflix.utils.ThemeManager
 import com.streamflixreborn.streamflix.utils.UserDataCache
 import com.streamflixreborn.streamflix.utils.UserPreferences
-import com.streamflixreborn.streamflix.utils.WebSocketBypassTestHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1068,49 +1065,6 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                 networkSettingsCategory.title = originalTitle
             }
 
-            if (BuildConfig.DEBUG && findPreference<EditTextPreference>("BYPASS_WS_ADVERTISED_HOST") == null) {
-                val hostPreference = EditTextPreference(requireContext()).apply {
-                    key = "BYPASS_WS_ADVERTISED_HOST"
-                    title = "Bypass advertised host"
-                    dialogTitle = "Bypass advertised host"
-                    summary = if (UserPreferences.bypassWsAdvertisedHost.isBlank()) {
-                        "Auto (device IP)"
-                    } else {
-                        UserPreferences.bypassWsAdvertisedHost
-                    }
-                    text = UserPreferences.bypassWsAdvertisedHost
-                    setOnBindEditTextListener { editText ->
-                        editText.setSingleLine()
-                        editText.hint = "192.168.1.50"
-                        editText.setText(UserPreferences.bypassWsAdvertisedHost)
-                        editText.setSelection(editText.text?.length ?: 0)
-                    }
-                    setOnPreferenceChangeListener { preference, newValue ->
-                        val value = (newValue as String).trim()
-                        UserPreferences.bypassWsAdvertisedHost = value
-                        preference.summary = if (value.isBlank()) {
-                            "Auto (device IP)"
-                        } else {
-                            value
-                        }
-                        true
-                    }
-                }
-                networkSettingsCategory.addPreference(hostPreference)
-            }
-
-            if (BuildConfig.DEBUG && findPreference<Preference>("test_websocket_bypass") == null) {
-                val testPreference = Preference(requireContext()).apply {
-                    key = "test_websocket_bypass"
-                    title = "Test WebSocket bypass"
-                    summary = "Generate a QR code for the mobile resolver flow"
-                    setOnPreferenceClickListener {
-                        showWebSocketBypassTestDialog()
-                        true
-                    }
-                }
-                networkSettingsCategory.addPreference(testPreference)
-            }
         }
 
         findPreference<Preference>("key_backup_export_tv")?.setOnPreferenceClickListener {
@@ -1279,6 +1233,8 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         val cat = findPreference<PreferenceCategory>("pc_provider_settings") ?: return
         cat.isVisible = true
         findPreference<PreferenceCategory>("pc_provider_empty_state")?.isVisible = false
+        // 2026-10-28 (user) : « Chaînes masquées » pour faire revenir les chaînes masquées.
+        com.streamflixreborn.streamflix.utils.ChainesMasquees.ajouter(requireContext(), cat)
         // 2026-09-20 : entrée « Compte Bowd » RETIRÉE avec le reste de Bowd (user : « pas
         //   vraiment stable »). Elle avait été ajoutée ici le 2026-09-11 parce que relire
         //   ses identifiants évitait de les retaper à la télécommande.
@@ -2437,12 +2393,6 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             text = UserPreferences.subdlApiKey
         }
 
-        findPreference<EditTextPreference>("BYPASS_WS_ADVERTISED_HOST")?.apply {
-            val currentValue = UserPreferences.bypassWsAdvertisedHost
-            summary = if (currentValue.isBlank()) "Auto (device IP)" else currentValue
-            text = currentValue
-        }
-
         findPreference<ListPreference>("p_doh_provider_url")?.apply {
             summary = entry
         }
@@ -2470,117 +2420,6 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             "$value s"
         }
         updateParentalControlPreferenceState()
-    }
-
-    private fun showWebSocketBypassTestDialog() {
-        val defaultUrl = UserPreferences.currentProvider?.baseUrl ?: UserPreferences.cuevanaDomain.let { "https://$it" }
-        val input = EditText(requireContext()).apply {
-            setText(defaultUrl)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            setSingleLine()
-        }
-
-        AlertDialog.Builder(requireContext())
-            .setTitle("Test WebSocket bypass")
-            .setMessage("Enter the URL that the mobile resolver should open.")
-            .setView(input)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                val targetUrl = input.text?.toString()?.trim().orEmpty()
-                if (targetUrl.isBlank()) {
-                    Toast.makeText(requireContext(), "URL is required", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-
-                val session = WebSocketBypassTestHelper.createSession(targetUrl) { token ->
-                    Log.d("BypassWSTest", "Resolver completed for token=$token")
-                }
-
-                if (session == null) {
-                    Toast.makeText(requireContext(), "Unable to start local websocket server", Toast.LENGTH_LONG).show()
-                    return@setPositiveButton
-                }
-
-                showWebSocketBypassQrDialog(session.deepLink, session.wsUrl, targetUrl)
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
-    }
-
-    private fun showWebSocketBypassQrDialog(
-        deepLink: String,
-        wsUrl: String,
-        targetUrl: String,
-    ) {
-        val displayMetrics: DisplayMetrics = resources.displayMetrics
-        val density = displayMetrics.density
-        val dialogWidth = (displayMetrics.widthPixels * 0.72f).toInt()
-        val qrSize = minOf(
-            (dialogWidth - (density * 64).toInt()).coerceAtLeast((density * 240).toInt()),
-            (displayMetrics.heightPixels * 0.45f).toInt().coerceAtLeast((density * 240).toInt()),
-        )
-
-        val container = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(
-                (density * 24).toInt(),
-                (density * 16).toInt(),
-                (density * 24).toInt(),
-                (density * 12).toInt(),
-            )
-        }
-
-        val qrView = ImageView(requireContext()).apply {
-            adjustViewBounds = true
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setImageDrawable(BitmapDrawable(resources, QrUtils.generate(deepLink, qrSize)))
-        }
-
-        val instructionsView = TextView(requireContext()).apply {
-            text = buildString {
-                append("1. Open Settings on the mobile app.\n")
-                append("2. Use 'Scan Resolver QR'.\n")
-                append("3. Scan this code and complete the bypass page.\n\n")
-                append("WebSocket: ")
-                append(wsUrl)
-                append("\nTarget URL: ")
-                append(targetUrl)
-                if (BypassWebSocketEndpointHelper.isProbablyEmulator()) {
-                    append("\n\nEmulator note: set 'Bypass advertised host' to your PC LAN IP and forward TCP 8081 to the emulator.")
-                }
-            }
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            setTextColor(Color.BLACK)
-        }
-
-        container.addView(
-            qrView,
-            LinearLayout.LayoutParams(
-                qrSize,
-                qrSize,
-            )
-        )
-        container.addView(
-            instructionsView,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            )
-        )
-
-        val scrollView = ScrollView(requireContext()).apply {
-            isFillViewport = true
-            addView(container)
-        }
-
-        val dialog = AlertDialog.Builder(requireContext())
-            .setTitle("WebSocket bypass QR")
-            .setView(scrollView)
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
-
-        dialog.window?.setLayout(dialogWidth, LinearLayout.LayoutParams.WRAP_CONTENT)
     }
 
     // 2026-05-27 : dialog pour activer/désactiver + cœur par provider.

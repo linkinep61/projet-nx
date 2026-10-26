@@ -12,13 +12,13 @@ import com.streamflixreborn.streamflix.providers.NakiosProvider
 import com.streamflixreborn.streamflix.providers.PapadustreamV2Provider
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.providers.VoirDramaProvider
-import com.streamflixreborn.streamflix.providers.WebJsProvider
 import com.streamflixreborn.streamflix.providers.WebflixProvider
 import com.streamflixreborn.streamflix.providers.WiflixProvider
 import com.streamflixreborn.streamflix.providers.AdkamiProvider
 import com.streamflixreborn.streamflix.providers.IAnimeProvider
 import com.streamflixreborn.streamflix.providers.VostfreeProvider
 import com.streamflixreborn.streamflix.providers.YablomProvider
+import com.streamflixreborn.streamflix.providers.XonaflixProvider
 import com.streamflixreborn.streamflix.extractors.VideasyExtractor
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
@@ -50,6 +50,13 @@ import java.util.concurrent.ConcurrentHashMap
  *   vers le getVideo de la source d'origine (ou Extractor pour les embeds hosts).
  */
 object BackupRegistry {
+    /**
+     * 2026-10-27 (user : « en audio, je veux privilégier le japonais avant le hindi ») : langue
+     * d'origine TMDB du DERNIER titre lancé (« ja », « en »…), lue par les lecteurs pour choisir
+     * la piste audio d'un serveur VO / VOSTFR qui en propose plusieurs. null = inconnue.
+     */
+    @Volatile var langueOriginaleCourante: String? = null
+
     private const val TAG = "BackupRegistry"
     const val PREFIX = "bkreg::"
 
@@ -97,6 +104,9 @@ object BackupRegistry {
         //   n'y a rien » / « juste préciser qu'elle est surtout en VO ») : EmbedWave (lecteur
         //   web.nxsha.app), par TMDB — a par ex. WWE Raw récent.
         "EmbedWave" to "EmbedWave (surtout VO, par TMDB)",
+        // 2026-10-26 (user : « ajoute Videm, c'est un truc qu'on n'a pas ») : Videm (videm.xyz),
+        //   par TMDB — seulement ses serveurs en français.
+        "Videm" to "Videm (VF, par TMDB)",
         "Movix" to "Movix",
         "Frembed" to "Frembed",
         "Vidzy" to "Vidzy (par TMDB)",
@@ -394,77 +404,14 @@ object BackupRegistry {
         "Moviebox"
     )
 
-    // ═══════════════════════════════════════════════════════════════════════
-    //  POINT D'ENTRÉE HÉBERGÉ — backups web ajoutables SANS rebuild (2026-07-02)
-    // ═══════════════════════════════════════════════════════════════════════
-    //  (user "un point d'entrée que tu crées, on peut rajouter n'importe quoi
-    //   dedans après, sans mise à jour de l'app").
-    //  Le fichier JSON liste des backups web. À chaque entrée l'app crée un
-    //  WebJsProvider (moteur JS hébergé) interrogé comme source du registre.
-    //  Format : [{ "name":"MonBackup", "baseUrl":"https://site.tld",
-    //             "jsUrl":"https://raw.githubusercontent.com/.../monbackup.js",
-    //             "enableNativeServers":true, "tmdbPosters":false }]
-    //  → ajouter une entrée + héberger le .js = nouveau backup partout, zéro build.
-    private const val MANIFEST_URL =
-        "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/backups.json"
-    private const val MANIFEST_TTL_MS = 30 * 60 * 1000L
-    private val dynamicBackups = ConcurrentHashMap<String, WebJsProvider>()
-    // 2026-07-02 : noms des backups dynamiques interrogés par TMDB id (getSourcesByTmdb)
-    //   au lieu de par titre (searchServersByTitle). Manifeste : "byTmdb": true.
-    private val dynamicByTmdb = java.util.Collections.synchronizedSet(HashSet<String>())
-    @Volatile private var manifestLoadedAt = 0L
-    private val manifestMutex = kotlinx.coroutines.sync.Mutex()
+    // Client HTTP court (recherches anime/playlists ci-dessous). 2026-10-26 : le manifeste
+    //   de backups web hébergés (jamais appelé, fichier supprimé en juillet) a été retiré.
     private val manifestHttp by lazy {
         okhttp3.OkHttpClient.Builder()
             .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .build()
-    }
-
-    /** 2026-07-02 (bouton « refresh provider ») : purge les backups web dynamiques +
-     *  force le re-chargement du manifeste au prochain accès. */
-    fun clearDynamic() {
-        dynamicBackups.clear()
-        dynamicByTmdb.clear()
-        manifestLoadedAt = 0L
-    }
-
-    /** Charge (ou rafraîchit, TTL 30 min) le manifeste des backups web hébergés et
-     *  crée un WebJsProvider par entrée non déjà enregistrée. Silencieux sur échec. */
-    private suspend fun ensureDynamicBackups() {
-        val now = System.currentTimeMillis()
-        if (now - manifestLoadedAt < MANIFEST_TTL_MS && manifestLoadedAt != 0L) return
-        manifestMutex.lock()
-        try {
-            if (System.currentTimeMillis() - manifestLoadedAt < MANIFEST_TTL_MS && manifestLoadedAt != 0L) return
-            val body = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    manifestHttp.newCall(okhttp3.Request.Builder().url(MANIFEST_URL).build())
-                        .execute().use { if (it.isSuccessful) it.body?.string() else null }
-                } catch (_: Exception) { null }
-            } ?: run { Log.w(TAG, "manifeste backups: fetch échoué"); return }
-            val arr = try { org.json.JSONArray(body) } catch (_: Exception) { Log.w(TAG, "manifeste JSON invalide"); return }
-            val registered = Provider.providers.keys.map { it.name }.toSet()
-            var added = 0
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                val nm = o.optString("name").trim()
-                val base = o.optString("baseUrl").trim()
-                val js = o.optString("jsUrl").trim()
-                if (nm.isBlank() || base.isBlank() || js.isBlank()) continue
-                if (nm in registered || dynamicBackups.containsKey(nm)) continue
-                dynamicBackups[nm] = WebJsProvider(
-                    name = nm, baseUrl = base, jsUrl = js, logo = "", language = "fr",
-                )
-                if (o.optBoolean("byTmdb", false)) dynamicByTmdb.add(nm)
-                added++
-            }
-            manifestLoadedAt = System.currentTimeMillis()
-            Log.i(TAG, "manifeste backups chargé : ${dynamicBackups.size} backups web (+$added)")
-        } finally {
-            manifestMutex.unlock()
-        }
     }
 
     // Params de query qui portent l'IDENTITÉ d'un serveur (à GARDER pour la dédup) :
@@ -1136,6 +1083,7 @@ object BackupRegistry {
         //   (dramas asiatiques…) sur un contenu qui n'en relève pas. null = inconnue → on ne
         //   saute rien (filtre à sens unique, comme pour l'animation).
         var langueOriginale: String? = null
+        langueOriginaleCourante = null
         // 2026-08-11 — DURÉE ATTENDUE (secondes), lue sur la fiche TMDB déjà chargée juste en
         //   dessous : aucune requête supplémentaire. Sert de discriminant aux backups par
         //   TITRE qui, sans elle, ne savent pas distinguer une bande-annonce du film.
@@ -1174,6 +1122,7 @@ object BackupRegistry {
                         // Détection anime : langue originale japonaise
                         if (d.originalLanguage == "ja") isAnimeContent = true
                         langueOriginale = d.originalLanguage?.lowercase()
+                        langueOriginaleCourante = langueOriginale
                         // Confirmé PAS de l'animation : genres connus ET genre 16 (Animation) absent
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
                         // Durée du FILM (TMDB la donne en minutes) : une seule valeur, les
@@ -1199,6 +1148,7 @@ object BackupRegistry {
                         // Détection anime : langue originale japonaise
                         if (d.originalLanguage == "ja") isAnimeContent = true
                         langueOriginale = d.originalLanguage?.lowercase()
+                        langueOriginaleCourante = langueOriginale
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
                         // Durée d'un ÉPISODE. TMDB rend une LISTE parce qu'une série peut
                         //   mélanger les formats : La Quatrième Dimension déclare 25 ET 51 min.
@@ -1552,7 +1502,7 @@ object BackupRegistry {
                 saison = key.season,
                 episode = key.episode,
             )
-            if (TamponLeger.appareilTresFaible) VegetaVod.alleger()
+            if (TamponLeger.appareilTresFaible || MemoireAppareil.juste) VegetaVod.alleger()
             vegeta
         } }
         // 2026-09-26 (user : « les serveurs… leur trouver un nom différent, car ils ne sont pas au
@@ -1562,7 +1512,7 @@ object BackupRegistry {
             runCatching {
                 if (key.isMovie) OlaVod.serveursPour(resolvedTmdbId, knownTitles, key.year)
                 else OlaVod.serveursEpisodePour(resolvedTmdbId, knownTitles, key.season ?: 0, key.episode ?: 0)
-            }.getOrDefault(emptyList()).also { if (TamponLeger.appareilTresFaible) OlaVod.alleger() }
+            }.getOrDefault(emptyList()).also { if (TamponLeger.appareilTresFaible || MemoireAppareil.juste) OlaVod.alleger() }
         } }
         // 2026-09-06 (user : « un site avec des vieilles séries… juste un backup ») : Tokyvideo —
         //   Columbo, X-Files, Code Quantum, Magnum, Goldorak… + collections de films, index
@@ -1816,6 +1766,16 @@ object BackupRegistry {
                     name = "[VOSTFR]",
                     src = com.streamflixreborn.streamflix.utils.EmbedWave.lien(tmdb, key.isMovie, key.season, key.episode) + "#vostfr",
                 ))
+            } }
+
+            // ── VIDEM (videm.xyz, par TMDB, serveurs FRANÇAIS seulement) ────────────
+            // 2026-10-26 (user : « je suis partant pour que tu ajoutes Videm ») : repris de l'app
+            //   amont, qui l'utilise pour le français. La page dit elle-même quels serveurs sont
+            //   en français → aucun serveur affiché si elle n'en a pas (pas d'affichage à
+            //   l'aveugle). Simple requête HTTP (pas de page cachée) → gardé en mode léger.
+            if (!resolvedTmdbId.isNullOrBlank()) launch { emit("Videm") {
+                com.streamflixreborn.streamflix.utils.Videm.serveursFrancais(
+                    resolvedTmdbId!!, key.isMovie, key.season, key.episode)
             } }
 
             // ── KISSKH (dramas asiatiques, par titre) ───────────────────────────────
@@ -2781,6 +2741,21 @@ object BackupRegistry {
             }
             result
         } }
+        // ── Xonaflix (NATIF, par TITRE strict) — films + séries (~8 000 films / 900 séries).
+        // 2026-10-28 (diagnostic « appareils », relais) : moteur Laravel+Livewire comme
+        //   Papadustream V2 mais AUTRE site (pas un doublon). Aucun Cloudflare sur les pages
+        //   (le Turnstile ne garde que l'affichage) → 1re vague, sans délai. Serveurs : « VF »
+        //   = mp4 signé sur le CDN zen-blk (même CDN que Movix), « VOSTFR » = vidzy (extracteur
+        //   existant) ; « VF 2 » (moviez) écarté provisoirement (résolution inconnue).
+        if (key.title.length >= 2) launch { emit("Xonaflix") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = XonaflixProvider.fetchXonaflixBackup(titleTry, key.year, key.season, key.episode)
+                if (result.isNotEmpty()) break
+            }
+            result
+        } }
         // ── PapadustreamV2 (NATIF, par TITRE strict) — nouvelle version du site (films+séries).
         // 2026-07-08 : essaie tous les titres connus (alt TMDB inclus).
         // 2026-08-08 (user : « regarde … papadustream ») — BRIDE FILMS LEVÉE.
@@ -2838,6 +2813,9 @@ object BackupRegistry {
             //   create_link, en-têtes UA/Referer de la source, type MIME).
             "Mon IPTV" -> com.streamflixreborn.streamflix.providers.MyIptvProvider.getVideo(orig)
             "Papadustream V2" -> PapadustreamV2Provider.getVideo(orig)
+            // 2026-10-28 : Xonaflix — /embed/ mp4 signé résolu par le provider (lien frais
+            //   régénéré depuis la fiche si expiré) ; liens externes (vidzy) via Extractor.
+            "Xonaflix" -> XonaflixProvider.getVideo(orig)
             // 2026-08-08 : ok.ru — flux résolu À LA LECTURE (URLs liées à l'IP + `expires`).
             "ok.ru" -> com.streamflixreborn.streamflix.providers.OkRuProvider.getVideo(server)
             // 2026-08-13 : Rutube — flux résolu À LA LECTURE (m3u8 à token éphémère via
@@ -2862,15 +2840,8 @@ object BackupRegistry {
             "MoviesFree" -> com.streamflixreborn.streamflix.utils.Vidsrc.video(orig)
             "Vidnest" -> com.streamflixreborn.streamflix.extractors.VidnestExtractor().extract(orig.src.substringBefore('#'))
             "EmbedWave" -> com.streamflixreborn.streamflix.utils.EmbedWave.video(orig)
+            "Videm" -> com.streamflixreborn.streamflix.utils.Videm.video(orig)
             else -> {
-                // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
-                dynamicBackups[source]?.let { dyn ->
-                    // CDN protégé Cloudflare drinkoflix (Webflix/Nakios) : lecture via le
-                    //   cf_clearance déjà géré par NakiosProvider (STEALTH_UA + cookie).
-                    if (orig.src.contains("drinkoflix", ignoreCase = true))
-                        return NakiosProvider.getVideo(orig)
-                    return dyn.getVideo(orig)
-                }
                 // Provider générique du registre (FrenchStream, AnimeSama, Frembed…) → son
                 //   getVideo. Sinon (Coflix/Moiflix/Dramacool = leaf, hors map) → extraction
                 //   générique (embed host / page).

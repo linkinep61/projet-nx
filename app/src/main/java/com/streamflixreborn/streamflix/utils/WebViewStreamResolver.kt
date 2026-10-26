@@ -130,9 +130,13 @@ object WebViewStreamResolver {
         //   premier puis passe au suivant ; sans ça on capte le premier (mort) et la lecture tourne
         //   dans le vide. Vide par défaut → aucun changement pour les autres sources.
         hotesIgnores: List<String> = emptyList(),
+        // 2026-10-27 (ChaineDirect, Canal+ Sport 4) : playlist servie par un RELAIS sans extension
+        //   (`/player/source2/?vp=<chiffré>&vc=…`, Content-Type HLS) → motif sur l'URL COMPLÈTE.
+        //   Vide par défaut → aucun changement pour les autres sources.
+        motifsUrlFlux: List<Regex> = emptyList(),
     ): Resolved? = withContext(Dispatchers.Main) {
         withTimeoutOrNull(timeoutMs) {
-            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs, hotesIgnores)
+            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs, hotesIgnores, motifsUrlFlux)
         }
     }
 
@@ -171,6 +175,7 @@ object WebViewStreamResolver {
         abandonSiTitre: Regex? = null,
         delaiAbandonMs: Long = 12_000L,
         hotesIgnores: List<String> = emptyList(),
+        motifsUrlFlux: List<Regex> = emptyList(),
     ): Resolved? = suspendCancellableCoroutine { cont ->
         val context = StreamFlixApp.instance.applicationContext
         var resolved = false
@@ -297,7 +302,8 @@ object WebViewStreamResolver {
                 val exts = if (captureMp4) STREAM_EXTS + ".mp4" else STREAM_EXTS
                 val reqPath = try { android.net.Uri.parse(reqUrl).path ?: "" } catch (_: Throwable) { reqUrl.substringBefore("?") }
                 val isStream = exts.any { reqPath.contains(it, ignoreCase = true) } ||
-                    motifsFlux.any { reqPath.contains(it) }
+                    motifsFlux.any { reqPath.contains(it) } ||
+                    motifsUrlFlux.any { it.containsMatchIn(reqUrl) }
                 if (isStream && !POISONED_TARGET_HOSTS.any { host.contains(it) } &&
                     !hotesIgnores.any { host.contains(it, ignoreCase = true) }) {
                     android.util.Log.d(

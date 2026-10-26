@@ -173,6 +173,11 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
     private fun publier(list: List<Anime>): List<Anime> {
         catalogue = list
         catalogueIndex = list.associateBy { it.id }
+        // 2026-10-27 (photo mémoire sur la télé) : ~6 Mo gardés toute la session → relâché
+        //   10 min après le dernier chargement sur un appareil juste (relu depuis son fichier).
+        com.streamflixreborn.streamflix.utils.MemoireAppareil.libererPlusTard("catalogue FRAnime", 600_000L) {
+            catalogue = null; catalogueIndex = null
+        }
         return list
     }
 

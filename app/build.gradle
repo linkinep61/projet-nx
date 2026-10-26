@@ -40,11 +40,6 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
-            // 2026-10-23 (user : APK passé à 106 Mo) : le moteur ONNX (calage Silero) n'est
-            //   JAMAIS utilisé en 32 bits (EcouteVoix ne lance Silero que si Process.is64Bit(),
-            //   sinon YAMNet) → retiré des dossiers 32 bits : −12,6 Mo, sans effet.
-            excludes += ['lib/armeabi-v7a/libonnxruntime.so', 'lib/armeabi-v7a/libonnxruntime4j_jni.so',
-                         'lib/x86/libonnxruntime.so', 'lib/x86/libonnxruntime4j_jni.so']
         }
     }
 
@@ -62,8 +57,8 @@ android {
         //   la balance sera alors differente parce qu'il y aura quelque chose en face.
         minSdk 23
         targetSdk 35
-        versionCode 108005
-        versionName "1.8.5"
+        versionCode 108006
+        versionName "1.8.6"
 
         // ABI pilotÃ©e par la propriÃ©tÃ© ABI_TARGET (local.properties, posÃ©e par la CI).
         //   APK par dÃ©faut = ARM (armeabi-v7a + arm64-v8a).
@@ -98,6 +93,14 @@ android {
         // 2026-10-03 (user : « signaler qu'il y a eu un écrasement ») : commit compilé, fourni par
         //   GitHub Actions (vide en local). Comparé au commit du tag de la release → écrasement.
         buildConfigField "String", "BUILD_SHA", "\"${System.getenv("GITHUB_SHA") ?: ""}\""
+        // 2026-10-26 : heure de compilation (GitHub Actions seulement, 0 en local). Sur le dépôt de
+        //   distribution, le tag ne bouge pas lors d'un écrasement : ce sont les APK qui sont
+        //   remplacés → APK publié bien après notre compilation = écrasement.
+        buildConfigField "long", "BUILD_TIME", "${System.getenv("GITHUB_SHA") ? System.currentTimeMillis() : 0}L"
+        // 2026-10-26 : version de diagnostic (relevés mémoire + rapport de fermeture), seulement
+        //   avec « gradlew assembleRelease -Pdiag ». Les versions normales et GitHub : false.
+        //   (Pas de suffixe au numéro de version : l'updater le lirait comme une vieille version.)
+        buildConfigField "boolean", "DIAGNOSTIC", "${project.hasProperty('diag')}"
     }
 
     sourceSets {
@@ -139,8 +142,13 @@ android {
             //   "com.streamfr.app.debug" pour distinction claire.
             applicationIdSuffix ".debug"
             versionNameSuffix "-debug"
-            minifyEnabled false
+            // 2026-10-27 (user : « je te laisse voir tout ce que tu peux faire » pour la mémoire) :
+            //   `-Pmesure` = debug COMPACTÉE comme la release (R8), pour mesurer la mémoire réelle
+            //   des utilisateurs sans remplacer l'appli installée (paquet .debug à côté).
+            minifyEnabled project.hasProperty('mesure')
+            shrinkResources project.hasProperty('mesure')
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (project.hasProperty('mesure')) proguardFiles 'proguard-mesure.pro'
         }
         release {
             minifyEnabled true
@@ -188,11 +196,9 @@ dependencies {
 
     // 2026-10-22 : traduction automatique des sous-titres anglais → français, sur l'appareil.
     implementation 'com.google.mlkit:translate:17.0.3'
-    // 2026-10-22 : détecteur de voix Silero (recalage des sous-titres à l'écoute des voix).
-    //   WebRTC essayé d'abord : prenait la musique pour de la voix.
-    implementation 'com.github.gkonovalov.android-vad:silero:2.0.10'
-    // 2026-10-22 : YAMNet (TensorFlow Lite) pour les appareils ARM 32 bits, où Silero plante.
-    implementation 'com.github.gkonovalov.android-vad:yamnet:2.0.10'
+    // 2026-10-27 : détecteur de voix TEN VAD (libten_vad.so dans jniLibs, ~0,9 Mo), appelé par JNA.
+    //   Remplace Silero (+ ONNX Runtime) et YAMNet (+ MediaPipe) : environ -33 Mo.
+    implementation 'net.java.dev.jna:jna:5.17.0@aar'
     implementation 'androidx.media3:media3-exoplayer:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-dash:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-hls:1.8.0'

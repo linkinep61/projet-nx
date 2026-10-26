@@ -84,21 +84,67 @@ object SportProviders {
         //   de capter le flux, puis c'est le lecteur ONYX qui le lit, comme les autres sources.
         //   Pas de flux capté → serveur en échec (le lecteur passe au suivant), jamais de page.
         val origine = Regex("^https?://[^/]+").find(url)?.value ?: return null
+        // 2026-10-27 (user, Canal+ Sport 4 « ne marche pas ») : ChaineDirect sert la playlist par son
+        //   relais `/player/source2/?vp=<chiffré>&vc=…` (Content-Type HLS, sans « .m3u8 » dans
+        //   l'adresse) — vérifié dans Chrome : la chaîne joue, et le relais répond sans cookie ni
+        //   Referer. La capture ne cherchait que « .m3u8 » → rien en 20 s.
+        val relaisChaineDirect = provider == ChaineDirect.ID
+        // 2026-10-28 (user : « Ce site copie le catalogue de WiTV.eu ») : WiTV détecte la WebView
+        //   et lui sert un lecteur leurre → lecture DIRECTE d'abord (cf. ChaineDirect.fluxDirect).
+        var entree = url
+        var refererEntree = "$origine/"
+        var cadreExterne = false
+        if (relaisChaineDirect) {
+            val r = ChaineDirect.fluxDirect(url)
+            // 2026-10-28 (user : DAZN 1 France « fonctionnait tout à l'heure ») : lecteur externe thedaddy
+            //   (`stream-<n>.php`) = même numéro de chaîne que DAMITV (cf. DaddyLive.serveurs) → lu en
+            //   natif par DamiTvChaines, sans WebView.
+            val numeroDaddy = r?.takeIf { it.startsWith(ChaineDirect.PREFIXE_CADRE) }
+                ?.let { Regex("(?:thedaddy|dlhd)\\.[a-z]+/stream/stream-(\\d+)\\.php", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1) }
+            if (numeroDaddy != null) {
+                val srv = DamiTvChaines.serveur("${DamiTvChaines.PREFIX}$numeroDaddy", server.name, "WiTV")
+                val v = runCatching { DamiTvChaines.video(srv) }.onFailure { Log.w(TAG, "[$provider] thedaddy $numeroDaddy : ${it.message}") }.getOrNull()
+                if (v != null) {
+                    Log.i(TAG, "[$provider] ${server.name} → thedaddy $numeroDaddy via DAMITV (natif)")
+                    return v
+                }
+            }
+            if (r == null || r.startsWith(ChaineDirect.PREFIXE_CADRE)) {
+                // Lecteur externe (thedaddy…) ou lecture directe impossible : la page witv.eu dans la
+                //   WebView, comme avant (user : « elle fonctionnait tout à l'heure »), mais la capture
+                //   IGNORE le leurre (relais source2 sans jeton `tk`) et attend le vrai flux.
+                cadreExterne = true
+            } else {
+                Log.i(TAG, "[$provider] ${server.name} → flux WiTV direct (sans WebView)")
+                return Video(source = r, headers = ChaineDirect.ENTETES_FLUX, type = "application/vnd.apple.mpegurl")
+            }
+        }
         val capte = com.streamflixreborn.streamflix.utils.WebViewStreamResolver.resolve(
-            entryUrl = url,
-            referer = "$origine/",
+            entryUrl = entree,
+            referer = refererEntree,
             timeoutMs = 20_000L,
             clickPlay = true,
             attach = true,
+            // Relais WiTV : seulement l'adresse AVEC jeton `tk` (le leurre n'en a pas) ; les .m3u8
+            //   (thedaddy…) restent captés par défaut.
+            motifsUrlFlux = if (relaisChaineDirect) listOf(Regex("/player/source2/\\?(?=[^#]*[?&]tk=)")) else emptyList(),
         ) ?: run {
             Log.w(TAG, "[$provider] ${server.name} : aucun flux capté")
+            return null
+        }
+        // 2026-10-28 (user : « pourquoi on a toujours le logo DAZN qui renvoie vers WiTV ») : dans la
+        //   WebView, WiTV sert son LEURRE (playlist sans jeton `tk`, écran « Ce site copie le catalogue
+        //   de WiTV.eu »). Plutôt échouer (serveur en rouge, le lecteur passe au suivant) que montrer ça.
+        if (relaisChaineDirect && capte.url.contains("/player/source2/") && !Regex("[?&]tk=").containsMatchIn(capte.url)) {
+            Log.w(TAG, "[$provider] ${server.name} : leurre WiTV capté (sans jeton) → écarté")
             return null
         }
         Log.i(TAG, "[$provider] ${server.name} → flux capté (${capte.url.substringBefore('?').takeLast(60)})")
         return Video(
             source = capte.url,
             headers = capte.headers,
-            type = if (capte.url.contains(".m3u8", ignoreCase = true)) "application/vnd.apple.mpegurl" else null,
+            type = if (capte.url.contains(".m3u8", ignoreCase = true) ||
+                (relaisChaineDirect && capte.url.contains("/player/source2/"))) "application/vnd.apple.mpegurl" else null,
         )
     }
 

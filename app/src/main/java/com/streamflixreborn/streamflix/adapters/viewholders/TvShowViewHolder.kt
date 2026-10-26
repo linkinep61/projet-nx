@@ -241,11 +241,22 @@ class TvShowViewHolder(
             else -> "🔒 Contrôle parental (verrouiller)"
         }
 
+        // 2026-10-27 (user) : un DOSSIER va dans sa propre rangée « Dossiers favoris »
+        //   (DossiersFavorisStore), pas avec les chaînes favorites.
+        val dossierFavori = isGenericFolder &&
+            com.streamflixreborn.streamflix.utils.DossiersFavorisStore.estFavori(tvShow.id)
         val options = listOfNotNull(
-            if (isFavorite) "★ Retirer des favoris" else "★ Ajouter aux favoris",
+            when {
+                isGenericFolder && dossierFavori -> "📁 Retirer des dossiers favoris"
+                isGenericFolder -> "📁 Ajouter aux dossiers favoris"
+                isFavorite -> "★ Retirer des favoris"
+                else -> "★ Ajouter aux favoris"
+            },
             // 2026-10-21 (user : « bannir, ça sert à rien… juste le code parental ») : pas de
             //   « Bannir » sur un dossier, seulement le contrôle parental.
-            if (isGenericFolder) null else if (isBanned) "✕ Débannir cette chaîne" else "✕ Bannir cette chaîne",
+            // 2026-10-28 (user : « bannir… on voyait encore qu'elle était là ») : « Masquer » la
+            //   fait disparaître ; elle revient par Paramètres › Chaînes masquées.
+            if (isGenericFolder) null else if (isBanned) "👁 Réafficher cette chaîne" else "🙈 Masquer cette chaîne",
             folderLockOption,
         ).toTypedArray()
 
@@ -254,6 +265,13 @@ class TvShowViewHolder(
             .setItems(options) { _, which ->
                 val label = options[which]
                 when {
+                    label.startsWith("📁") -> {
+                        val ajoute = com.streamflixreborn.streamflix.utils.DossiersFavorisStore.basculer(tvShow)
+                        Toast.makeText(context,
+                            if (ajoute) "${tvShow.title} — Ajouté aux dossiers favoris"
+                            else "${tvShow.title} — Retiré des dossiers favoris",
+                            Toast.LENGTH_SHORT).show()
+                    }
                     label.startsWith("★") -> {
                         if (isFavorite) {
                             // Retirer des 2 stores : ★ channel-fav + ❤ server-favs.
@@ -271,10 +289,18 @@ class TvShowViewHolder(
                             Toast.makeText(context, "${tvShow.title} — Ajouté aux favoris", Toast.LENGTH_SHORT).show()
                         }
                     }
-                    label.startsWith("✕") -> {
-                        val nowBanned = com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels.toggle(tvShow.id)
-                        val msg = if (nowBanned) "Bannie (cachée du catalogue)" else "Réactivée"
-                        Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
+                    label.startsWith("🙈") || label.startsWith("👁") -> {
+                        val bannis = com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels
+                        if (isBanned) {
+                            bannis.unban(tvShow.id)
+                            Toast.makeText(context, "${tvShow.title} — Réaffichée", Toast.LENGTH_SHORT).show()
+                        } else {
+                            bannis.masquer(tvShow.id, tvShow.title ?: tvShow.id)
+                            Toast.makeText(context,
+                                "🙈 ${tvShow.title} masquée — Paramètres › Chaînes masquées pour la faire revenir",
+                                Toast.LENGTH_LONG).show()
+                        }
+                        try { com.streamflixreborn.streamflix.providers.LiveTvHubProvider.clearHomeCache() } catch (_: Throwable) { }
                     }
                     label.startsWith("🔒") || label.startsWith("🔓") -> {
                         // Contrôle parental sur dossier générique du TV Hub.

@@ -48,6 +48,23 @@ object TraductionSousTitres {
         )
     }
 
+    /**
+     * 2026-10-27 (user : « libérer le moteur de traduction une fois traduit, c'est tout à fait la
+     *   bonne approche ») : le traducteur gardait son modèle chargé en mémoire après la traduction
+     *   (mesuré sur la télé : ~455 Mo pendant, ~370-410 Mo ensuite, pour un film déjà traduit et
+     *   mis en cache sur disque). Dès qu'il n'y a plus de traduction en cours dans cette langue, on
+     *   le ferme ; le modèle reste sur le disque, il sera rechargé en ~3 s au prochain film.
+     */
+    private fun liberer(langue: String) {
+        synchronized(traducteurs) {
+            if (enCours.keys.any { it.startsWith("$langue|") }) return
+            traducteurs.remove(langue)?.let { t ->
+                runCatching { t.close() }
+                Log.d(TAG, "traducteur $langue→français libéré (traduction terminée)")
+            }
+        }
+    }
+
     /** Code ISO 639-1 d'un libellé de piste (« English », « eng », « Español », « Coréen »…), ou null. */
     fun codeDepuisLibelle(libelle: String): String? {
         val l = libelle.lowercase().replace(Regex("""\(.*?\)|\[.*?]"""), "").replace("forced", "").replace("forcé", "").trim()
@@ -109,7 +126,10 @@ object TraductionSousTitres {
             portee.async {
                 try { traduire(url, entetes, langue) } catch (e: Exception) {
                     Log.w(TAG, "traduction KO : ${e.message}"); null
-                } finally { enCours.remove("$langue|$url") }
+                } finally {
+                    enCours.remove("$langue|$url")
+                    liberer(langue)
+                }
             }
         }
 

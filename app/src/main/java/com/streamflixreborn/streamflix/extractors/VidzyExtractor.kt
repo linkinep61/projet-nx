@@ -223,6 +223,36 @@ class VidzyExtractor : Extractor() {
             )
         }
 
+        // 2026-10-28 (user : « Xona VOSTFR passé rouge ») : certaines sources (Xonaflix…) donnent la
+        //   page d'ACCUEIL vidzy.org/{movie,serie}/<tmdb>/… (2,9 Ko, juste une <iframe>) au lieu du
+        //   lecteur vidzy.cc/embed-XXXX.html. Analysée telle quelle, elle n'a pas de flux → repli
+        //   WebView avec Referer/Origin vidzy.org → 403 du CDN. On suit l'iframe d'abord, comme
+        //   VidzyTmdbProvider, puis on extrait le vrai lecteur par le chemin normal.
+        if (Regex("""^https?://(?:www\.)?vidzy\.org/(?:movie|serie)/""", RegexOption.IGNORE_CASE).containsMatchIn(link)) {
+            val lecteur = withContext(Dispatchers.IO) {
+                try {
+                    val page = client.newCall(
+                        Request.Builder().url(link).header("User-Agent", UA_LECTEUR).build()
+                    ).execute().use { it.body?.string().orEmpty() }
+                    Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                        .find(page)?.groupValues?.get(1)?.trim()
+                        ?.let { s ->
+                            when {
+                                s.startsWith("http", true) -> s
+                                s.startsWith("//") -> "https:$s"
+                                s.startsWith("/") -> "https://vidzy.org$s"
+                                else -> null
+                            }
+                        }
+                } catch (e: Exception) { Log.w(TAG, "page d'accueil vidzy.org : ${e.message}"); null }
+            }
+            if (lecteur != null && lecteur != link && !lecteur.contains("vidzy.org/movie/") && !lecteur.contains("vidzy.org/serie/")) {
+                Log.i(TAG, "page d'accueil vidzy.org → lecteur ${lecteur.substringBefore("?")}")
+                return extract(lecteur)
+            }
+            Log.w(TAG, "page d'accueil vidzy.org sans lecteur exploitable → chemin habituel")
+        }
+
         Log.d(TAG, "Fetching embed page: $link")
 
         val html = withContext(Dispatchers.IO) {

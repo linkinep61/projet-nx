@@ -29,19 +29,27 @@ object InAppUpdater {
      *   toutes les mises à jour. Sur décision du user, on ne garde que celle-ci
      *   et le jeton mort a été retiré de l'app.
      *
-     * - Source unique : linkinep61/mobile-client-v2-backup — accédée SANS
-     *   authentification. Ce dépôt DOIT rester PUBLIC : s'il passe en privé,
-     *   plus aucune mise à jour n'atteint le parc, et il n'y a plus de repli.
+     * - 2026-10-26 : source principale = dépôt de DISTRIBUTION public warbix-prog/ONYX
+     *   (le workflow y copie chaque release, mêmes noms d'APK, APK remplacés à chaque
+     *   écrasement). Le dépôt de code reste en REPLI (choix du user) : si le dépôt de
+     *   distribution tombe, repasser le dépôt de code en public le temps de publier une
+     *   version qui pointe vers la nouvelle page de distribution.
      */
     private data class UpdateSource(
         val owner: String,
         val repo: String,
         val useAuth: Boolean,
+        /** true : le tag ne bouge pas à l'écrasement, on se fie à la date des APK. */
+        val distribution: Boolean = false,
     )
 
     private val UPDATE_SOURCES = listOf(
+        UpdateSource(owner = "warbix-prog", repo = "ONYX", useAuth = false, distribution = true),
         UpdateSource(owner = "linkinep61", repo = "mobile-client-v2-backup", useAuth = false),
     )
+
+    /** Marge entre notre compilation et la mise en ligne de nos propres APK (build ~15 min). */
+    private const val MARGE_PUBLICATION_MS = 45 * 60 * 1000L
 
     private data class Version(val name: String) : Comparable<Version> {
         override operator fun compareTo(other: Version): Int {
@@ -57,17 +65,28 @@ object InAppUpdater {
         }
     }
 
-    /** Tente chaque source dans l'ordre, retourne la 1ère qui répond OK. */
-    private suspend fun fetchLatestFromAnySource(): GitHub.Release? {
+    private fun versionDe(r: GitHub.Release) = Version(r.tagName.substringAfter("v"))
+
+    /** Releases d'une source, de la plus récente à la plus ancienne PAR NUMÉRO (les dates de
+     *  création du dépôt de distribution sont toutes identiques, l'ordre de l'API n'est pas fiable). */
+    private suspend fun releasesDe(source: UpdateSource): List<GitHub.Release> {
+        val list = if (source.useAuth) {
+            GitHub.Releases.getReleases(source.owner, source.repo)
+        } else {
+            GitHub.Releases.getReleasesPublic(source.owner, source.repo)
+        }
+        return list.sortedWith { a, b -> versionDe(b).compareTo(versionDe(a)) }
+    }
+
+    /** Tente chaque source dans l'ordre ; une source vide ou en erreur passe la main à la suivante. */
+    private suspend fun fetchAllWithSource(): Pair<UpdateSource, List<GitHub.Release>>? {
         for (source in UPDATE_SOURCES) {
             try {
-                val release = if (source.useAuth) {
-                    GitHub.Releases.getLatestRelease(source.owner, source.repo)
-                } else {
-                    GitHub.Releases.getLatestReleasePublic(source.owner, source.repo)
+                val list = releasesDe(source)
+                if (list.isNotEmpty()) {
+                    android.util.Log.d("InAppUpdater", "Releases fetched from ${source.owner}/${source.repo}")
+                    return source to list
                 }
-                android.util.Log.d("InAppUpdater", "Latest release fetched from ${source.owner}/${source.repo}")
-                return release
             } catch (e: Exception) {
                 android.util.Log.w("InAppUpdater", "Source ${source.owner}/${source.repo} failed: ${e.message}, trying next source...")
             }
@@ -75,22 +94,13 @@ object InAppUpdater {
         return null
     }
 
-    private suspend fun fetchAllReleasesFromAnySource(): List<GitHub.Release> {
-        for (source in UPDATE_SOURCES) {
-            try {
-                val list = if (source.useAuth) {
-                    GitHub.Releases.getReleases(source.owner, source.repo)
-                } else {
-                    GitHub.Releases.getReleasesPublic(source.owner, source.repo)
-                }
-                android.util.Log.d("InAppUpdater", "Releases fetched from ${source.owner}/${source.repo}")
-                return list
-            } catch (e: Exception) {
-                android.util.Log.w("InAppUpdater", "Source ${source.owner}/${source.repo} failed: ${e.message}, trying next source...")
-            }
-        }
-        return emptyList()
-    }
+    private suspend fun fetchLatestWithSource(): Pair<UpdateSource, GitHub.Release>? =
+        fetchAllWithSource()?.let { (source, list) -> source to list.first() }
+
+    private suspend fun fetchLatestFromAnySource(): GitHub.Release? = fetchLatestWithSource()?.second
+
+    private suspend fun fetchAllReleasesFromAnySource(): List<GitHub.Release> =
+        fetchAllWithSource()?.second ?: emptyList()
 
     suspend fun getReleaseUpdate(): GitHub.Release? {
         if (BuildConfig.DEBUG) return null
@@ -128,9 +138,20 @@ object InAppUpdater {
     suspend fun ecrasementDisponible(): VersionEnLigne? = withContext(Dispatchers.IO) {
         val notreSha = BuildConfig.BUILD_SHA
         if (BuildConfig.DEBUG || notreSha.isBlank()) return@withContext null
-        val release = fetchLatestFromAnySource() ?: return@withContext null
+        val (source, release) = fetchLatestWithSource() ?: return@withContext null
         if (Version(release.tagName.substringAfter("v")).compareTo(Version(BuildConfig.VERSION_NAME)) != 0) {
             return@withContext null   // numéro différent : c'est la mise à jour classique qui s'en charge
+        }
+        if (source.distribution) {
+            // 2026-10-26 : dépôt de distribution → le tag ne bouge pas, seuls les APK sont
+            //   remplacés. APK mis en ligne bien après notre propre compilation = écrasement.
+            val notreHeure = BuildConfig.BUILD_TIME
+            if (notreHeure <= 0L) return@withContext null
+            val asset = choisirApk(release.assets) ?: return@withContext null
+            val dateApk = lireDate(asset.updatedAt) ?: return@withContext null
+            if (dateApk <= notreHeure + MARGE_PUBLICATION_MS) return@withContext null
+            android.util.Log.i("InAppUpdater", "écrasement en ligne : ${release.tagName} (APK du ${asset.updatedAt})")
+            return@withContext VersionEnLigne(release, asset)
         }
         val (sha, dateCommit) = commitDuTag(release.tagName) ?: return@withContext null
         if (sha.equals(notreSha, ignoreCase = true)) return@withContext null
@@ -165,7 +186,8 @@ object InAppUpdater {
 
     /** Commit (sha, date) sur lequel pointe le tag, via l'API GitHub publique. */
     private fun commitDuTag(tag: String): Pair<String, Long?>? {
-        for (source in UPDATE_SOURCES) {
+        // Le tag du dépôt de distribution ne pointe pas sur le commit compilé : ignoré ici.
+        for (source in UPDATE_SOURCES.filter { !it.distribution }) {
             try {
                 val req = Request.Builder()
                     .url("https://api.github.com/repos/${source.owner}/${source.repo}/commits/$tag")

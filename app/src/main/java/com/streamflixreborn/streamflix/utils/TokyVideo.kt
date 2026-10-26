@@ -52,6 +52,9 @@ object TokyVideo {
     private val verrou = Mutex()
 
     suspend fun index(): Index? = withContext(Dispatchers.IO) {
+        // 2026-10-27 (photo mémoire sur la télé) : ~3 Mo gardés toute la session → relâché 5 min
+        //   après la dernière utilisation sur un appareil juste.
+        MemoireAppareil.libererPlusTard("index TokyVideo", 300_000L) { cache = null; cacheTs = 0L }
         val now = System.currentTimeMillis()
         cache?.let { if (now - cacheTs < TTL_MS) return@withContext it }
         verrou.withLock {

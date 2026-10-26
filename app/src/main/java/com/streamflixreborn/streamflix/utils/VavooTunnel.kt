@@ -363,7 +363,15 @@ object VavooTunnel {
                 return false
             }
             // Tri 2-niveaux : friendly d'abord, puis load croissant
-            candidates.sortWith(compareByDescending<Candidate> { it.friendly }.thenBy { it.load })
+            // 2026-10-27 (user : « s'il y en a un qui va vers l'Allemagne, tu mets l'Allemagne ») :
+            //   l'Allemagne passe AVANT les autres pays amis (VPN 1 = meilleur serveur allemand,
+            //   VPN 2 = 2e serveur allemand s'il existe, sinon le meilleur ami suivant).
+            val allemagne = setOf("germany", "deutschland", "de")
+            candidates.sortWith(
+                compareByDescending<Candidate> { it.country.trim().lowercase() in allemagne }
+                    .thenByDescending { it.friendly }
+                    .thenBy { it.load }
+            )
             // 2026-06-18 : cache pour listFreeServers() (= picker manuel).
             lastParsedPool = candidates.map { c ->
                 val cityName = c.label.substringAfter("/")

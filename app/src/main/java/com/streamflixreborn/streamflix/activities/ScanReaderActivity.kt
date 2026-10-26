@@ -568,6 +568,10 @@ class ScanReaderActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // 2026-10-27 (photo mémoire Oppo : ~45 Mo de pages encore en mémoire 1 min après la
+        //   fermeture) : liseuse fermée → pages rendues tout de suite (utile sur mini-box si on
+        //   lance une vidéo juste après).
+        if (isFinishing) runCatching { Glide.get(this).clearMemory() }
         if (radioLanceeIci && isFinishing) {
             runCatching { com.streamflixreborn.streamflix.utils.MiniPlayerController.stopAsync() }
         }

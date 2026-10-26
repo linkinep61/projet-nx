@@ -586,7 +586,7 @@
             <SeekBarPreference
                 android:key="APP_DIM"
                 android:title="Luminosité de l'application"
-                android:summary="Assombrit toute l'application (utile la nuit)"
+                android:summary="Assombrit le fond d'écran (textes et logos restent lisibles)"
                 android:max="90"
                 android:defaultValue="0"
                 app:iconSpaceReserved="false" />
@@ -632,12 +632,6 @@
             android:key="pc_network_settings"
             android:title="@string/settings_category_network_title"
             app:iconSpaceReserved="false">
-
-            <Preference
-                android:key="p_scan_resolver_qr"
-                android:title="@string/settings_scan_resolver_qr_title"
-                android:summary="@string/settings_scan_resolver_qr_summary"
-                app:iconSpaceReserved="false" />
 
             <!-- 2026-08-27 (VPN global) : etend le tunnel Shadowsocks VYPN, jusqu'ici
                  reserve au provider Vavoo, a tout le trafic de l'app (VOD comprises). -->

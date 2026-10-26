@@ -93,6 +93,17 @@ object ScansProvider : Provider {
     private val cacheListes = ConcurrentHashMap<String, Pair<Long, List<TvShow>>>()
     private const val CACHE_MS = 30 * 60 * 1000L
 
+    /** 2026-10-27 : les entrées de plus de 30 min n'étaient jamais effacées (seulement ignorées) :
+     *  à chaque ajout, on retire les périmées des quatre caches. */
+    private fun purgerCaches() {
+        val limite = System.currentTimeMillis() - CACHE_MS
+        purger(cacheListes, limite); purger(asVariantes, limite); purger(wtSeries, limite); purger(cacheFiches, limite)
+    }
+
+    private fun <V> purger(m: MutableMap<String, Pair<Long, V>>, limite: Long) {
+        m.values.removeAll { it.first < limite }
+    }
+
     /** Cartes d'une page de liste (catalogue / recherche). */
     private suspend fun liste(url: String): List<TvShow> {
         cacheListes[url]?.let { (t, l) -> if (System.currentTimeMillis() - t < CACHE_MS) return l }
@@ -110,7 +121,7 @@ object ScansProvider : Provider {
                 quality = a.selectFirst(".epxs")?.text()?.trim()?.takeIf { it.isNotBlank() },
             )
         }.distinctBy { it.id }
-        if (l.isNotEmpty()) cacheListes[url] = System.currentTimeMillis() to l
+        if (l.isNotEmpty()) { purgerCaches(); cacheListes[url] = System.currentTimeMillis() to l }
         return l
     }
 
@@ -157,7 +168,7 @@ object ScansProvider : Provider {
                 poster = img, banner = img, quality = "Anime-Sama",
             )
         }.distinctBy { it.id }
-        if (l.isNotEmpty()) cacheListes[url] = System.currentTimeMillis() to l
+        if (l.isNotEmpty()) { purgerCaches(); cacheListes[url] = System.currentTimeMillis() to l }
         return l
     }
 
@@ -280,7 +291,7 @@ object ScansProvider : Provider {
             val img = a.selectFirst("img")?.attr("src")
             TvShow(id = "$WT_PREFIX$no", title = titre, poster = img, banner = img, quality = "Webtoon")
         }.distinctBy { it.id }
-        if (l.isNotEmpty()) cacheListes[url] = System.currentTimeMillis() to l
+        if (l.isNotEmpty()) { purgerCaches(); cacheListes[url] = System.currentTimeMillis() to l }
         return l
     }
 
@@ -515,6 +526,7 @@ object ScansProvider : Provider {
             ),
         )
         val f = Fiche(tv, chapitres)
+        purgerCaches()
         cacheFiches[slug] = System.currentTimeMillis() to f
         return f
     }

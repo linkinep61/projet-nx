@@ -26,7 +26,6 @@ import androidx.navigation.navOptions
 import androidx.navigation.ui.setupWithNavController
 import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.R
-import com.streamflixreborn.streamflix.activities.tools.BypassWebViewActivity
 import com.streamflixreborn.streamflix.databinding.ActivityMainMobileBinding
 import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragment
 import com.streamflixreborn.streamflix.providers.AnimeSamaProvider
@@ -59,43 +58,16 @@ import kotlin.coroutines.resume
 class MainMobileActivity : FragmentActivity() {
 
     private companion object {
-        const val RESOLVER_TIMEOUT_MS = 12_000L
         // True the first time the JVM/process starts. Static fields survive
         // activity restarts (FLAG_ACTIVITY_NEW_TASK|CLEAR_TASK from a provider
         // click) but reset on a true cold start (process kill).
         private var isFreshProcessLaunch = true
     }
 
-    private data class ResolverPayload(
-        val url: String,
-    )
-
     private var _binding: ActivityMainMobileBinding? = null
     private val binding get() = _binding!!
 
     private val viewModel by viewModels<MainViewModel>()
-    private val resolverWebSocketClient by lazy { NetworkClient.default }
-    private val bypassWebViewLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val wsUrl = pendingWs
-            val token = pendingToken
-            val cookies =
-                result.data?.getStringExtra(BypassWebViewActivity.EXTRA_COOKIE_HEADER)?.trim()
-
-            clearResolverState()
-
-            if (result.resultCode != Activity.RESULT_OK || wsUrl.isNullOrBlank() || token.isNullOrBlank()) {
-                return@registerForActivityResult
-            }
-
-            lifecycleScope.launch {
-                sendWebSocketDone(wsUrl, token, cookies)
-                showPostBypassCloseDialog()
-            }
-        }
-
-    private var pendingWs: String? = null
-    private var pendingToken: String? = null
 
     private var updateAppDialog: UpdateAppMobileDialog? = null
 
@@ -122,6 +94,8 @@ class MainMobileActivity : FragmentActivity() {
         //   par SplashActivity : sans ce garde, l'APK mobile distribué ignorait
         //   la coupure exactement comme la version TV.
         if (com.streamflixreborn.streamflix.utils.EtatApp.garder(this)) return
+        // 2026-10-28 : animation avec le logo de l'événement en cours (Halloween, Noël…), sinon rien.
+        com.streamflixreborn.streamflix.utils.AnimationEvenement.afficherSiEvenement(this)
 
         WiflixProvider.init(this)
         AnimeSamaProvider.init(this)
@@ -439,9 +413,6 @@ class MainMobileActivity : FragmentActivity() {
             }
         })
 
-        if (savedInstanceState == null) {
-            handleIntent(intent)
-        }
     }
 
     override fun onResume() {
@@ -474,7 +445,6 @@ class MainMobileActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleIntent(intent)
     }
 
     override fun onDestroy() {
@@ -513,11 +483,6 @@ class MainMobileActivity : FragmentActivity() {
                 attendu == R.id.tv_shows && f.isResumed -> { f.ouvrirFiltres(); true }
             else -> false
         }
-    }
-
-    private fun clearResolverState() {
-        pendingWs = null
-        pendingToken = null
     }
 
     private fun showUpdateDialog(state: MainViewModel.State.SuccessCheckingUpdate) {
@@ -653,332 +618,6 @@ class MainMobileActivity : FragmentActivity() {
         }
     }
 
-    private fun closeTask() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            finishAndRemoveTask()
-        } else {
-            finishAffinity()
-        }
-    }
-
-    private suspend fun requestResolverPayload(wsUrl: String, token: String): ResolverPayload? =
-        withContext(Dispatchers.IO) {
-            withTimeoutOrNull(RESOLVER_TIMEOUT_MS) {
-                suspendCancellableCoroutine { continuation ->
-                    val request = Request.Builder()
-                        .url(wsUrl)
-                        .build()
-
-                    val socket =
-                        resolverWebSocketClient.newWebSocket(request, object : WebSocketListener() {
-                            override fun onOpen(webSocket: WebSocket, response: Response) {
-                                Log.d("ResolverWS", "Connected -> requesting URL")
-                                webSocket.send("resolve:$token")
-                            }
-
-                            override fun onMessage(webSocket: WebSocket, text: String) {
-                                when {
-                                    text.startsWith("payload:") -> {
-                                        val payload = text.substringAfter("payload:").trim()
-                                        val parsed = runCatching {
-                                            val json = JSONObject(payload)
-                                            ResolverPayload(
-                                                url = json.optString("url"),
-                                            )
-                                        }.getOrNull()
-
-                                        if (continuation.isActive) {
-                                            continuation.resume(
-                                                parsed?.takeUnless {
-                                                    it.url.isBlank() || it.url.equals("null", ignoreCase = true)
-                                                }
-                                            )
-                                        }
-                                        webSocket.close(1000, null)
-                                    }
-
-                                    text.startsWith("url:") -> {
-                                        val url = text.substringAfter("url:").trim()
-                                        if (continuation.isActive) {
-                                            continuation.resume(
-                                                url.takeUnless {
-                                                    it.isEmpty() || it.equals("null", ignoreCase = true)
-                                                }?.let { ResolverPayload(url = it) }
-                                            )
-                                        }
-                                        webSocket.close(1000, null)
-                                    }
-
-                                    text.startsWith("error:") -> {
-                                        Log.e("ResolverWS", "Resolver returned error: $text")
-                                        if (continuation.isActive) {
-                                            continuation.resume(null)
-                                        }
-                                        webSocket.close(1000, null)
-                                    }
-                                }
-                            }
-
-                            override fun onFailure(
-                                webSocket: WebSocket,
-                                t: Throwable,
-                                response: Response?,
-                            ) {
-                                if (!continuation.isActive) {
-                                    Log.d("ResolverWS", "WS resolve cancelled or timed out")
-                                    return
-                                }
-                                Log.e("ResolverWS", "WS resolve failed", t)
-                                continuation.resume(null)
-                            }
-                        })
-
-                    continuation.invokeOnCancellation {
-                        socket.cancel()
-                    }
-                }
-            }
-        }
-
-    private suspend fun sendWebSocketDone(wsUrl: String, token: String, cookies: String?) {
-        withContext(Dispatchers.IO) {
-            withTimeoutOrNull(RESOLVER_TIMEOUT_MS) {
-                suspendCancellableCoroutine { continuation ->
-                    val request = Request.Builder()
-                        .url(wsUrl)
-                        .build()
-
-                    val socket =
-                        resolverWebSocketClient.newWebSocket(request, object : WebSocketListener() {
-                            override fun onOpen(webSocket: WebSocket, response: Response) {
-                                Log.d("ResolverWS", "Connected -> sending DONE")
-                                val encodedCookies = cookies
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let {
-                                        Base64.getEncoder().encodeToString(
-                                            it.toByteArray(Charsets.UTF_8)
-                                        )
-                                    }
-                                val message = if (encodedCookies.isNullOrBlank()) {
-                                    "done:$token"
-                                } else {
-                                    "done:$token:$encodedCookies"
-                                }
-                                webSocket.send(message)
-                            }
-
-                            override fun onMessage(webSocket: WebSocket, text: String) {
-                                if (text == "ack:$token" && continuation.isActive) {
-                                    continuation.resume(Unit)
-                                    webSocket.close(1000, null)
-                                }
-                            }
-
-                            override fun onFailure(
-                                webSocket: WebSocket,
-                                t: Throwable,
-                                response: Response?,
-                            ) {
-                                if (!continuation.isActive) {
-                                    Log.d("ResolverWS", "WS done cancelled or timed out")
-                                    return
-                                }
-                                Log.e("ResolverWS", "WS failed", t)
-                                continuation.resume(Unit)
-                            }
-                        })
-
-                    continuation.invokeOnCancellation {
-                        socket.cancel()
-                    }
-                }
-            }
-        }
-    }
-
-    private fun handleIntent(intent: Intent): Boolean {
-        val data = intent.data ?: return false
-
-        if (data.scheme == "streamflix" && data.host == "resolve") {
-            val type = data.getQueryParameter("type")
-            val slug = data.getQueryParameter("slug")
-
-            // Stream4Free QR bypass via Worker D1 : le phone résout le CF (écran visible
-            // → Turnstile passe) et poste le m3u8 dans la base D1 (le TV poll le résultat).
-            // workerToken = session D1, workerApi = URL du Worker.
-            val workerToken = data.getQueryParameter("workerToken")
-            val workerApi = data.getQueryParameter("workerApi")
-            if (type == "stream4free" && !slug.isNullOrBlank() && !workerToken.isNullOrBlank()) {
-                Log.d("ResolverWS", "Stream4Free QR bypass (D1): slug=$slug workerToken=$workerToken")
-                resolveStream4FreeViaWorker(workerToken, workerApi ?: "https://streamflix-api.logami61250.workers.dev", slug)
-                return true
-            }
-
-            // Fallback ancien flow WebSocket (SerienStream, etc.)
-            val ws = data.getQueryParameter("ws") ?: return false
-            val token = data.getQueryParameter("token") ?: return false
-
-            if (type == "stream4free" && !slug.isNullOrBlank()) {
-                Log.d("ResolverWS", "Stream4Free QR bypass (WS legacy): slug=$slug ws=$ws token=$token")
-                resolveStream4Free(ws, token, slug)
-                return true
-            }
-
-            Log.d("ResolverWS", "WS: $ws")
-
-            resolve(ws, token)
-            return true
-        }
-
-        return false
-    }
-
-    private fun resolve(ws: String, token: String) {
-        pendingWs = ws
-        pendingToken = token
-
-        lifecycleScope.launch {
-            val payload = requestResolverPayload(ws, token)
-            if (payload == null) {
-                showResolverConnectionErrorDialog(ws, token)
-                return@launch
-            }
-
-            bypassWebViewLauncher.launch(
-                Intent(this@MainMobileActivity, BypassWebViewActivity::class.java)
-                    .putExtra(BypassWebViewActivity.EXTRA_URL, payload.url)
-            )
-        }
-    }
-
-    /**
-     * QR bypass Stream4Free via Worker D1 : le phone résout le CF directement
-     * (son écran visible fait passer le Turnstile), puis poste le m3u8 dans D1.
-     * La TV poll le résultat depuis le Worker.
-     */
-    private fun resolveStream4FreeViaWorker(workerToken: String, workerApi: String, slug: String) {
-        Toast.makeText(this, "Résolution Stream4Free en cours…", Toast.LENGTH_LONG).show()
-
-        lifecycleScope.launch {
-            val video = try {
-                withContext(Dispatchers.IO) {
-                    com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest
-                        .resolve("stream4cf://$slug")
-                }
-            } catch (e: Exception) {
-                Log.e("ResolverWS", "Stream4Free resolve KO: ${e.message}", e)
-                null
-            }
-
-            if (video == null) {
-                Toast.makeText(this@MainMobileActivity, "Échec résolution Stream4Free", Toast.LENGTH_SHORT).show()
-                return@launch
-            }
-
-            val m3u8Url = video.source
-            Log.d("ResolverWS", "Stream4Free résolu via D1: ${m3u8Url.take(80)}")
-
-            // Poster le résultat dans D1 via le Worker API
-            val ok = withContext(Dispatchers.IO) {
-                try {
-                    val json = org.json.JSONObject().apply {
-                        put("token", workerToken)
-                        put("m3u8Url", m3u8Url)
-                    }.toString()
-                    val req = okhttp3.Request.Builder()
-                        .url("$workerApi/cf-bypass/submit")
-                        .post(json.toByteArray(Charsets.UTF_8).toRequestBody(
-                            "application/json".toMediaType()))
-                        .build()
-                    com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest
-                        .let { /* use shared client via reflection or create one */ }
-                    okhttp3.OkHttpClient().newCall(req).execute().use { it.isSuccessful }
-                } catch (e: Exception) {
-                    Log.e("ResolverWS", "Worker submit KO: ${e.message}", e)
-                    false
-                }
-            }
-
-            Toast.makeText(
-                this@MainMobileActivity,
-                if (ok) "Stream4Free débloqué sur TV !" else "Erreur envoi au serveur",
-                Toast.LENGTH_SHORT,
-            ).show()
-        }
-    }
-
-    /**
-     * QR bypass Stream4Free (LEGACY WebSocket) : le phone résout le CF directement
-     * puis envoie le m3u8 à la TV via WebSocket.
-     */
-    private fun resolveStream4Free(ws: String, token: String, slug: String) {
-        Toast.makeText(this, "Résolution Stream4Free en cours…", Toast.LENGTH_LONG).show()
-
-        lifecycleScope.launch {
-            val video = try {
-                withContext(Dispatchers.IO) {
-                    com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest
-                        .resolve("stream4cf://$slug")
-                }
-            } catch (e: Exception) {
-                Log.e("ResolverWS", "Stream4Free resolve KO: ${e.message}", e)
-                null
-            }
-
-            if (video == null) {
-                Toast.makeText(
-                    this@MainMobileActivity,
-                    "Échec résolution Stream4Free",
-                    Toast.LENGTH_SHORT,
-                ).show()
-                return@launch
-            }
-
-            val m3u8Url = video.source
-            Log.d("ResolverWS", "Stream4Free résolu: ${m3u8Url.take(80)}")
-
-            sendWebSocketDone(ws, token, m3u8Url)
-
-            Toast.makeText(
-                this@MainMobileActivity,
-                "Stream4Free débloqué sur TV !",
-                Toast.LENGTH_SHORT,
-            ).show()
-        }
-    }
-
-    private fun showResolverConnectionErrorDialog(ws: String, token: String) {
-        if (isFinishing || isDestroyed) return
-
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(R.string.app_name)
-            .setMessage("Unable to reach the TV bypass websocket. Retry?")
-            .setPositiveButton("Retry") { _, _ ->
-                resolve(ws, token)
-            }
-            .setNegativeButton(android.R.string.cancel) { _, _ ->
-                clearResolverState()
-            }
-            .setOnCancelListener {
-                clearResolverState()
-            }
-            .show()
-    }
-
-    private fun showPostBypassCloseDialog() {
-        if (isFinishing || isDestroyed) return
-
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(R.string.app_name)
-            .setMessage("Bypass completed. Do you want to close the app?")
-            .setPositiveButton("Close app") { _, _ ->
-                closeTask()
-            }
-            .setNegativeButton("Keep open", null)
-            .setOnCancelListener(null)
-            .show()
-    }
-
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         (getCurrentFragment() as? PlayerMobileFragment)?.onUserLeaveHint()
@@ -1059,6 +698,8 @@ class MainMobileActivity : FragmentActivity() {
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        // 2026-10-28 : touches ignorées pendant l'animation d'événement (cf. AnimationEvenement).
+        if (com.streamflixreborn.streamflix.utils.AnimationEvenement.enCours) return true
         if (!toucheDoigtVue && !questionTvPosee && event.action == android.view.KeyEvent.ACTION_DOWN &&
             com.streamflixreborn.streamflix.utils.DetectionTv.estToucheTelecommande(event.keyCode) &&
             com.streamflixreborn.streamflix.utils.DetectionTv.peutProposerTv(this)

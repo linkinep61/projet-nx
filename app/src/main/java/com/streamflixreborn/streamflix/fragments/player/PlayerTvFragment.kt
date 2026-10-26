@@ -119,9 +119,6 @@ import java.io.File
 import java.io.FileOutputStream
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
-import com.streamflixreborn.streamflix.utils.BypassWebSocketServer
-import com.streamflixreborn.streamflix.utils.BypassWebSocketEndpointHelper
-import com.streamflixreborn.streamflix.utils.QrUtils
 import com.streamflixreborn.streamflix.utils.UserDataCache.toEpisode
 import com.streamflixreborn.streamflix.utils.UserDataCache.toMovie
 import kotlinx.coroutines.Dispatchers
@@ -356,12 +353,6 @@ class PlayerTvFragment : Fragment() {
         """
     }
 
-    private data class BypassSession(
-        val token: String,
-        val serverUrl: String,
-        val bypassUrl: String,
-    )
-
     /** Flag : a-t-on déjà auto-sélectionné un sous-titre OpenSubtitles ? */
     private var autoSubtitleApplied = false
     private var _binding: FragmentPlayerTvBinding? = null
@@ -557,11 +548,6 @@ class PlayerTvFragment : Fragment() {
     /** Hidden WebView on file:/// for DaddyLive WebViewDataSource (Chrome TLS + no CORS) */
     private var daddyLiveProxyWebView: WebView? = null
 
-    private var waitingForBypass = false
-    private var bypassDone = false
-    private var activeBypassSession: BypassSession? = null
-    private var qrDialog: androidx.appcompat.app.AlertDialog? = null
-    private var wsServer: BypassWebSocketServer? = null
     private var nextEpisodePrefetchTargetId: String? = null
     private var nextEpisodePrefetchJob: Job? = null
     private var nextEpisodeOverlayDismissed = false
@@ -1224,59 +1210,6 @@ class PlayerTvFragment : Fragment() {
                         Log.d("ServDiag", "FRAG reçu SuccessLoadingServers n=${state.servers.size}")
                         servers = state.servers
 
-                        val sToServer = servers.firstOrNull {
-                            isSerienStreamBypassUrl(it.id)
-                        }
-                        if (sToServer != null && !waitingForBypass && !bypassDone) {
-                            waitingForBypass = true
-
-                            val bypassUrl = buildSerienStreamBypassUrl()
-                            if (bypassUrl.isNullOrBlank()) {
-                                waitingForBypass = false
-                                Toast.makeText(
-                                    requireContext(),
-                                    "Unable to prepare TV bypass page.",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                return@collect
-                            }
-
-                            val session = BypassSession(
-                                token = UUID.randomUUID().toString(),
-                                serverUrl = sToServer.id,
-                                bypassUrl = bypassUrl,
-                            )
-                            activeBypassSession = session
-
-                            val actualPort = startWebSocketServer()
-                            if (actualPort == -1) {
-                                clearBypassSession()
-                                Toast.makeText(
-                                    requireContext(),
-                                    "Unable to start TV bypass. Please try again.",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                return@collect
-                            }
-
-                            val wsUrl = BypassWebSocketEndpointHelper.getAdvertisedWsUrl(actualPort)
-                                ?: return@collect
-
-                            val qrContent = "streamflix://resolve?ws=${Uri.encode(wsUrl)}&token=${Uri.encode(session.token)}"
-
-                            wsServer?.registerSession(
-                                session.token,
-                                JSONObject()
-                                    .put("url", session.bypassUrl)
-                                    .toString()
-                            )
-                            requireActivity().runOnUiThread {
-                                showQrDialog(qrContent)
-                                Log.d("Bypass", "Advertised WS URL: $wsUrl")
-                            }
-
-                            return@collect
-                        }
 
 
 
@@ -2146,6 +2079,11 @@ class PlayerTvFragment : Fragment() {
 
         override fun onDestroyView() {
             super.onDestroyView()
+            // 2026-10-27 (photo mémoire sur la télé) : le lecteur fermé restait en mémoire avec son
+            //   écran, retenu par ces rappels globaux (« Recaler maintenant », sous-titre suivant).
+            com.streamflixreborn.streamflix.utils.SyncSousTitres.demandeRecalage = null
+            com.streamflixreborn.streamflix.utils.SyncSousTitres.surCalageEchoue = null
+            com.streamflixreborn.streamflix.utils.EcouteVoix.oublier()
             listeExterne?.fermer(); listeExterne = null
             com.streamflixreborn.streamflix.utils.ModeLecteurExterne.oublierUneFois(args.id)
             if (redirectionScan) return   // lecteur jamais initialise (scan redirige vers la liseuse)
@@ -2233,7 +2171,6 @@ class PlayerTvFragment : Fragment() {
             binding.pvPlayer.onChannelUp = null
             binding.pvPlayer.onChannelDown = null
             nextEpisodePrefetchJob?.cancel()
-            clearBypassSession(dismissDialog = true)
             releasePlayer()
             try {
                 requireContext().unregisterReceiver(chooserReceiver)
@@ -5171,6 +5108,10 @@ class PlayerTvFragment : Fragment() {
             com.streamflixreborn.streamflix.utils.SyncSousTitres.reinitialiser()
             com.streamflixreborn.streamflix.utils.SyncSousTitres.videoCourante = video
             com.streamflixreborn.streamflix.utils.EcouteVoix.oublier()
+            // 2026-10-27 : index de recherche relâchés pendant la lecture (télés justes en mémoire).
+            kotlin.concurrent.thread(isDaemon = true, name = "index-lecture") {
+                runCatching { com.streamflixreborn.streamflix.providers.OnyxFilmsProvider.libererPourLecture() }
+            }
             dernierCalageAuto = null
             installerCalageAuto()
             binding.root.postDelayed({ if (_binding != null) installerCalageAuto() }, 1500)
@@ -5476,6 +5417,18 @@ class PlayerTvFragment : Fragment() {
                             }
                             if (isPlexPlutoVod) {
                                 setPreferredAudioLanguages("fr", "fre", "fra")
+                            } else if (!serveurVf) {
+                                // 2026-10-27 (user : « privilégier le japonais avant le hindi ») :
+                                //   serveur VO/VOSTFR à plusieurs pistes → la langue d'origine
+                                //   de l'œuvre d'abord (doublages hindi, etc. ensuite).
+                                val vo = com.streamflixreborn.streamflix.utils.BackupRegistry.langueOriginaleCourante
+                                if (vo != null) setPreferredAudioLanguages(vo) else setPreferredAudioLanguages()
+                            } else {
+                                // 2026-10-28 (user, NetMirror : « serveur VF avec l'audio anglais, obligé
+                                //   d'aller dans la liste des langues ») : serveur VF à plusieurs pistes →
+                                //   le français d'abord (sinon la piste « par défaut » du flux, souvent
+                                //   l'anglais). Une seule piste ou pas de FR : rien ne change.
+                                setPreferredAudioLanguages("fr", "fre", "fra")
                             }
                         }
                         .build()
@@ -5520,7 +5473,12 @@ class PlayerTvFragment : Fragment() {
                 //   il manquait son pendant pour DoH. L'User-Agent n'est pas perdu :
                 //   `setDefaultRequestProperties`, juste en dessous, le pose de toute façon.
                 val exigeDoh = needsDoH(video.source)
-                if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !isJa3Host && !exigeDoh) {
+                // 2026-10-29 : SendVid → téléchargement parallèle (cf. ParallelRangeDataSource).
+                if (video.source.contains("sendvid.com", ignoreCase = true)) {
+                    httpDataSource = com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default)
+                    dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
+                    Log.d("PlayerNetwork", "TV: SendVid → téléchargement parallèle (4 connexions)")
+                } else if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !isJa3Host && !exigeDoh) {
                     try {
                         val customFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
                             .setUserAgent(videoUa)
@@ -6140,6 +6098,8 @@ class PlayerTvFragment : Fragment() {
                     }
 
                     if (playbackState == Player.STATE_READY) {
+                        // 2026-10-27 : la lecture tourne → index de recherche rendus 1 min après.
+                        com.streamflixreborn.streamflix.utils.MemoireAppareil.lectureDemarree()
                         // Stream playing successfully → reset IPTV retry counter
                         // and mark this server as "known good" so we never auto-switch
                         // away from it (only retry on transient errors).
@@ -9378,6 +9338,12 @@ class PlayerTvFragment : Fragment() {
          * - everything else → DefaultHttpDataSource (system DNS, most compatible)
          */
         private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
+            // 2026-10-29 (user) : SendVid plafonne chaque connexion à ~250 Ko/s → téléchargement
+            //   sur 4 connexions en parallèle (cf. ParallelRangeDataSource).
+            if (videoUrl.contains("sendvid.com", ignoreCase = true)) {
+                Log.d("PlayerNetwork", "SendVid → téléchargement parallèle (4 connexions)")
+                return com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default)
+            }
             // 2026-08-08 (user : « ça peut sûrement être contourné ») — CDN hakunaymatata
             //   (Cloudstream / MovieBox+) : ON PASSE PAR NOTRE RÉSOLVEUR, PAS PAR CELUI DU SYSTÈME.
             //
@@ -9642,10 +9608,13 @@ class PlayerTvFragment : Fragment() {
                         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
                     else -> NetworkClient.USER_AGENT
                 }
-                CronetDataSource.Factory(cronetEngine as CronetEngine, cronetExecutor)
-                    .setUserAgent(cronetUa)
-                    .setConnectionTimeoutMs(30_000)
-                    .setReadTimeoutMs(30_000)
+                // 2026-10-27 : réparateur de flux aussi sur la voie Cronet (adresses Xtream à jeton).
+                com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(
+                    CronetDataSource.Factory(cronetEngine as CronetEngine, cronetExecutor)
+                        .setUserAgent(cronetUa)
+                        .setConnectionTimeoutMs(30_000)
+                        .setReadTimeoutMs(30_000)
+                )
             } catch (e: Exception) {
                 Log.w("PlayerNetwork", "Cronet unavailable, using fallback: ${e.message}")
                 createDefaultHttpDataSourceFactory()
@@ -9666,8 +9635,13 @@ class PlayerTvFragment : Fragment() {
             // 2026-10-04 : client partagé (companion), cf. clientDoHLecture.
             val dohClient = clientDoHLecture
             Log.d("PlayerNetwork", "Using OkHttpDataSource with Multi-DoH (cfglobalcdn resolution) + trust-all TLS")
-            return OkHttpDataSource.Factory(dohClient)
-                .setUserAgent(NetworkClient.USER_AGENT)
+            // 2026-10-27 (user : « le grand lecteur du TV Hub n'a pas le réglage de World Live ») :
+            //   cette voie (hôtes bloqués par le DNS du FAI, ex. ultimateiptv.me) n'avait PAS le
+            //   réparateur de flux → chaîne Xtream coupée toutes les ~10 s. Le wrapper laisse passer
+            //   tel quel tout ce qui n'est pas un flux TS continu.
+            return com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(
+                OkHttpDataSource.Factory(dohClient).setUserAgent(NetworkClient.USER_AGENT)
+            )
         }
 
         private fun createDefaultHttpDataSourceFactory(): HttpDataSource.Factory {
@@ -11599,231 +11573,6 @@ class PlayerTvFragment : Fragment() {
             }
         }
 
-    private fun showQrDialog(content: String) {
-        val displayMetrics: DisplayMetrics = resources.displayMetrics
-        val density = displayMetrics.density
-        val dialogWidth = (displayMetrics.widthPixels * 0.72f).toInt()
-        val qrSize = minOf(
-            (dialogWidth - (density * 64).toInt()).coerceAtLeast((density * 240).toInt()),
-            (displayMetrics.heightPixels * 0.45f).toInt().coerceAtLeast((density * 240).toInt()),
-        )
-        val bitmap = QrUtils.generate(content, qrSize) ?: return
-
-        val imageView = ImageView(requireContext()).apply {
-            setImageBitmap(bitmap)
-            setBackgroundColor(Color.WHITE)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            adjustViewBounds = true
-            isFocusable = true
-            isFocusableInTouchMode = true
-            requestFocus()
-        }
-
-        val instructionsView = TextView(requireContext()).apply {
-            text = buildString {
-                append("Solve captcha on phone")
-                if (BypassWebSocketEndpointHelper.isProbablyEmulator()) {
-                    append("\n\nEmulator note: set 'Bypass advertised host' in TV settings to your PC LAN IP and forward TCP 8081 to the emulator.")
-                }
-            }
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            setTextColor(Color.WHITE)
-        }
-
-        val container = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(
-                (density * 24).toInt(),
-                (density * 16).toInt(),
-                (density * 24).toInt(),
-                (density * 12).toInt(),
-            )
-        }
-        container.addView(
-            imageView,
-            LinearLayout.LayoutParams(qrSize, qrSize)
-        )
-        container.addView(
-            instructionsView,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            )
-        )
-
-        val scrollView = ScrollView(requireContext()).apply {
-            isFillViewport = true
-            addView(container)
-        }
-
-        qrDialog = androidx.appcompat.app.AlertDialog.Builder(requireActivity())
-            .setTitle("Scan with phone")
-            .setView(scrollView)
-            .setCancelable(true)
-            .setOnCancelListener {
-                Log.d("Bypass", "QR dialog cancelled")
-                clearBypassSession(dismissDialog = false)
-            }
-            .create()
-
-        qrDialog?.show()
-        qrDialog?.window?.setLayout(dialogWidth, LinearLayout.LayoutParams.WRAP_CONTENT)
-    }
-
-    private fun isSerienStreamBypassUrl(url: String): Boolean {
-        return runCatching {
-            Uri.parse(url).host.equals("s.to", ignoreCase = true)
-        }.getOrDefault(false)
-    }
-
-    private fun buildSerienStreamBypassUrl(): String? {
-        return null
-    }
-
-    private fun startWebSocketServer(): Int {
-        if (wsServer != null) return wsServer?.address?.port ?: 8081
-
-        val ports = listOf(8081, 8082, 8887, 0)
-        for (port in ports) {
-            val server = BypassWebSocketServer(port) { token, cookies ->
-                requireActivity().runOnUiThread {
-                    Log.d("BypassWS", "DONE received for token: $token")
-                    onBypassCompleted(token, cookies)
-                }
-            }
-            wsServer = server
-            try {
-                server.start()
-                if (server.awaitStart(5_000)) {
-                    val actualPort = server.address.port
-                    Log.d("BypassWS", "WebSocket server started on port $actualPort")
-                    return actualPort
-                } else {
-                    val error = server.getStartError()
-                    Log.e("BypassWS", "Server failed to start on port $port: ${error?.message}")
-                    stopWebSocketServer()
-                }
-            } catch (e: Exception) {
-                Log.e("BypassWS", "Failed to start on port $port", e)
-                stopWebSocketServer()
-            }
-        }
-        return -1
-    }
-    private fun stopWebSocketServer() {
-        try {
-            wsServer?.stop()
-        } catch (_: Exception) {}
-        wsServer = null
-    }
-
-    private fun clearBypassSession(
-        dismissDialog: Boolean = true,
-        resetBypassDone: Boolean = false,
-    ) {
-        activeBypassSession?.let { session ->
-            wsServer?.clearSession(session.token)
-        }
-        activeBypassSession = null
-        waitingForBypass = false
-        if (resetBypassDone) {
-            bypassDone = false
-        }
-        if (dismissDialog) {
-            qrDialog?.dismiss()
-        }
-        qrDialog = null
-        stopWebSocketServer()
-    }
-
-
-    private fun onBypassCompleted(token: String, cookies: String?) {
-        val session = activeBypassSession
-        if (session == null || session.token != token) {
-            Log.w("BypassWS", "Ignoring bypass completion for stale token: $token")
-            return
-        }
-
-        val extraBuffering = PlayerSettingsView.Settings.ExtraBuffering.isEnabled
-        currentExtraBuffering = extraBuffering
-
-        // Respect OkHttp fallback if already triggered
-        val videoUrl = currentVideo?.source ?: ""
-        if (usingCronet || !::httpDataSource.isInitialized) {
-            httpDataSource = createHttpDataSourceFactory(videoUrl)
-        }
-
-        dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
-
-        // 2026-05-09 : handleAudioFocus=false pour IPTV Live (cf initializePlayer).
-        val isLiveIptvHere3 = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
-            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
-            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
-        player = buildPlayer(extraBuffering).also { player ->
-                player.setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(C.USAGE_MEDIA)
-                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                        .build(),
-                    !isLiveIptvHere3,
-                )
-            }
-
-        // Bind new player to UI view
-        binding.pvPlayer.player = player
-        binding.settings.player = player
-        binding.settings.subtitleView = binding.pvPlayer.subtitleView
-
-        bypassDone = true
-        waitingForBypass = false
-        activeBypassSession = null
-
-        clearBypassSession(dismissDialog = true)
-        applyBypassCookies(session.serverUrl, cookies)
-
-        lifecycleScope.launch {
-            delay(300)
-
-            // 🔴 restore episode context BEFORE reload
-            when (val type = args.videoType) {
-                is Video.Type.Episode -> {
-                    EpisodeManager.setCurrentEpisode(type)
-                }
-                else -> {}
-            }
-
-            viewModel.reloadServersAfterBypass()
-        }
-    }
-
-    private fun applyBypassCookies(url: String, cookieHeader: String?) {
-        val cookies = cookieHeader?.trim().orEmpty()
-        if (cookies.isBlank()) return
-
-        val host = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
-        val targets = linkedSetOf<String>().apply {
-            if (url.isNotBlank()) add(url)
-            if (host.isNotBlank()) {
-                add("https://$host/")
-                add("http://$host/")
-            }
-        }
-        if (targets.isEmpty()) return
-
-        val cookieManager = CookieManager.getInstance()
-        cookies.split(";")
-            .map { it.trim() }
-            .filter { it.contains("=") }
-            .forEach { cookie ->
-                targets.forEach { target ->
-                    cookieManager.setCookie(target, cookie)
-                }
-            }
-        cookieManager.flush()
-    }
 
 
     }

@@ -479,7 +479,7 @@
             <SeekBarPreference
                 android:key="APP_DIM"
                 android:title="Luminosité de l'application"
-                android:summary="Assombrit toute l'application (utile la nuit)"
+                android:summary="Assombrit le fond d'écran (textes et logos restent lisibles)"
                 android:max="90"
                 android:defaultValue="0" />
 

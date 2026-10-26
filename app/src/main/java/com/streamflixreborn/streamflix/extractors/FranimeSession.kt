@@ -376,6 +376,21 @@ object FranimeSession {
      *  de lecteur, sinon on retourne l'iframe stale du lecteur précédent). */
     @Volatile private var rejectedEmbedUrl: String? = null
 
+    /** Mots qui trahissent un domaine de pub ou de statistiques (jamais un lecteur vidéo). */
+    private val MOTS_PUB = listOf("metric", "click", "clck", "track", "adexchange", "analytic", "syndication")
+
+    /** Lecteur choisi (fragment « #lecteur=… » de l'adresse), et premier lien d'un autre lecteur. */
+    @Volatile private var lecteurAttendu: String? = null
+    @Volatile private var candidatSecours: String? = null
+
+    /** Le lien appartient-il au lecteur demandé ? (nom dans l'adresse, ou extracteur reconnu.) */
+    private fun correspondAuLecteur(src: String, lecteur: String): Boolean {
+        val sansParametres = src.substringBefore('?').substringBefore('#')
+        if (sansParametres.lowercase().contains(lecteur)) return true
+        val service = Extractor.identifyServiceName(sansParametres)?.lowercase() ?: return false
+        return service.contains(lecteur) || lecteur.contains(service)
+    }
+
     private fun isEmbedUrl(src: String): Boolean {
         if (!src.startsWith("http")) return false
         val lower = src.lowercase()
@@ -385,9 +400,18 @@ object FranimeSession {
             lower.contains("challenges")) return false
         if (lower.contains("ad.a-ads") || lower.contains("doubleclick") ||
             lower.contains("googlesyndication") || lower.contains("a-ads.com")) return false
+        // 2026-10-27 (user : Sendvid rouge) : un traqueur de pub (onclckmetrics.com/in/track?data=…)
+        //   était pris pour un lecteur VOE : son domaine (13 lettres collées) ressemble aux
+        //   domaines « mots anglais collés » des miroirs VOE. Il était capturé AVANT le vrai lien
+        //   (sendvid.com/embed/…, 2 s plus tard) → extraction ratée. On écarte les domaines de
+        //   pub/statistiques, et on ne compare plus que domaine + chemin (pas les paramètres).
+        val sansParametres = src.substringBefore('?').substringBefore('#')
+        val adresse = sansParametres.lowercase()
+        val domaine = adresse.substringAfter("://").substringBefore('/')
+        if (MOTS_PUB.any { domaine.contains(it) } || adresse.contains("/track")) return false
         // Match token explicite OU n'importe quel extracteur connu par son nom
-        return EMBED_HOST_TOKENS.any { lower.contains(it, ignoreCase = true) } ||
-            Extractor.identifyServiceName(src) != null
+        return EMBED_HOST_TOKENS.any { adresse.contains(it, ignoreCase = true) } ||
+            Extractor.identifyServiceName(sansParametres) != null
     }
 
     private fun reportCapturedUrl(src: String) {
@@ -396,6 +420,21 @@ object FranimeSession {
         // encore switché côté JS) — wait pour le nouveau iframe.
         if (src == rejectedEmbedUrl) return
         val deferred = currentCapture ?: return
+        // 2026-10-27 (user : Sendvid et Sibnet rouges) : la page FRAnime charge des pubs dont les
+        //   liens (predictivdisplay.com/jump/…, onclckmetrics.com/…) passent pour des lecteurs, et
+        //   l'iframe du lecteur PRÉCÉDENT (Vidmoly) restait capturée quand on choisit Sibnet → on
+        //   lisait Vidmoly sous le nom Sibnet. On n'accepte donc que le lien du lecteur demandé ;
+        //   un autre lien n'est gardé qu'en secours (pris si rien de mieux n'arrive à temps).
+        val attendu = lecteurAttendu
+        if (attendu != null && !correspondAuLecteur(src, attendu)) {
+            // Secours seulement pour un lien qu'aucun extracteur ne rattache à un AUTRE lecteur
+            //   (sinon on lirait Vidmoly sous le nom Sibnet, ou une pub prise pour VOE).
+            if (candidatSecours == null &&
+                Extractor.identifyServiceName(src.substringBefore('?').substringBefore('#')) == null
+            ) candidatSecours = src
+            Log.d(TAG, "ignored (lecteur $attendu attendu): ${src.take(120)}")
+            return
+        }
         if (!deferred.isCompleted) {
             Log.d(TAG, "captured: $src")
             deferred.complete(src)
@@ -565,6 +604,8 @@ object FranimeSession {
             currentCapture = deferred
             currentTargetUrl = pageUrl
             rejectedEmbedUrl = if (sameLecteur) null else prevForEpisode
+            lecteurAttendu = currentLecteur
+            candidatSecours = null
             withContext(Dispatchers.Main) {
                 val wv = ensureWebView()
                 // Double-check : si la WebView a été recréée entre bootstrap et ici,
@@ -580,7 +621,13 @@ object FranimeSession {
                 wv.loadUrl(pageUrl)
                 bootstrappedWebViewHash = System.identityHashCode(wv)
             }
-            val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
+            // Le bon lien arrive en général en 2-3 s. Passé 10 s sans lui, on prend le lien de
+            //   secours s'il y en a un (lecteur au nom inattendu), sinon on continue d'attendre.
+            val result = withTimeoutOrNull(minOf(10_000L, timeoutMs)) { deferred.await() }
+                ?: candidatSecours?.also { Log.d(TAG, "secours: ${it.take(120)}") }
+                ?: withTimeoutOrNull((timeoutMs - 10_000L).coerceAtLeast(1L)) { deferred.await() }
+            lecteurAttendu = null
+            candidatSecours = null
             currentCapture = null
             currentTargetUrl = null
             rejectedEmbedUrl = null

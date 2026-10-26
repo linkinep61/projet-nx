@@ -59,6 +59,8 @@ class MainTvActivity : FragmentActivity() {
      *  - LEFT depuis tile → focus sur le menu courant de la sidebar
      *  - UP depuis tile → focus sur iv_iptv_categories si visible (Mon IPTV) */
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        // 2026-10-28 : télécommande ignorée pendant l'animation d'événement (cf. AnimationEvenement).
+        if (com.streamflixreborn.streamflix.utils.AnimationEvenement.enCours) return true
         // 2026-06-04 : overlay « À SUIVRE » — intercept Activity-level pour
         //   forcer OK → Lire maintenant même si le focus visuel est resté
         //   sur exoSettings (controller). PRIORITÉ MAXIMALE sinon le bouton
@@ -336,6 +338,8 @@ class MainTvActivity : FragmentActivity() {
         //   dans onCreate → Android n'enchaîne que onDestroy, rien n'est
         //   initialisé à moitié.
         if (com.streamflixreborn.streamflix.utils.EtatApp.garder(this)) return
+        // 2026-10-28 : animation avec le logo de l'événement en cours (Halloween, Noël…), sinon rien.
+        com.streamflixreborn.streamflix.utils.AnimationEvenement.afficherSiEvenement(this)
 
         savedStateForDeferredInit = etatRestaurable
 

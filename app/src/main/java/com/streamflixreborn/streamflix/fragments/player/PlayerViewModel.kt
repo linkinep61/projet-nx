@@ -373,7 +373,9 @@ class PlayerViewModel(
                                     val isHls = extractedUrl.contains(".m3u8", ignoreCase = true) ||
                                         result.type?.contains("mpegurl", ignoreCase = true) == true ||
                                         result.type?.contains("hls", ignoreCase = true) == true
-                                    val q = if (isHls) {
+                                    // 2026-10-28 (analyse GLM C4) : pas de sonde sur un lien WiTV à jeton
+                                    //   (elle le consommerait avant la lecture → écran leurre).
+                                    val q = if (isHls && !extractedUrl.contains("/player/source2/")) {
                                         // 2026-07-31 : `server` transmis → la langue réelle est
                                         //   lue dans le même manifeste (aucune requête en plus).
                                         probeHlsQuality(extractedUrl, result.headers, server)
@@ -2326,6 +2328,18 @@ class PlayerViewModel(
     }
 
     /**
+     * 2026-10-27 (user : « on masque définitivement le serveur en attendant son retour un jour, ça
+     *   ne sert à rien de tomber sur un serveur rouge ») : Sibnet (video.sibnet.ru) répond 403 à
+     *   TOUT le monde, même depuis la Russie et nos 27 serveurs VPN (service vidéo fermé, connexions
+     *   suspendues depuis le 25/09/2026). Ses lecteurs sont retirés de toutes les listes, quel que
+     *   soit le provider (FRAnime, AnimeSama, Vostfree…). Pour le rétablir : vider SERVEURS_MASQUES.
+     */
+    private val SERVEURS_MASQUES = listOf("sibnet")
+
+    private fun estServeurMasque(s: Video.Server): Boolean =
+        SERVEURS_MASQUES.any { s.name.contains(it, ignoreCase = true) || s.src.contains(it, ignoreCase = true) }
+
+    /**
      * 2026-07-04 : Fusionne les serveurs identiques (même URL source) en un
      * seul item avec indicateur ×N dans le nom. Quand 6 backup providers
      * trouvent le même lien Uqload, l'user voit "Uqload (VF) ×6" au lieu
@@ -2336,7 +2350,8 @@ class PlayerViewModel(
      *
      * Préserve l'ordre d'entrée (le 1er exemplaire de chaque src gagne).
      */
-    private fun collapseIdenticalServers(servers: List<Video.Server>): List<Video.Server> {
+    private fun collapseIdenticalServers(serveursRecus: List<Video.Server>): List<Video.Server> {
+        val servers = serveursRecus.filterNot { estServeurMasque(it) }
         if (servers.size <= 1) return servers
         // LinkedHashMap pour garder l'ordre d'insertion (= ordre tri langue)
         val groups = LinkedHashMap<String, MutableList<Video.Server>>()

@@ -51,27 +51,40 @@ object VegetaVod {
     const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     data class Serveur(val pos: Int, val base: String, val user: String, val pass: String)
-    data class Film(
-        val id: String, val titre: String, val annee: Int, val tmdb: Int, val img: String?,
+    // 2026-10-27 (user : « c'est ça qu'il faut chasser… pris et pas relâchés ») : rangement
+    //   COMPACT (photo mémoire Oppo : 42 000 films = 25 Mo). Sources en IntArray au lieu de
+    //   List<Triple> (3 objets + 2 entiers en boîte par source), affiche gardée en « /abc.jpg »
+    //   (URL complète reconstruite à la lecture), catégories / langues / extensions partagées,
+    //   plus de tables id → film (recherche directe, appelée une fois par fiche).
+    class Film(
+        val id: String, val titre: String, val annee: Int, val tmdb: Int, private val imgBrut: String?,
         val cat: String, val langue: String,
+        /** serveur, stream_id, serveur, stream_id… */
+        private val src: IntArray, private val exts: Array<String>,
+    ) {
+        val img: String? get() = imgBrut?.let { affiche(it) }
+        val sansImage: Boolean get() = imgBrut.isNullOrBlank()
         /** (serveur, stream_id, extension) */
-        val sources: List<Triple<Int, Int, String>>,
-    )
-    data class Serie(
-        val id: String, val titre: String, val annee: Int, val tmdb: Int, val img: String?,
+        val sources: List<Triple<Int, Int, String>>
+            get() = List(exts.size) { Triple(src[2 * it], src[2 * it + 1], exts[it]) }
+    }
+    class Serie(
+        val id: String, val titre: String, val annee: Int, val tmdb: Int, private val imgBrut: String?,
         val cat: String, val cle: String,
+        /** serveur, series_id, serveur, series_id… */
+        private val src: IntArray,
+    ) {
+        val img: String? get() = imgBrut?.let { affiche(it) }
+        val sansImage: Boolean get() = imgBrut.isNullOrBlank()
         /** (serveur, series_id) */
-        val sources: List<Pair<Int, Int>>,
-    )
+        val sources: List<Pair<Int, Int>> get() = List(src.size / 2) { src[2 * it] to src[2 * it + 1] }
+    }
     data class Episode(val num: Int, val id: Int, val ext: String, val titre: String)
     class Index(
         val serveurs: Map<Int, Serveur>,
         val films: List<Film>,
         val series: List<Serie>,
-    ) {
-        val filmsParId: Map<String, Film> = films.associateBy { it.id }
-        val seriesParId: Map<String, Serie> = series.associateBy { it.id }
-    }
+    )
 
     @Volatile private var cache: Index? = null
     @Volatile private var cacheTs = 0L
@@ -95,9 +108,10 @@ object VegetaVod {
 
     /** Télécharge l'index (ou rend le cache s'il est frais). Un échec ne vide jamais un cache garni. */
     suspend fun index(forcer: Boolean = false): Index? = withContext(Dispatchers.IO) {
+        MemoireAppareil.libererPlusTard("index Ciné Films") { alleger() }
         val now = System.currentTimeMillis()
         cache?.let { if (!leger && !forcer && now - cacheTs < TTL_MS) return@withContext it }
-        verrou.withLock {
+        MemoireAppareil.unParUn { verrou.withLock {
             cache?.let { if (!leger && !forcer && System.currentTimeMillis() - cacheTs < TTL_MS) return@withLock it }
             // ⚠ Index de ~10 Mo (3 Mo gzip) : lecture EN FLUX (JsonReader), jamais via un
             //   JSONObject géant — sur une box 1 Go, la chaîne + l'arbre org.json = OOM.
@@ -110,7 +124,7 @@ object VegetaVod {
             cacheTs = System.currentTimeMillis()
             Log.i(TAG, "index chargé : ${idx.films.size} films, ${idx.series.size} séries, ${idx.serveurs.size} serveurs")
             idx
-        }
+        } }
     }
 
     private fun telecharger(url: String): String? = try {
@@ -153,6 +167,11 @@ object VegetaVod {
         val serveurs = HashMap<Int, Serveur>()
         val films = ArrayList<Film>(50_000)
         val series = ArrayList<Serie>(15_000)
+        // Chaînes répétées (catégorie, langue, extension) : un seul exemplaire en mémoire.
+        val pool = HashMap<String, String>(256)
+        fun unique(s: String) = pool.getOrPut(s) { s }
+        val srcI = IntArrayListe()
+        val srcE = ArrayList<String>(4)
         jr.beginObject()
         while (jr.hasNext()) {
             when (jr.nextName()) {
@@ -178,7 +197,7 @@ object VegetaVod {
                     var i = 0
                     while (jr.hasNext()) {
                         var id = ""; var t = ""; var y = 0; var tmdb = 0; var img = ""; var c = ""; var l = ""
-                        val src = ArrayList<Triple<Int, Int, String>>(3)
+                        srcI.vider(); srcE.clear()
                         jr.beginObject()
                         while (jr.hasNext()) {
                             when (jr.nextName()) {
@@ -193,7 +212,7 @@ object VegetaVod {
                                         val ext = if (jr.hasNext()) jr.nextString() else "mp4"
                                         while (jr.hasNext()) jr.skipValue()
                                         jr.endArray()
-                                        src += Triple(pos, sid, ext)
+                                        srcI.ajouter(pos); srcI.ajouter(sid); srcE += unique(ext)
                                     }
                                     jr.endArray()
                                 }
@@ -201,9 +220,10 @@ object VegetaVod {
                             }
                         }
                         jr.endObject()
-                        if (src.isNotEmpty()) films += Film(
-                            id = id.ifBlank { "f$i" }, titre = t, annee = y, tmdb = tmdb, img = affiche(img),
-                            cat = c.ifBlank { "Films" }, langue = l, sources = src,
+                        if (srcE.isNotEmpty()) films += Film(
+                            id = id.ifBlank { "f$i" }, titre = t, annee = y, tmdb = tmdb, imgBrut = img.ifBlank { null },
+                            cat = unique(c.ifBlank { "Films" }), langue = unique(l),
+                            src = srcI.enTableau(), exts = srcE.toTypedArray(),
                         )
                         i++
                     }
@@ -214,7 +234,7 @@ object VegetaVod {
                     var i = 0
                     while (jr.hasNext()) {
                         var id = ""; var t = ""; var y = 0; var tmdb = 0; var img = ""; var c = ""; var k = ""
-                        val src = ArrayList<Pair<Int, Int>>(2)
+                        srcI.vider()
                         jr.beginObject()
                         while (jr.hasNext()) {
                             when (jr.nextName()) {
@@ -228,7 +248,7 @@ object VegetaVod {
                                         val pos = jr.nextInt(); val sid = jr.nextInt()
                                         while (jr.hasNext()) jr.skipValue()
                                         jr.endArray()
-                                        src += pos to sid
+                                        srcI.ajouter(pos); srcI.ajouter(sid)
                                     }
                                     jr.endArray()
                                 }
@@ -236,9 +256,9 @@ object VegetaVod {
                             }
                         }
                         jr.endObject()
-                        if (src.isNotEmpty()) series += Serie(
-                            id = id.ifBlank { "s$i" }, titre = t, annee = y, tmdb = tmdb, img = affiche(img),
-                            cat = c.ifBlank { "Séries" }, cle = k.ifBlank { normaliser(t) }, sources = src,
+                        if (srcI.taille > 0) series += Serie(
+                            id = id.ifBlank { "s$i" }, titre = t, annee = y, tmdb = tmdb, imgBrut = img.ifBlank { null },
+                            cat = unique(c.ifBlank { "Séries" }), cle = k.ifBlank { normaliser(t) }, src = srcI.enTableau(),
                         )
                         i++
                     }
@@ -248,7 +268,17 @@ object VegetaVod {
             }
         }
         jr.endObject()
+        films.trimToSize(); series.trimToSize()
         return Index(serveurs, films, series)
+    }
+
+    /** Petite liste d'entiers réutilisable pendant la lecture (évite les entiers en boîte). */
+    private class IntArrayListe {
+        private var t = IntArray(8)
+        var taille = 0; private set
+        fun vider() { taille = 0 }
+        fun ajouter(v: Int) { if (taille == t.size) t = t.copyOf(taille * 2); t[taille++] = v }
+        fun enTableau(): IntArray = t.copyOf(taille)
     }
 
     private val prechauffageEnCours = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -300,8 +330,13 @@ object VegetaVod {
         (cache?.series ?: emptyList()).filter { it.cat == cat }
             .sortedWith(compareByDescending<Serie> { it.annee }.thenBy { it.titre.lowercase() })
 
-    fun filmDe(id: String): Film? = cache?.filmsParId?.get(id)
-    fun serieDe(id: String): Serie? = cache?.seriesParId?.get(id)
+    fun filmDe(id: String): Film? = cache?.films?.firstOrNull { it.id == id }
+    fun serieDe(id: String): Serie? = cache?.series?.firstOrNull { it.id == id }
+
+    /** Repousse la libération de l'index (l'index de recherche ONYX Films pointe vers ses films). */
+    fun garderEnVie() {
+        if (cache != null && !leger) MemoireAppareil.libererPlusTard("index Ciné Films") { alleger() }
+    }
 
     /** Tuile de dossier : rouvre le dialogue un cran plus bas (cf. LiveHubFolderDialog « vegetavod_ »). */
     fun tuileDossier(chemin: String, libelle: String, nb: Int): TvShow =

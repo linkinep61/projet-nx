@@ -7,10 +7,6 @@ import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
-import com.konovalov.vad.silero.VadSilero
-import com.konovalov.vad.silero.config.FrameSize
-import com.konovalov.vad.silero.config.Mode
-import com.konovalov.vad.silero.config.SampleRate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,8 +26,10 @@ import java.nio.ByteOrder
  *
  *  - Le son DÉJÀ décodé pour la lecture est lu au passage dans l'AudioSink, avec son heure
  *    exacte : aucun décodage en plus, aucun saut, aucun micro.
- *  - Ramené en mono 16 kHz, découpé en trames de 32 ms, le détecteur de voix Silero (réseau de
+ *  - Ramené en mono 16 kHz, découpé en trames de 16 ms, le détecteur de voix TEN VAD (réseau de
  *    neurones, sait écarter la musique) dit « parle / ne parle pas ». Il ne comprend pas les mots : la langue n'a pas d'importance.
+ *    (2026-10-27 : remplace Silero et YAMNet, ~33 Mo à eux deux ; le 1er calage vient de
+ *    l'écoute EN AVANCE, voir EcouteAvance.)
  *  - Toutes les 15 s : alignement des répliques sur la voix (RecalageAuto.alignerSurVoix).
  *    1er réglage dès ~1 min d'écoute, réglage définitif (dérive comprise) après ~8 min,
  *    puis l'écoute S'ARRÊTE.
@@ -86,17 +84,16 @@ object EcouteVoix {
     private var phase = 0.0
     private var acc = 0.0
     private var accN = 0
-    // 2026-10-22 : trame de 512 échantillons (32 ms) pour Silero, 3 200 (200 ms) pour YAMNet.
-    private val trame = ShortArray(3200)
-    @Volatile private var tailleTrame = 512
+    // 2026-10-27 : trame de 256 échantillons (16 ms) pour TEN VAD.
+    private val trame = ShortArray(TenVad.TRAME)
+    @Volatile private var tailleTrame = TenVad.TRAME
     @Volatile private var attributionMs = 0.0
     @Volatile private var minTrames = 5
     private val executeur = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val enFile = java.util.concurrent.atomic.AtomicInteger(0)
     private var trameN = 0
     private var trameDebutMs = 0.0
-    private var vadSilero: VadSilero? = null
-    private var vadYamnet: com.konovalov.vad.yamnet.VadYamnet? = null
+    private var vadTen: TenVad? = null
     private var detecteur: ((ShortArray) -> Boolean)? = null
     private var journalise = false
 
@@ -180,8 +177,6 @@ object EcouteVoix {
         if (!ACTIF_GLOBAL) { Log.d(TAG, "écoute des voix désactivée (détecteur pas assez fiable)"); return }
         // 2026-10-23 : mode léger seulement (une TV ordinaire, 192 Mo par appli, garde le calage).
         if (UserPreferences.modeLeger) { Log.d(TAG, "mode léger : écoute désactivée"); return }
-        // Silero exige Android 7 (l'appli démarre dès Android 6 : rien sur les plus anciens).
-        if (android.os.Build.VERSION.SDK_INT < 24) return
         if (repliques.size < 30) return
         arreter()
         // 2026-10-22 (user : « en cas de problème sur certaines télés, est-ce que l'appli va
@@ -218,48 +213,28 @@ object EcouteVoix {
             }
         }
         fun banni(nom: String) = prefs.getInt("chutes_$nom", 0) >= 2
+        // 2026-10-27 (user : « retire tout ce qu'on n'a plus besoin ») : un seul détecteur pour
+        //   tous les appareils, 32 et 64 bits — TEN VAD (~0,5 Mo). Silero (ONNX, plantait en 32
+        //   bits) et YAMNet (MediaPipe) sont retirés de l'appli (~33 Mo).
         try {
             if (detecteur == null) {
-                if (android.os.Process.is64Bit() && !banni("silero")) {
-                    val v = VadSilero(
-                        context.applicationContext,
-                        sampleRate = SampleRate.SAMPLE_RATE_16K,
-                        frameSize = FrameSize.FRAME_SIZE_512,
-                        mode = Mode.NORMAL,
-                        silenceDurationMs = 300,
-                        speechDurationMs = 50,
-                    )
-                    vadSilero = v
-                    tailleTrame = 512; attributionMs = 0.0; minTrames = 5
-                    detecteur = { t -> v.isSpeech(t) }
-                } else if (!banni("yamnet")) {
-                    // 2026-10-22 (user : « t'as beau avoir coupé l'écoute, faut que tu trouves une
-                    //   solution » — TV en ARM 32 bits) : le moteur ONNX de Silero y plante en code
-                    //   natif (SIGBUS, alignement mémoire). On prend YAMNet (Google, TensorFlow Lite,
-                    //   stable en 32 bits) : il classe chaque fenêtre de ~1 s (voix, musique,
-                    //   bruits…). Une décision toutes les 200 ms, attribuée au CENTRE de la fenêtre
-                    //   analysée (fin − 0,49 s).
-                    val y = com.konovalov.vad.yamnet.VadYamnet(
-                        context.applicationContext,
-                        sampleRate = com.konovalov.vad.yamnet.config.SampleRate.SAMPLE_RATE_16K,
-                        frameSize = com.konovalov.vad.yamnet.config.FrameSize.FRAME_SIZE_975,
-                        mode = com.konovalov.vad.yamnet.config.Mode.NORMAL,
-                    )
-                    vadYamnet = y
-                    tailleTrame = 3200; attributionMs = 200.0 - 487.0; minTrames = 1
-                    val voix = Regex("""(?i)speech|conversation|narration|monologue|babbling""")
-                    detecteur = { t -> voix.containsMatchIn(y.classifyAudio(t).label) }
-                } else {
-                    Log.w(TAG, "aucun détecteur de voix sûr sur cet appareil → pas d'écoute")
+                if (banni("tenvad")) {
+                    Log.w(TAG, "détecteur TEN VAD tombé deux fois sur cet appareil → pas d'écoute")
                     return
                 }
-                nomDetecteur = if (vadSilero != null) "silero" else "yamnet"
+                val v = TenVad.creer() ?: run {
+                    Log.w(TAG, "détecteur TEN VAD indisponible sur cet appareil → pas d'écoute")
+                    return
+                }
+                vadTen = v
+                tailleTrame = TenVad.TRAME; attributionMs = 0.0; minTrames = 5
+                detecteur = { t -> v.voix(t) }
+                nomDetecteur = "tenvad"
                 Log.i(TAG, "détecteur de voix : $nomDetecteur")
             }
         } catch (t: Throwable) {
             Log.w(TAG, "détecteur de voix indisponible : ${t.message}")
-            val nom = if (android.os.Process.is64Bit() && !banni("silero")) "silero" else "yamnet"
-            prefs.edit().putInt("chutes_$nom", 2).commit()
+            prefs.edit().putInt("chutes_tenvad", 2).commit()
             return
         }
         prefs.edit().putString("en_cours", nomDetecteur).commit()
@@ -278,7 +253,48 @@ object EcouteVoix {
         // 2026-10-22 (user) : vérification SILENCIEUSE pour le français OpenSubtitles automatique ;
         //   message seulement pour un sous-titre téléchargé (masqué le temps du calage).
         if (SyncSousTitres.enAttenteCalage)
-            Toast.makeText(context, "Calage des sous-titres en cours… (environ 30 s après les premières paroles)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Calage des sous-titres en cours…", Toast.LENGTH_SHORT).show()
+
+        // 2026-10-27 (user : « il faut préparer l'essai ») — ESSAI : écoute en avance avec TEN VAD.
+        //   Le 1er calage vient de là (quelques secondes) ; l'écoute en direct (au rythme du film)
+        //   continue À CÔTÉ pour comparer dans le journal (« COMPARAISON ») et garde le réglage
+        //   définitif (dérive) à ~8 min.
+        avanceApplique = false
+        avanceEnCours = false
+        val video = SyncSousTitres.videoCourante
+        if (video != null && video.drmType == null) {
+            val ctxApp = context.applicationContext
+            avanceEnCours = true
+            EcouteAvance.lancer(ctxApp, video, pos) { r ->
+                avanceEnCours = false
+                if (r == null || !actif) return@lancer
+                portee.launch {
+                    val reglage = withContext(Dispatchers.Default) {
+                        // 2026-10-27 (user, Spider-Man : « le décalage est complètement raté ») :
+                        //   sous-titre fait pour 25 images/s sur une vidéo à 23,976 (rapport 0,959,
+                        //   ~15 s de glissement sur 6 min). Sans dérive autorisée, l'écoute en avance
+                        //   a pris un faux compromis (11,8 s, score 0,27) au lieu de ~33,6 s. Avec
+                        //   6 min de son, la dérive se mesure bien : on la laisse libre, comme le
+                        //   réglage définitif.
+                        RecalageAuto.alignerSurVoix(r.voix, r.silences, repliques, rapportLibre = true)
+                    }
+                    Log.i(TAG, "COMPARAISON avance/TEN VAD en ${r.dureeReelleMs / 1000} s : " +
+                        (reglage?.let { "${it.first} ms, rapport ${it.second}" } ?: "aucun calage sûr"))
+                    if (reglage != null && actif) {
+                        val (d, rr) = reglage
+                        reglageAvance = reglage
+                        avanceApplique = true
+                        SyncSousTitres.decalageMs = d
+                        SyncSousTitres.rapport = rr
+                        SyncSousTitres.enAttenteCalage = false
+                        SyncSousTitres.surCalageEchoue = null
+                        // 2026-10-27 (user : « toujours le message calé 0 seconde ») : rien à
+                        //   annoncer quand le sous-titre était déjà juste.
+                        if (kotlin.math.abs(d) >= 150) surResultat("Sous-titres calés (${SyncSousTitres.libelleDecalage()})")
+                    }
+                }
+            }
+        }
 
         tache = portee.launch {
             val debut = System.currentTimeMillis()
@@ -337,6 +353,21 @@ object EcouteVoix {
                     precedent!!.second == reglage.second && kotlin.math.abs(precedent!!.first - reglage.first) <= 400
                 precedent = reglage
                 if (reglage != null && (confirme || definitif)) {
+                    Log.i(TAG, "COMPARAISON direct/$nomDetecteur après ${couvertS} s écoutées : " +
+                        "${reglage.first} ms, rapport ${reglage.second}" +
+                        (reglageAvance?.let { " (avance/TEN VAD : ${it.first} ms, rapport ${it.second})" } ?: ""))
+                }
+                // Essai : le calage en avance est déjà appliqué → l'écoute directe ne fait que
+                //   comparer, sauf pour le réglage définitif (dérive) qui reste le sien.
+                if (reglage != null && confirme && !definitif && avanceApplique) {
+                    premierFait = true
+                } else if (avanceEnCours && !definitif) {
+                    // 2026-10-27 (user, Overgeared : « un peu le bordel jusqu'à 1 min 58 ») : avec
+                    //   1 min de son seulement, l'écoute directe a appliqué un FAUX calage (−66 s,
+                    //   « confirmé » deux fois) avant que l'écoute en avance (6 min, juste : 0,2 s)
+                    //   ne finisse. Tant que l'avance tourne, l'écoute directe n'applique rien.
+                    continue
+                } else if (reglage != null && (confirme || definitif)) {
                     val (d, r) = reglage
                     val change = kotlin.math.abs(d - SyncSousTitres.decalageMs) >= 150 || r != SyncSousTitres.rapport
                     SyncSousTitres.decalageMs = d
@@ -368,6 +399,8 @@ object EcouteVoix {
     /** Nouvelle vidéo : les voix écoutées ne valent plus. */
     fun oublier() {
         arreter()
+        EcouteAvance.arreter()
+        reglageAvance = null
         synchronized(verrou) { parle.clear(); total.clear() }
     }
 
@@ -381,6 +414,9 @@ object EcouteVoix {
             }.take(3)
 
     private var nomDetecteur = ""
+    @Volatile private var avanceApplique = false
+    @Volatile private var avanceEnCours = false
+    @Volatile private var reglageAvance: Pair<Long, Double>? = null
     @Volatile private var prefsMarque: android.content.SharedPreferences? = null
 
     fun arreter() {

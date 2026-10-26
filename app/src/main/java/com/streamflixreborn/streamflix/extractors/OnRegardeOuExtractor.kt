@@ -46,6 +46,8 @@ class OnRegardeOuExtractor : Extractor() {
     //   AVANT Filemoon dans la liste → il gagne bysezoxexe (sinon Filemoon+PoW).
     override val aliasUrls = listOf(
         "https://bysezoxexe.com", "https://upbolt.to", "https://dismoiceline.uns.bio",
+        // 2026-10-28 : nouvelle adresse de la page aux lecteurs (vue sur 1Jour1Film « VF HD ++ »).
+        "https://cetaitmieuxavant.website",
     )
 
     private val context = StreamFlixApp.instance.applicationContext
@@ -220,13 +222,42 @@ class OnRegardeOuExtractor : Extractor() {
         hotesRefuses.remove(h)
     }
 
+    // 2026-10-28 (user : « 1Jour1Film serveur 1 ») : le site a changé d'adresse
+    //   (cetaitmieuxavant.website) et la page porte désormais `videoData={…,servers:[]}` VIDE ;
+    //   la liste arrive par POST admin-ajax `action=vpm_get_sources&slug=VPM_SLUG&vpm_src_nonce=
+    //   VPM_NONCE` → {success, data:{servers:[{name,url}]}} (vérifié dans Chrome : Vidara,
+    //   téléchargement, firestream.to, chuckle-tube.com). Sans ça on n'avait que le 1er lecteur.
+    private fun serveursDeLaPage(pageUrl: String, html: String): org.json.JSONArray? {
+        val m = Regex("videoData\\s*=\\s*(\\{[\\s\\S]*?\\});").find(html)
+        val statiques = m?.let { runCatching { JSONObject(it.groupValues[1]).optJSONArray("servers") }.getOrNull() }
+        if (statiques != null && statiques.length() > 0) return statiques
+        val ajax = Regex("""VPM_AJAX\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1)?.replace("\\/", "/") ?: return statiques
+        val slug = Regex("""VPM_SLUG\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1) ?: return statiques
+        val cle = Regex("""VPM_NONCE\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1) ?: return statiques
+        return runCatching {
+            val req = Request.Builder().url(ajax)
+                .post(okhttp3.FormBody.Builder()
+                    .add("action", "vpm_get_sources").add("slug", slug).add("vpm_src_nonce", cle).build())
+                .header("User-Agent", ANDROID_CHROME_UA)
+                .header("Referer", pageUrl)
+                .header("Origin", Regex("^(https?://[^/]+)").find(pageUrl)?.groupValues?.get(1) ?: pageUrl)
+                .header("X-Requested-With", "XMLHttpRequest")
+                .build()
+            NetworkClient.default.newCall(req).execute().use { r ->
+                val j = JSONObject(r.body?.string().orEmpty())
+                j.optJSONObject("data")?.optJSONArray("servers").also {
+                    android.util.Log.d("OnRegardeOu", "vpm_get_sources ($slug) : HTTP ${r.code}, ${it?.length() ?: 0} lecteur(s)")
+                }
+            }
+        }.getOrNull() ?: statiques
+    }
+
     /** Parse TOUS les mirrors de `videoData.servers` → [(nom, url)]. */
     private suspend fun parseMirrors(onregardeouUrl: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
         try {
             val (_, html) = lirePageOnregardeou(onregardeouUrl)
             if (html == null) return@withContext emptyList()
-            val m = Regex("videoData\\s*=\\s*(\\{[\\s\\S]*?\\});").find(html) ?: return@withContext emptyList()
-            val servers = JSONObject(m.groupValues[1]).optJSONArray("servers") ?: return@withContext emptyList()
+            val servers = serveursDeLaPage(onregardeouUrl, html) ?: return@withContext emptyList()
             (0 until servers.length()).mapNotNull { idx ->
                 val o = servers.getJSONObject(idx)
                 val url = o.optString("url").replace("\\/", "/").takeIf { it.startsWith("http") }
@@ -244,8 +275,7 @@ class OnRegardeOuExtractor : Extractor() {
         try {
             val (code, html) = lirePageOnregardeou(onregardeouUrl)
             if (html == null || estRefusFranc(code, html)) return@withContext null
-            val m = Regex("const videoData\\s*=\\s*(\\{[\\s\\S]*?\\});").find(html) ?: return@withContext null
-            val servers = JSONObject(m.groupValues[1]).optJSONArray("servers") ?: return@withContext null
+            val servers = serveursDeLaPage(onregardeouUrl, html) ?: return@withContext null
             if (servers.length() == 0) return@withContext null
             servers.getJSONObject(0).optString("url").replace("\\/", "/").takeIf { it.startsWith("http") }
         } catch (_: Exception) { null }
