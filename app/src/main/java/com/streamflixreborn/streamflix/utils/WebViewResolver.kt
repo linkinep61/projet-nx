@@ -407,9 +407,14 @@ class WebViewResolver(private val context: Context) {
             isFocusableInTouchMode = !isTv
 
             // Stabilità Rendering Software per Android TV 9 (come da registro)
-            if (isTv) {
+            // 2026-10-30 (1Jour1Film : challenge CF jamais résolu sur la télé Android 14, résolu
+            //   en 6 s sur l'Oppo avec la MÊME WebView 156) : le rendu logiciel prive la page de
+            //   WebGL/accélération → empreinte « robot » pour Turnstile. On le réserve aux
+            //   télés Android 9 et moins (cas d'origine).
+            if (isTv && android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
             }
+            Log.d(TAG, "[WebView] rendu ${if (layerType == View.LAYER_TYPE_SOFTWARE) "LOGICIEL" else "matériel"} (TV=$isTv, SDK=${android.os.Build.VERSION.SDK_INT})")
 
             settings.apply {
                 javaScriptEnabled = true

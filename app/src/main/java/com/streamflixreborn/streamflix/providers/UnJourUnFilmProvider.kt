@@ -26,6 +26,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Document
 import retrofit2.HttpException
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.ResponseBody.Companion.toResponseBody
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
@@ -367,6 +369,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     override suspend fun getMovies(page: Int): List<Movie> {
         initializeService()
 
+        // 2026-10-31 : API d'abord (/films/page/N est derrière Cloudflare).
+        getMoviesFromApi(page).takeIf { it.isNotEmpty() }?.let {
+            Log.i("UnJourUnFilm", "API films p$page : ${it.size}")
+            return it
+        }
+
         val document = service.getMovies(page)
 
         // Primary: new j1f-card structure
@@ -441,6 +449,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
     override suspend fun getMovie(id: String): Movie {
         initializeService()
+        // 2026-10-31 : API d'abord (la page /films/ est derrière Cloudflare). Pas de résumé
+        //   dans l'API pour les films.
+        getMovieApi(id)?.let {
+            Log.i("UnJourUnFilm", "API film $id → « ${it.title} »")
+            return it
+        }
         val document = service.getMovie(id)
 
         val scriptdoc = document.head().selectFirst("script[type=application/ld+json]:not([class])")?.data().orEmpty()
@@ -646,6 +660,10 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 } ?: emptyList()
         }
 
+        // 2026-10-31 : l'API ne donne aucune image d'épisode → on garde l'affiche de chaque saison
+        //   (page série, non bloquée) pour les vignettes des épisodes venus de l'API.
+        seasons.forEach { s -> s.poster?.takeIf { it.isNotBlank() }?.let { saisonsAffiche[s.id] = it } }
+
         val released = if (releaseFirst != releaseLast) "$releaseLast-$releaseFirst" else releaseFirst
 
         // Resilient poster extraction with fallbacks
@@ -756,6 +774,17 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         initializeService()
 
         var episodes = emptyList<Episode>()
+
+        // 2026-10-31 : API d'abord (la page /saisons/ est derrière Cloudflare).
+        //   Id d'épisode « J1FAPI:<id saison>:<id épisode> » → getServers interroge admin-ajax.
+        if (seasonId.startsWith("saisons/")) {
+            saisonApi(seasonId)?.let { (idSaison, eps) ->
+                return eps.map { (n, idEp) ->
+                    Episode(id = "J1FAPI:$idSaison:$idEp", number = n, title = "Épisode $n", overview = "",
+                        poster = saisonsAffiche[seasonId])
+                }
+            }
+        }
 
         // New format: fetch season page and parse j1fEpsData JS variable
         try {
@@ -984,6 +1013,131 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         return people
     }
 
+    // ── 2026-10-31 : PASSAGE PAR L'API wp-json ────────────────────────────────────────────
+    //   Les pages /films/ et /saisons/ sont derrière un challenge Cloudflare (lent : WebView,
+    //   ~11 s la 1re fois sur télé). L'API wp-json et admin-ajax ne le sont PAS (vérifié sur la
+    //   télé sans cookie ni WebView). On les utilise en premier ; la page reste en secours.
+    private suspend fun apiGet(chemin: String): String? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        runCatching {
+            val req = okhttp3.Request.Builder()
+                .url(baseUrl.trimEnd('/') + chemin)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json")
+                .build()
+            NetworkClient.default.newCall(req).execute().use { r ->
+                if (r.isSuccessful) r.body?.string() else { Log.w("UnJourUnFilm", "API $chemin → ${r.code}"); null }
+            }
+        }.onFailure { Log.w("UnJourUnFilm", "API $chemin → ${it.message}") }.getOrNull()
+    }
+
+    private val filmsApiCache = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
+
+    /** Fiche film de l'API (avec affiche et termes intégrés) ; id = slug. */
+    private suspend fun filmApi(slug: String): JSONObject? {
+        filmsApiCache[slug]?.let { return it }
+        val o = apiGet("/wp-json/wp/v2/movies?slug=${java.net.URLEncoder.encode(slug, "UTF-8")}&_embed=wp:featuredmedia,wp:term")
+            ?.let { runCatching { JSONArray(it).optJSONObject(0) }.getOrNull() } ?: return null
+        filmsApiCache[slug] = o
+        return o
+    }
+
+    private fun termesApi(o: JSONObject, taxonomie: String): List<JSONObject> {
+        val groupes = o.optJSONObject("_embedded")?.optJSONArray("wp:term") ?: return emptyList()
+        val out = ArrayList<JSONObject>()
+        for (i in 0 until groupes.length()) {
+            val g = groupes.optJSONArray(i) ?: continue
+            for (j in 0 until g.length()) g.optJSONObject(j)?.takeIf { it.optString("taxonomy") == taxonomie }?.let { out += it }
+        }
+        return out
+    }
+
+    private suspend fun getMovieApi(id: String): Movie? {
+        val o = filmApi(id) ?: return null
+        val poster = o.optJSONObject("_embedded")?.optJSONArray("wp:featuredmedia")?.optJSONObject(0)?.optString("source_url").orEmpty()
+        val annee = termesApi(o, "dtyear").firstOrNull()?.optString("name")
+        return Movie(
+            id = id,
+            title = decodeHtml(o.optJSONObject("title")?.optString("rendered").orEmpty()),
+            overview = "",
+            released = annee ?: id.substringAfterLast("-"),
+            quality = termesApi(o, "dtquality").firstOrNull()?.optString("name"),
+            poster = poster,
+            genres = termesApi(o, "genres").map { Genre(id = it.optString("slug"), name = decodeHtml(it.optString("name"))) },
+            directors = termesApi(o, "dtdirector").map { People(id = it.optString("slug"), name = decodeHtml(it.optString("name"))) },
+            cast = termesApi(o, "dtcast").map { People(id = it.optString("slug"), name = decodeHtml(it.optString("name"))) },
+        )
+    }
+
+    /** Saison de l'API → (id de saison, [(n° d'épisode, id d'épisode)]). seasonId = "saisons/<slug>". */
+    private val saisonsApiCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, List<Pair<Int, Int>>>>()
+    private val saisonsAffiche = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private suspend fun saisonApi(seasonId: String): Pair<Int, List<Pair<Int, Int>>>? {
+        saisonsApiCache[seasonId]?.let { return it }
+        val slug = seasonId.trimEnd('/').substringAfterLast('/')
+        val s = apiGet("/wp-json/wp/v2/seasons?slug=${java.net.URLEncoder.encode(slug, "UTF-8")}&_fields=id,title,_links,_embedded&_embed=wp:featuredmedia")
+            ?.let { runCatching { JSONArray(it).optJSONObject(0) }.getOrNull() } ?: return null
+        val idSaison = s.optInt("id").takeIf { it > 0 } ?: return null
+        s.optJSONObject("_embedded")?.optJSONArray("wp:featuredmedia")?.optJSONObject(0)?.optString("source_url")
+            ?.takeIf { it.isNotBlank() }?.let { saisonsAffiche[seasonId] = it }
+        val titre = decodeHtml(s.optJSONObject("title")?.optString("rendered").orEmpty())
+        val num = Regex("(?i)saison\\s*(\\d+)").find(titre)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("saison-(\\d+)").find(slug)?.groupValues?.get(1)?.toIntOrNull() ?: return null
+        val nom = titre.replace(Regex("(?i)\\s*saison\\s*\\d+.*$"), "").trim().ifBlank { return null }
+        // Épisodes : « <Nom> S<n> Episode <e> » / slug « <base>-s<n>-episode-<e> ».
+        val base = slug.substringBefore("-saison-")
+        // Deux formats vus : « …-s2-episode-10 » et « …-s1-e3 » / « …-s1-e9-vf-fin ».
+        val motif = Regex("-s$num-(?:episode-|e)(\\d+)(?:-|$)")
+        val eps = LinkedHashMap<Int, Int>()
+        for (page in 1..3) {
+            val q = java.net.URLEncoder.encode("$nom S$num", "UTF-8").replace("+", "%20")
+            val tab = apiGet("/wp-json/wp/v2/episodes?search=$q&per_page=100&page=$page&_fields=id,slug")
+                ?.let { runCatching { JSONArray(it) }.getOrNull() } ?: break
+            for (i in 0 until tab.length()) {
+                val e = tab.optJSONObject(i) ?: continue
+                val es = e.optString("slug")
+                if (!es.startsWith("$base-s")) continue
+                val n = motif.find(es)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+                eps.putIfAbsent(n, e.optInt("id"))
+            }
+            if (tab.length() < 100) break
+        }
+        Log.i("UnJourUnFilm", "API saison $slug → id=$idSaison « $nom » S$num : ${eps.size} épisode(s)")
+        if (eps.isEmpty()) return null
+        val r = idSaison to eps.entries.sortedBy { it.key }.map { it.key to it.value }
+        saisonsApiCache[seasonId] = r
+        return r
+    }
+
+    /** Sources demandées à admin-ajax pour les numéros 0..7 (en parallèle), dans l'ordre. */
+    private suspend fun sonderSources(params: (Int) -> String): List<String> {
+        val nonce = nonceJ1f() ?: return emptyList()
+        return coroutineScope {
+            (0..7).map { i -> async { sourceJ1f(nonce, params(i)) } }.awaitAll().filterNotNull()
+        }.distinct()
+    }
+
+    /** Range une adresse comme le fait la lecture des pages (OnRegardeOu / ApiVoirFilm / autre). */
+    private fun rangerSource(url: String, servers: MutableList<Video.Server>, apiUrls: MutableList<String>, onregardeUrls: MutableList<String>) {
+        if (url.isEmpty() || ignoreSource("", url)) return
+        val apivoirfilm = ApiVoirFilmExtractor()
+        val onregadeou = OnRegardeOuExtractor()
+        val estOnRegardeOu = url.startsWith(onregadeou.mainUrl, ignoreCase = true) ||
+            onregadeou.aliasUrls.any { a ->
+                val hote = try { android.net.Uri.parse(a).host?.lowercase().orEmpty() } catch (_: Exception) { "" }
+                hote.isNotBlank() && url.contains(hote, ignoreCase = true)
+            }
+        when {
+            url.startsWith(apivoirfilm.mainUrl) -> apiUrls.add(url)
+            estOnRegardeOu -> onregardeUrls.add(url)
+            else -> {
+                val nom = Extractor.identifyServiceName(url)
+                    ?: runCatching { android.net.Uri.parse(url).host?.removePrefix("www.") }.getOrNull()
+                    ?: "Server ${servers.size + 1}"
+                servers.add(Video.Server(id = "srv${servers.size}", name = nom, src = url))
+            }
+        }
+    }
+
     // ── 2026-10-21 (user : « sur 1Jour1Film… pas de serveur ») ─────────────────────────────
     //   Le site ne met PLUS les adresses dans la page : J1F_SRV (films) et j1fEpsData (épisodes)
     //   ne portent que label/type/flags (+ « oi » = numéro de la source). L'adresse est demandée
@@ -1034,6 +1188,32 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         val onregardeUrls = mutableListOf<String>()
 
         val servers = mutableListOf<Video.Server>()
+
+        // 2026-10-31 : épisode venu de l'API → sources demandées directement à admin-ajax.
+        if (id.startsWith("J1FAPI:")) {
+            val (idSaison, idEp) = id.removePrefix("J1FAPI:").split(":").let { it.getOrNull(0) to it.getOrNull(1) }
+            val urls = sonderSources { i -> "action=j1f_get_ep_source&season_id=$idSaison&ep_id=$idEp&idx=$i" }
+            Log.i("UnJourUnFilm", "API épisode $idEp (saison $idSaison) : ${urls.size} source(s)")
+            urls.forEach { rangerSource(it, servers, apiUrls, onregardeUrls) }
+            val other = apiUrls.flatMap { apivoirfilm.expand(it, baseUrl, "FR ") } +
+                onregardeUrls.flatMap { onregadeou.expand(it, baseUrl, "FR ") }
+            return sortServersByLanguage(servers + other)
+        }
+
+        // 2026-10-31 : film → id WordPress par l'API, sources par admin-ajax (sans la page).
+        if (videoType is Video.Type.Movie) {
+            val idPost = filmApi(id)?.optInt("id")?.takeIf { it > 0 }
+            if (idPost != null) {
+                val urls = sonderSources { i -> "action=j1f_get_source&post_id=$idPost&idx=$i" }
+                Log.i("UnJourUnFilm", "API film $id (post $idPost) : ${urls.size} source(s)")
+                if (urls.isNotEmpty()) {
+                    urls.forEach { rangerSource(it, servers, apiUrls, onregardeUrls) }
+                    val other = apiUrls.flatMap { apivoirfilm.expand(it, baseUrl, "FR ") } +
+                        onregardeUrls.flatMap { onregadeou.expand(it, baseUrl, "FR ") }
+                    return sortServersByLanguage(servers + other)
+                }
+            }
+        }
 
         // Handle new season-based episode format: SEASON:seasonSlug:epIndex
         if (id.startsWith("SEASON:")) {
@@ -1569,9 +1749,36 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                             if (!ok) cfPauseJusqua = maintenant + 60_000L
                         }
                     }
-                    val rep2 = chain.proceed(req)
-                    Log.i("UnJourUnFilm", "CF relance ${req.url.encodedPath} → ${rep2.code}")
-                    rep2
+                    // Le cookie cf_clearance est lié au User-Agent ; la WebView a pu normaliser
+                    //   STEALTH_UA (vraie version) APRÈS la 1re requête → on relance avec l'UA à jour.
+                    val uaAvant = req.header("User-Agent")
+                    val uaMaintenant = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
+                    val rep2 = chain.proceed(req.newBuilder().header("User-Agent", uaMaintenant).build())
+                    Log.i("UnJourUnFilm", "CF relance ${req.url.encodedPath} → ${rep2.code} (UA ${if (uaAvant == uaMaintenant) "inchangé" else "MIS À JOUR : ${uaAvant?.substringAfter("Chrome/")?.take(14)} → ${uaMaintenant.substringAfter("Chrome/").take(14)}"}, cookie cf=${cookiesDe(req.url.toString()).contains("cf_clearance=")})")
+                    if (rep2.code != 403 || rep2.header("cf-mitigated") != "challenge") return@addInterceptor rep2
+                    // Télé 2026-10-30 : même avec cookie + bon UA, CF refuse OkHttp (empreinte réseau).
+                    //   → la page est chargée PAR la WebView (vrai navigateur), comme Wiflix.
+                    rep2.close()
+                    val html = synchronized(cfVerrou) {
+                        try {
+                            kotlinx.coroutines.runBlocking {
+                                com.streamflixreborn.streamflix.utils.WebViewResolver(com.streamflixreborn.streamflix.StreamFlixApp.instance)
+                                    .get(req.url.toString(), silent = true)
+                            }
+                        } catch (e: Throwable) { Log.w("UnJourUnFilm", "WebView page : ${e.message}"); "" }
+                    }
+                    val titre = Regex("<title>([^<]*)</title>", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1) ?: ""
+                    val pageOk = html.length > 5_000 && !titre.contains("moment", true) &&
+                        !titre.contains("instant", true) && !html.contains("<body>Timeout</body>")
+                    Log.i("UnJourUnFilm", "CF page via WebView ${req.url.encodedPath} → ${if (pageOk) "OK" else "ÉCHEC"} (${html.length} car., titre « ${titre.take(40)} »)")
+                    if (!pageOk) return@addInterceptor chain.proceed(req.newBuilder().header("User-Agent", uaMaintenant).build())
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200).message("OK")
+                        .header("Content-Type", "text/html; charset=UTF-8")
+                        .body(html.toResponseBody("text/html; charset=UTF-8".toMediaTypeOrNull()))
+                        .build()
                 }
                 .build()
 
