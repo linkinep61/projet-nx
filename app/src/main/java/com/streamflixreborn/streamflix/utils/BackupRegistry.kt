@@ -93,6 +93,10 @@ object BackupRegistry {
         "VixSrc" to "VixSrc (VOSTFR, par TMDB)",
         // 2026-10-22 : KissKH — dramas asiatiques, sous-titres FR ou traduits automatiquement.
         "KissKH" to "KissKH (dramas asiatiques, VOSTFR)",
+        // 2026-10-30 : GoPlay — dramas asiatiques, sous-titres français d'origine.
+        "GoPlay" to "GoPlay (dramas asiatiques, VOSTFR)",
+        // 2026-10-30 : Vidy (vidy.st) — par TMDB, serveur « Paris » avec piste française quand elle existe.
+        "Vidy" to "Vidy (VF ou VOSTFR, par TMDB)",
         // 2026-10-22 : MegacloudX (lecteur de Cineby) — par TMDB/IMDb, sous-titres en ~17 langues.
         "MegacloudX" to "MegacloudX (VOSTFR, par TMDB)",
         // 2026-10-22 : MoviesFree (lecteur Vidsrc de moviesfree.cv) — par TMDB, audio anglais.
@@ -100,10 +104,6 @@ object BackupRegistry {
         "MoviesFree" to "MoviesFree (VOSTFR, par TMDB)",
         // 2026-10-22 (user : « branche-le et on fait les tests ») : Vidnest, agrégateur VO par TMDB.
         "Vidnest" to "Vidnest (VOSTFR, par TMDB)",
-        // 2026-10-25 (user : « autant rajouter la source, si ça permet de compléter des trucs où il
-        //   n'y a rien » / « juste préciser qu'elle est surtout en VO ») : EmbedWave (lecteur
-        //   web.nxsha.app), par TMDB — a par ex. WWE Raw récent.
-        "EmbedWave" to "EmbedWave (surtout VO, par TMDB)",
         // 2026-10-26 (user : « ajoute Videm, c'est un truc qu'on n'a pas ») : Videm (videm.xyz),
         //   par TMDB — seulement ses serveurs en français.
         "Videm" to "Videm (VF, par TMDB)",
@@ -950,6 +950,32 @@ object BackupRegistry {
                         ?: exacts.firstOrNull()
                         ?: candidats.firstOrNull { bonneAnnee(it) }
                         ?: candidats.firstOrNull()
+                        // 2026-10-30 (Oppo, fiche FrenchStream « Un Job Mortel » : tmdbId=null, aucun
+                        //   serveur par TMDB) — vérifié sur l'API : TMDB trouve bien la série (289517)
+                        //   par son titre alternatif, mais la renvoie sous son nom d'origine « 꿀알바 »
+                        //   (pas de traduction) → aucune comparaison de titre possible. On l'accepte
+                        //   quand c'est le SEUL résultat du bon type ET que son nom n'est pas en
+                        //   alphabet latin (donc forcément trouvé par un autre titre que le sien).
+                        ?: results.results.mapNotNull { if (titreDe(it) != null) it else null }
+                            .singleOrNull()
+                            ?.takeIf { item -> titreDe(item)!!.none { c -> c in 'a'..'z' || c in 'A'..'Z' } }
+                            // 2026-10-30 (Oppo, « The First Ride » DramaCool) : cette règle seule a accepté
+                            //   « 오프닝 » (O'PENing, série 201084), seul résultat TMDB mais AUTRE titre →
+                            //   EmbedWave/Vidnest/Vidy/Cloudstream cherchaient la mauvaise série. On exige
+                            //   désormais qu'un de ses TITRES ALTERNATIFS TMDB corresponde au titre cherché.
+                            ?.takeIf { item ->
+                                val alts = runCatching {
+                                    when (item) {
+                                        is TMDb3.Tv -> TMDb3.TvSeries.details(item.id, listOf(TMDb3.Params.AppendToResponse.Tv.ALTERNATIVE_TITLES)).alternativeTitles?.all()
+                                        is TMDb3.Movie -> TMDb3.Movies.details(item.id, listOf(TMDb3.Params.AppendToResponse.Movie.ALTERNATIVE_TITLES)).alternativeTitles?.all()
+                                        else -> null
+                                    }.orEmpty().mapNotNull { it.title }
+                                }.getOrDefault(emptyList())
+                                val ok = alts.any { a -> titleMatches(a, key.title) && titleMatches(key.title, a) }
+                                Log.i(TAG, "tmdbId : seul résultat, titre non latin '${titreDe(item)}' — titres alternatifs ${alts.take(6)} → " +
+                                    if (ok) "accepté pour '${key.title}'" else "REFUSÉ (aucun ne correspond à '${key.title}')")
+                                ok
+                            }
                     if (match != null) {
                         Log.i(TAG, "tmdbId résolu par recherche : '${key.title}' (${anneeCible ?: "?"}) → '${titreDe(match)}' ${anneeDe(match) ?: "?"} parmi ${candidats.size} candidat(s)")
                     }
@@ -1750,22 +1776,16 @@ object BackupRegistry {
                 ))
             } }
 
-            // ── EMBEDWAVE (lecteur web.nxsha.app, par TMDB) ─────────────────────────
-            // 2026-10-25 (user : « autant rajouter la source, si ça permet de compléter des trucs où
-            //   il n'y a rien ») : vérifié au navigateur, WWE Raw S34E01 (absent partout ailleurs) se
-            //   lance — audio anglais. Mêmes règles que Vidnest : jamais sur une œuvre française,
-            //   coupé en mode léger, sous-titres de l'appli. Pas de contrôle de présence possible
-            //   (API chiffrée) → abandon court à la lecture (cf. EmbedWave.video).
-            if (!UserPreferences.modeLeger && !resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("EmbedWave") {
-                val tmdb = resolvedTmdbId!!
-                listOf(Video.Server(
-                    id = "embedwave_${if (key.isMovie) "movie_$tmdb" else "tv_${tmdb}_${key.season}_${key.episode}"}",
-                    // « [VOSTFR] » comme Vidnest/MoviesFree (sous-titres ajoutés par l'appli) : avec
-                    //   « [VO] », le réglage « masquer la VO » le cachait (hideVo). La mention
-                    //   « surtout VO » demandée par le user est dans le nom de la source.
-                    name = "[VOSTFR]",
-                    src = com.streamflixreborn.streamflix.utils.EmbedWave.lien(tmdb, key.isMovie, key.season, key.episode) + "#vostfr",
-                ))
+            // 2026-10-30 (user : « si ce serveur nous embête à chaque fois et ne compte pas marcher à
+            //   chaque fois, on va le désactiver et le supprimer complètement ») : EmbedWave RETIRÉ —
+            //   son CDN (creativebrandinghub.cyou) renvoyait des 500/502 au hasard (init vidéo, audio n°4,
+            //   n°5…), y compris dans Chrome : rouge à chaque essai sur Squid Game S1E1.
+
+            // ── VIDY (vidy.st, par TMDB, serveur « Paris » multi-audio) ──────────────────
+            // 2026-10-30 (user : « vidy.st — on fait déjà celui-là ») : page cachée à la lecture
+            //   → absente en mode léger. VF choisie par le lecteur quand la piste existe.
+            if (!resolvedTmdbId.isNullOrBlank() && !UserPreferences.modeLeger) launch { emit("Vidy") {
+                com.streamflixreborn.streamflix.utils.VidySt.serveurs(resolvedTmdbId!!, key.isMovie, key.season, key.episode)
             } }
 
             // ── VIDEM (videm.xyz, par TMDB, serveurs FRANÇAIS seulement) ────────────
@@ -1789,6 +1809,12 @@ object BackupRegistry {
             //   automatiques / la traduction, coupés en mode léger → source absente en mode léger.
             if (!UserPreferences.modeLeger && (langueOriginale == null || langueOriginale in languesAsie)) launch { emit("KissKH") {
                 com.streamflixreborn.streamflix.utils.KissKh.serveurs(knownTitles.toList(), key.isMovie, key.season, key.episode)
+            } }
+            // 2026-10-30 (user : « rajoute-le en tant que serveur supplémentaire ») : GoPlay — mêmes
+            //   conditions que KissKH (contenu asiatique, page cachée à la lecture → pas en mode léger) ;
+            //   sous-titres français d'origine.
+            if (!UserPreferences.modeLeger && (langueOriginale == null || langueOriginale in languesAsie)) launch { emit("GoPlay") {
+                com.streamflixreborn.streamflix.utils.GoPlay.serveurs(knownTitles.toList(), key.isMovie, key.season, key.episode)
             } }
 
             // 2026-10-09 : source « Embed » (Videasy) SUPPRIMÉE à la demande du user. Elle ne
@@ -2579,6 +2605,16 @@ object BackupRegistry {
                         //   interne. Sûr : 1 seul résultat = pas de confusion possible.
                         //   NE s'applique PAS aux recherches floues (DessinAnime 24 résultats
                         //   = "Chainsaw Man", "Black Cat"… → aucune confiance).
+                        // 2026-10-30 (Oppo, « Un Job Mortel ») : Cloudstream trouvait bien la série
+                        //   (« 꿀알바 », id=289517 = NOTRE identifiant TMDB) mais la refusait faute de mot
+                        //   commun avec le titre français. Même identifiant TMDB = même œuvre → accepté.
+                        if (match == null && !resolvedTmdbId.isNullOrBlank()) {
+                            match = searchResults.filter { typeOk(it) }.firstOrNull { r ->
+                                val rid = (r as? com.streamflixreborn.streamflix.models.Movie)?.id
+                                    ?: (r as? com.streamflixreborn.streamflix.models.TvShow)?.id
+                                rid == resolvedTmdbId
+                            }?.also { Log.i(TAG, "DIAG [${p.name}] MATCH par identifiant TMDB identique ($resolvedTmdbId)") }
+                        }
                         if (match == null) {
                             val typedResults = searchResults.filter { typeOk(it) }
                             if (typedResults.size == 1) {
@@ -2837,9 +2873,10 @@ object BackupRegistry {
             "Plex" -> PlexTvResolver.resolveVod(orig.src)
                 ?: throw Exception("Plex VOD : flux introuvable (${orig.src})")
             "KissKH" -> com.streamflixreborn.streamflix.utils.KissKh.video(orig)
+            "GoPlay" -> com.streamflixreborn.streamflix.utils.GoPlay.video(orig)
+            "Vidy" -> com.streamflixreborn.streamflix.utils.VidySt.video(orig)
             "MoviesFree" -> com.streamflixreborn.streamflix.utils.Vidsrc.video(orig)
             "Vidnest" -> com.streamflixreborn.streamflix.extractors.VidnestExtractor().extract(orig.src.substringBefore('#'))
-            "EmbedWave" -> com.streamflixreborn.streamflix.utils.EmbedWave.video(orig)
             "Videm" -> com.streamflixreborn.streamflix.utils.Videm.video(orig)
             else -> {
                 // Provider générique du registre (FrenchStream, AnimeSama, Frembed…) → son

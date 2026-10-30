@@ -389,9 +389,19 @@ class SearchMobileFragment : Fragment() {
         binding.btnSearchHistory.setOnClickListener { showHistoryDialog() }
 
         binding.etSearch.apply {
-            setOnEditorActionListener { _, actionId, _ ->
-                if (actionId == EditorInfo.IME_ACTION_SEARCH) {
-                    executeSearch(binding.etSearch.text.toString())
+            // 2026-10-30 (user : « quand on fait Entrée, souvent ça va sur la recherche globale — tout le
+            //   monde se trompe ») : seule l'action SEARCH était traitée. Selon le clavier, Entrée envoie
+            //   DONE / GO / NEXT / UNSPECIFIED ou un simple KEYCODE_ENTER → non consommé → le focus
+            //   passait au bouton suivant (« Recherche globale ») et l'Entrée suivante le basculait.
+            //   Toutes ces variantes lancent maintenant la recherche, et l'Entrée est consommée.
+            setOnEditorActionListener { _, actionId, event ->
+                val entree = event?.keyCode == android.view.KeyEvent.KEYCODE_ENTER
+                val actions = setOf(EditorInfo.IME_ACTION_SEARCH, EditorInfo.IME_ACTION_DONE, EditorInfo.IME_ACTION_GO,
+                    EditorInfo.IME_ACTION_NEXT, EditorInfo.IME_ACTION_UNSPECIFIED)
+                if (actionId in actions || entree) {
+                    if (event == null || event.action == android.view.KeyEvent.ACTION_DOWN) {
+                        executeSearch(binding.etSearch.text.toString())
+                    }
                     return@setOnEditorActionListener true
                 }
                 return@setOnEditorActionListener false

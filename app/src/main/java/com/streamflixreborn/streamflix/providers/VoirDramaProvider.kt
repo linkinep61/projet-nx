@@ -23,9 +23,11 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.lastOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import retrofit2.Retrofit
@@ -36,7 +38,7 @@ import retrofit2.http.POST
 import retrofit2.http.Query
 import retrofit2.http.Url
 
-object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvider {
+object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvider, ProgressiveListProvider, ProgressiveHomeProvider {
 
     override val name = "VoirDrama"
 
@@ -74,6 +76,48 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
     //   dc::{slug}/{ep_num}  → épisode
 
     private const val DC_PREFIX = "dc::"
+
+    // 2026-10-30 : fiches GoPlay de l'accueil (« Les plus regardées »).
+    //   gp::{idHex}/{Slug}                    show (= saison unique)
+    //   gp::{idHexEp}/{Slug}/Episode-{n}       épisode
+    private const val GP_PREFIX = "gp::"
+    private fun isGoPlay(id: String) = id.startsWith(GP_PREFIX)
+
+    // 2026-10-30 (user : voirdrama.ink, « il faut garder les 2 ») : fiches du NOUVEAU site VoirDrama.
+    //   vdi::<id-slug>  fiche · vdi::<id-slug>/<n>-saison-<n>  saison · …/<e>-episode  épisode
+    private fun isVdi(id: String) = id.startsWith(com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE)
+    private fun vdiShows(l: List<com.streamflixreborn.streamflix.utils.VoirDramaInk.Fiche>) = l.map { f ->
+        TvShow(id = "${com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE}${f.id}", title = f.titre, poster = f.affiche, banner = f.affiche)
+    }
+
+    private suspend fun getTvShowFromGoPlay(chemin: String): TvShow {
+        val doc = com.streamflixreborn.streamflix.utils.GoPlay.page("${com.streamflixreborn.streamflix.utils.GoPlay.BASE}/$chemin/")
+        val slug = chemin.substringAfter('/')
+        val titre = doc?.title()?.substringBefore(" (Épisode")?.substringBefore(" - GoPlay")?.trim()?.ifBlank { null }
+            ?: com.streamflixreborn.streamflix.utils.GoPlay.titreDuSlug(slug)
+        val affiche = doc?.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
+        val resume = doc?.selectFirst("meta[name=description], meta[property=og:description]")?.attr("content")?.ifBlank { null }
+        return TvShow(
+            id = "$GP_PREFIX$chemin",
+            title = titre,
+            overview = resume,
+            poster = affiche,
+            banner = affiche,
+            seasons = listOf(Season(id = "$GP_PREFIX$chemin", number = 1, title = "Saison 1")),
+        )
+    }
+
+    private suspend fun getEpisodesFromGoPlay(chemin: String): List<Episode> =
+        com.streamflixreborn.streamflix.utils.GoPlay.episodes(chemin).map { e ->
+            Episode(id = "$GP_PREFIX${e.chemin}", number = e.numero, title = "Épisode ${e.numero}", poster = e.vignette)
+        }.also { Log.d("VoirDramaProvider", "GoPlay $chemin : ${it.size} épisode(s)") }
+
+    /** Serveur GoPlay d'un épisode gp:: (l'id porte déjà le chemin de la page d'épisode). */
+    private fun goPlayServers(id: String): List<Video.Server> {
+        val chemin = id.removePrefix(GP_PREFIX)
+        if (!chemin.contains("/Episode-", ignoreCase = true)) return emptyList()
+        return listOf(com.streamflixreborn.streamflix.utils.GoPlay.serveurEpisode(chemin))
+    }
     // 2026-05-04 : URLs primaire + secours pour Dramacool. Si dramacool9.com.ro
     // tombe (saisie domaine, panne CF), on tente .so en fallback. Le résolveur
     // mémorise le premier qui répond pour la session.
@@ -159,6 +203,54 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
             .replace('…', ' ')    // … → space (pour search)
     }
 
+    /** 2026-10-30 : transforme un lien `a.mask` Dramacool en TvShow "dc::{slug}".
+     *  Parsing factorisé depuis searchOnDramacool — même structure sur la page de
+     *  recherche et sur l'accueil (href = page de l'épisode, attribut title =
+     *  « Titre (année) Episode N », image dans le parent). Titre nettoyé du suffixe
+     *  « Episode N », poster via dcExtractImgUrl. */
+    private fun dcMaskToTvShow(link: Element): TvShow? {
+        val href = link.attr("href").takeIf { it.isNotBlank() } ?: return null
+        val slug = dcExtractSlug(href) ?: return null
+        val parent = link.parent() ?: link
+        val title = link.attr("title").takeIf { it.isNotBlank() }
+            ?: parent.selectFirst("h3")?.text()
+            ?: return null
+        val cleanTitle = title.replace(
+            Regex("""\s+Episode\s+\d+\s*$""", RegexOption.IGNORE_CASE), ""
+        ).trim()
+        val poster = dcExtractImgUrl(parent)
+        return TvShow(
+            id = "$DC_PREFIX$slug",
+            title = cleanTitle,
+            poster = poster,
+        )
+    }
+
+    // 2026-10-30 (user, Oppo : « The First Ride (2025) » DramaCool sans aucun serveur — « elle affiche la
+    //   jaquette alors qu'il n'y a aucun contenu, elle ne devrait même pas s'afficher ») : vérifié sur le
+    //   site, la fiche /the-first-ride-2025 n'a AUCUN épisode (même sa page épisode 1 est sans lecteur ;
+    //   le film est sous /the-first-ride). On écarte des résultats les fiches sans épisode. Vérif en
+    //   parallèle (8 à la fois, 4 s max chacune), mémorisée pour la session ; doute = on garde.
+    private val dcContenuCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    private suspend fun dcAContenu(slug: String): Boolean {
+        dcContenuCache[slug]?.let { return it }
+        val r = kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+            try { service.getPage("${dcBaseUrl()}$slug").select("#all-episodes a, #episode-list a").isNotEmpty() }
+            catch (_: Exception) { null }
+        } ?: return true
+        dcContenuCache[slug] = r
+        return r
+    }
+
+    private suspend fun dcFiltrerVides(shows: List<TvShow>): List<TvShow> = coroutineScope {
+        val sem = kotlinx.coroutines.sync.Semaphore(8)
+        val ok = shows.map { s -> async { sem.withPermit { dcAContenu(dcStripPrefix(s.id)) } } }.awaitAll()
+        val gardes = shows.filterIndexed { i, _ -> ok[i] }
+        if (gardes.size < shows.size) Log.d("VoirDramaProvider", "DramaCool : ${shows.size - gardes.size} fiche(s) sans épisode écartée(s) : ${shows.filterIndexed { i, _ -> !ok[i] }.map { it.title }}")
+        gardes
+    }
+
     /** Search Dramacool9 et retourne des TvShow avec ID préfixé dc::. */
     private suspend fun searchOnDramacool(query: String): List<TvShow> {
         if (query.isBlank()) return emptyList()
@@ -166,23 +258,8 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
             val cleanQuery = normalizeUnicodeChars(query)
             val url = "${dcBaseUrl()}?s=${cleanQuery.replace(" ", "+")}"
             val doc = service.getPage(url)
-            doc.select("a.mask").mapNotNull { link ->
-                val href = link.attr("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val slug = dcExtractSlug(href) ?: return@mapNotNull null
-                val parent = link.parent() ?: link
-                val title = link.attr("title").takeIf { it.isNotBlank() }
-                    ?: parent.selectFirst("h3")?.text()
-                    ?: return@mapNotNull null
-                val cleanTitle = title.replace(
-                    Regex("""\s+Episode\s+\d+\s*$""", RegexOption.IGNORE_CASE), ""
-                ).trim()
-                val poster = dcExtractImgUrl(parent)
-                TvShow(
-                    id = "$DC_PREFIX$slug",
-                    title = cleanTitle,
-                    poster = poster,
-                )
-            }
+            // 2026-10-30 : parsing factorisé dans dcMaskToTvShow (partagé avec getHome)
+            doc.select("a.mask").mapNotNull { dcMaskToTvShow(it) }
         } catch (e: Exception) {
             Log.w("VoirDramaProvider", "Dramacool search '$query' failed: ${e.message}")
             emptyList()
@@ -200,7 +277,9 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
         val poster = doc.selectFirst("article img, .single-info img, div.image img")
             ?.let { dcExtractImgUrl(it.parent() ?: it) }
         val overview = doc.selectFirst(".desc-content, .single-info p, .description p")?.text()?.trim()
-        val genres = doc.select("a[href*='/genre/']").map {
+        // 2026-10-30 (Oppo : la fiche affichait les 65 genres du MENU du site) : seuls les liens de
+        //   genre placés dans un paragraphe d'infos (« Genre: … ») concernent le titre.
+        val genres = doc.select("a[href*='/genre/']").filter { it.closest("p") != null }.distinctBy { it.attr("href") }.map {
             Genre(
                 id = it.attr("href").substringAfterLast("/genre/").removeSuffix("/"),
                 name = it.text().trim(),
@@ -426,166 +505,192 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
 
     // ==================== HOME ====================
 
-    override suspend fun getHome(): List<Category> {
+    override suspend fun getHome(): List<Category> =
+        getHomeProgressive().lastOrNull() ?: emptyList()
+
+    // 2026-10-30 (user : « il faut un affichage progressif, pareil pour le home, on ne doit pas faire
+    //   sauter les mini-box » + « il nous manque quelques catégories ») : l'accueil est émis rangée
+    //   par rangée, dans un ORDRE FIXE (l'écran ne saute pas quand une rangée lente arrive), et
+    //   chaque rangée est plafonnée (MAX_RANGEE) pour ménager les petites box. Nouvelles rangées
+    //   presque gratuites : « Nouveaux K-Dramas » (même page d'accueil GoPlay que « Les plus
+    //   regardées »), « Émissions de variété » (bloc #kshow de la page d'accueil DramaCool déjà
+    //   chargée pour les nouveautés), « Films récents » (bibliothèque Films GoPlay, page 1).
+    private const val MAX_RANGEE = 24
+
+    override fun getHomeProgressive(): Flow<List<Category>> = channelFlow {
         initializeService()
-        return try {
-            coroutineScope {
-                val homeDeferred = async { service.getPage(baseUrl) }
-                // 2026-08-16 : "Nouveau" ne montrait qu'UNE page (14 titres). Le site en a 364,
-                // paginées en /nouveaux-ajouts/page/N/. On en charge 3 en parallèle → ~42 titres.
-                val recentDeferred = async {
-                    try { service.getPage("${baseUrl}nouveaux-ajouts/") } catch (_: Exception) { null }
-                }
-                val recentPagesDeferred = (2..NOUVEAUTES_PAGES).map { p ->
-                    async {
-                        try { service.getPage("${baseUrl}nouveaux-ajouts/page/$p/") } catch (_: Exception) { null }
-                    }
-                }
-                val popularDeferred = async {
-                    try { service.getPage("${baseUrl}drama/?m_orderby=views") } catch (_: Exception) { null }
-                }
-                val popularFilmsDeferred = async {
-                    try { service.getPage("${baseUrl}liste-dramas/?filter=dubbed&m_orderby=views") } catch (_: Exception) { null }
-                }
-                val topRatedDeferred = async {
-                    try { service.getPage("${baseUrl}drama/?m_orderby=rating") } catch (_: Exception) { null }
-                }
+        val t0 = System.currentTimeMillis()
+        // Pages partagées entre plusieurs rangées (une seule requête chacune).
+        val dcHomeDeferred = async { try { service.getPage(dcBaseUrl()) } catch (_: Exception) { null } }
+        val goplayDeferred = async(kotlinx.coroutines.Dispatchers.IO) {
+            try { com.streamflixreborn.streamflix.utils.GoPlay.accueilSections(listOf("freshkdrama", "toptitles"), MAX_RANGEE) }
+            catch (_: Exception) { emptyMap() }
+        }
+        fun gpShows(l: List<com.streamflixreborn.streamflix.utils.GoPlay.Fiche>?) = l.orEmpty().map { f ->
+            TvShow(id = "$GP_PREFIX${f.chemin}", title = f.titre, poster = f.affiche, banner = f.affiche)
+        }
+        fun vdListe(doc: Document?) = doc?.select(".page-item-detail")?.mapNotNull { parseHomeItem(it) }.orEmpty()
 
-                val document = homeDeferred.await()
-                val categories = mutableListOf<Category>()
-
-                // Section principale "EN COURS" — .page-item-detail items
-                val allItems = document.select(".page-item-detail").mapNotNull { item ->
-                    parseHomeItem(item)
-                }
-
-                if (allItems.isNotEmpty()) {
-                    // FEATURED carousel with deep copies to avoid shared itemType conflicts
-                    val featuredItems = allItems.take(10).map { item ->
-                        when (item) {
-                            is Movie -> item.copy(banner = item.banner ?: item.poster)
-                            is TvShow -> item.copy(banner = item.banner ?: item.poster)
-                            else -> item
-                        }
-                    }
-                    // Enhance banners with TMDB HD backdrops (filter Asian content only)
-                    val asianLanguages = setOf("ko", "ja", "zh", "th", "tl")
-                    if (UserPreferences.enableTmdb) {
-                        for (item in featuredItems) {
-                            try {
-                                val title = when (item) {
-                                    is Movie -> item.title
-                                    is TvShow -> item.title
-                                    else -> null
-                                } ?: continue
-                                val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer
-                                    .cleanForTmdbSearch(title).ifBlank { title }
-                                if (cleanTitle.length < 2) continue
-                                val results = TMDb3.Search.multi(cleanTitle, language = "fr-FR")
-                                // Matching strict : langue asiatique + titre similaire
-                                val match = results.results.firstOrNull { result ->
-                                    when (result) {
-                                        is TMDb3.Movie -> result.originalLanguage in asianLanguages && result.backdropPath != null && run {
-                                            val t = result.title?.trim() ?: ""; t.equals(cleanTitle, true) || t.contains(cleanTitle, true) || cleanTitle.contains(t, true)
-                                        }
-                                        is TMDb3.Tv -> result.originalLanguage in asianLanguages && result.backdropPath != null && run {
-                                            val t = result.name?.trim() ?: ""; t.equals(cleanTitle, true) || t.contains(cleanTitle, true) || cleanTitle.contains(t, true)
-                                        }
-                                        else -> false
-                                    }
-                                }
-                                val banner = when (match) {
-                                    is TMDb3.Movie -> match.backdropPath?.original
-                                    is TMDb3.Tv -> match.backdropPath?.original
-                                    else -> null
-                                }
-                                if (banner != null) {
-                                    when (item) {
-                                        is Movie -> item.banner = banner
-                                        is TvShow -> item.banner = banner
-                                    }
-                                }
-                            } catch (_: Exception) {}
-                        }
-                    }
-                    // Ne garder dans le carrousel que les items avec backdrop TMDb HD (min 5 sinon liste complète)
-                    val carouselItems = featuredItems.filter { item ->
-                        val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
-                        b != null && b.contains("/t/p/")
-                    }
-                    val finalCarousel = if (carouselItems.size >= 5) carouselItems else featuredItems
-                    if (finalCarousel.isNotEmpty()) {
-                        categories.add(Category(name = Category.FEATURED, list = finalCarousel))
-                    }
-                    // 2026-06-23 : retirer du "En cours" les items déjà dans le carousel
-                    val featuredIds = finalCarousel.mapNotNull { when (it) { is TvShow -> it.id; is Movie -> it.id; else -> null } }.toSet()
-                    categories.add(Category(name = "En cours", list = allItems.filter { item ->
-                        val id = when (item) { is TvShow -> item.id; is Movie -> item.id; else -> "" }
-                        id !in featuredIds
-                    }))
-                }
-
-                // 2. Nouveaux ajouts (plusieurs pages, dans l'ordre, sans doublon)
-                val recentDocs = buildList {
-                    recentDeferred.await()?.let { add(it) }
-                    recentPagesDeferred.forEach { d -> d.await()?.let { add(it) } }
-                }
-                if (recentDocs.isNotEmpty()) {
-                    val vusRecents = HashSet<String>()
-                    val recentShows = recentDocs
-                        .flatMap { doc -> doc.select(".page-item-detail").mapNotNull { parseHomeItem(it) } }
-                        .filter { item ->
-                            val id = when (item) { is TvShow -> item.id; is Movie -> item.id; else -> "" }
-                            id.isNotBlank() && vusRecents.add(id)
-                        }
-                    if (recentShows.isNotEmpty()) {
-                        categories.add(Category(name = "Nouveau", list = recentShows))
-                    }
-                }
-
-                // 3. Séries populaires (par vues)
-                val popularDoc = popularDeferred.await()
-                if (popularDoc != null) {
-                    val popularShows = popularDoc.select(".page-item-detail").mapNotNull { item ->
-                        parseHomeItem(item)
-                    }
-                    if (popularShows.isNotEmpty()) {
-                        categories.add(Category(name = "Séries Populaires", list = popularShows))
-                    }
-                }
-
-                // 4. Films populaires (VF, triés par vues)
-                val popularFilmsDoc = popularFilmsDeferred.await()
-                if (popularFilmsDoc != null) {
-                    val popularFilms = popularFilmsDoc.select(".page-item-detail").mapNotNull { item ->
-                        val show = parseHomeItem(item) ?: return@mapNotNull null
+        val rangees: List<Pair<String, suspend () -> List<Category>>> = listOf(
+            // 1. Nouveautés DramaCool → carrousel + « Nouveaux épisodes » (secours : accueil VoirDrama)
+            "nouveautés" to suspend { rangeesNouveautes(dcHomeDeferred.await()) },
+            // 2026-10-30 : nouveau site VoirDrama (voirdrama.ink), à jour — derniers épisodes VF/VOSTFR.
+            "VoirDrama nouveau site" to suspend {
+                vdiShows(try { com.streamflixreborn.streamflix.utils.VoirDramaInk.accueil() } catch (_: Exception) { emptyList() }).take(MAX_RANGEE).takeIf { it.isNotEmpty() }
+                    ?.let { listOf(Category(name = "Derniers épisodes VoirDrama", list = it)) }.orEmpty()
+            },
+            // 2. DramaCool « Émissions de variété » (bloc #kshow de la page déjà chargée)
+            "DramaCool variétés" to suspend {
+                val vus = HashSet<String>()
+                dcHomeDeferred.await()?.select("#kshow a.mask")?.mapNotNull { dcMaskToTvShow(it) }
+                    ?.filter { vus.add(it.id) }?.take(MAX_RANGEE)?.takeIf { it.isNotEmpty() }
+                    ?.let { listOf(Category(name = "Émissions de variété", list = it)) }.orEmpty()
+            },
+            // 3-5. VoirDrama (catalogue VF/VOSTFR)
+            "VD séries populaires" to suspend {
+                val l = vdListe(try { service.getPage("${baseUrl}drama/?m_orderby=views") } catch (_: Exception) { null })
+                if (l.isEmpty()) emptyList() else listOf(Category(name = "Séries Populaires", list = l.take(MAX_RANGEE)))
+            },
+            "VD films populaires" to suspend {
+                val l = vdListe(try { service.getPage("${baseUrl}liste-dramas/?filter=dubbed&m_orderby=views") } catch (_: Exception) { null })
+                    .mapNotNull { show ->
                         when (show) {
                             is TvShow -> Movie(id = show.id, title = show.title, poster = show.poster).apply { isSeries = true }
                             is Movie -> show
                             else -> null
                         }
                     }
-                    if (popularFilms.isNotEmpty()) {
-                        categories.add(Category(name = "Films Populaires", list = popularFilms))
-                    }
-                }
+                if (l.isEmpty()) emptyList() else listOf(Category(name = "Populaires en VF", list = l.take(MAX_RANGEE)))
+            },
+            "VD mieux notés" to suspend {
+                val l = vdListe(try { service.getPage("${baseUrl}drama/?m_orderby=rating") } catch (_: Exception) { null })
+                if (l.isEmpty()) emptyList() else listOf(Category(name = "Mieux Notés", list = l.take(MAX_RANGEE)))
+            },
+            // 6. GoPlay (le plus lent : vérif Cloudflare à la 1re ouverture → en bas) « Nouveaux K-Dramas »
+            "GoPlay K-Dramas" to suspend {
+                gpShows(goplayDeferred.await()["freshkdrama"]).takeIf { it.isNotEmpty() }
+                    ?.let { listOf(Category(name = "Nouveaux K-Dramas", list = it)) }.orEmpty()
+            },
+            // 7. GoPlay « Les plus regardées » (à la place de l'ancien « Nouveau » VoirDrama)
+            "GoPlay populaires" to suspend {
+                gpShows(goplayDeferred.await()["toptitles"]).takeIf { it.isNotEmpty() }
+                    ?.let { listOf(Category(name = "Les plus regardées (GoPlay)", list = it)) }.orEmpty()
+            },
+            // 8. GoPlay « Films récents »
+            "GoPlay films" to suspend {
+                filmsGoPlay(1).take(MAX_RANGEE).takeIf { it.isNotEmpty() }
+                    ?.let { listOf(Category(name = "Films récents", list = it)) }.orEmpty()
+            },
+        )
 
-                // 5. Mieux notés (par note)
-                val topRatedDoc = topRatedDeferred.await()
-                if (topRatedDoc != null) {
-                    val topRated = topRatedDoc.select(".page-item-detail").mapNotNull { item ->
-                        parseHomeItem(item)
-                    }
-                    if (topRated.isNotEmpty()) {
-                        categories.add(Category(name = "Mieux Notés", list = topRated))
-                    }
+        val prets = arrayOfNulls<List<Category>>(rangees.size)
+        val verrou = Mutex()
+        rangees.forEachIndexed { i, (nom, charger) ->
+            launch {
+                val r = try { charger() } catch (e: Exception) { Log.w("VoirDramaProvider", "accueil $nom KO : ${e.message}"); emptyList() }
+                // Remplissage de HAUT EN BAS : on n'affiche que les rangées prêtes jusqu'à la
+                //   première manquante → l'écran ne bouge pas sous les yeux.
+                val instantane = verrou.withLock {
+                    prets[i] = r
+                    prets.takeWhile { it != null }.filterNotNull().flatten()
                 }
-
-                categories
+                Log.d("VoirDramaProvider", "accueil : $nom → ${r.sumOf { it.list.size }} fiche(s) (+${System.currentTimeMillis() - t0} ms), ${instantane.size} rangée(s) affichée(s)")
+                if (instantane.isNotEmpty()) send(instantane)
             }
-        } catch (e: Exception) {
-            Log.e("VoirDramaProvider", "getHome error: ", e)
-            emptyList()
+        }
+    }
+
+    /** Carrousel + « Nouveaux épisodes » depuis l'accueil DramaCool (à jour) ; secours : accueil
+     *  VoirDrama figé (carrousel + « En cours »). */
+    private suspend fun rangeesNouveautes(dcHomeDoc: Document?): List<Category> {
+        val categories = mutableListOf<Category>()
+        val dcShows = if (dcHomeDoc != null) {
+            val dcPage2Doc = try { service.getPage("${dcBaseUrl()}?page=2") } catch (_: Exception) { null }
+            val vusDc = HashSet<String>()
+            // #drama seulement : #kshow a sa propre rangée « Émissions de variété ».
+            listOfNotNull(dcHomeDoc, dcPage2Doc)
+                .flatMap { doc -> (doc.select("#drama a.mask").ifEmpty { doc.select("a.mask") }).mapNotNull { dcMaskToTvShow(it) } }
+                .filter { vusDc.add(it.id) }
+        } else emptyList()
+
+        if (dcShows.isNotEmpty()) {
+            val featuredDc = dcShows.take(10).map { it.copy(banner = it.banner ?: it.poster) }
+            enrichBannersWithTmdb(featuredDc)
+            val carouselDc = featuredDc.filter { it.banner?.contains("/t/p/") == true }
+            val finalCarousel = if (carouselDc.size >= 5) carouselDc else featuredDc
+            if (finalCarousel.isNotEmpty()) categories.add(Category(name = Category.FEATURED, list = finalCarousel))
+            val featuredIds = finalCarousel.map { it.id }.toSet()
+            categories.add(Category(name = "Nouveaux épisodes", list = dcShows.filter { it.id !in featuredIds }.take(MAX_RANGEE * 2)))
+            return categories
+        }
+        // Secours : accueil VoirDrama
+        val document = try { service.getPage(baseUrl) } catch (_: Exception) { null } ?: return emptyList()
+        val allItems = document.select(".page-item-detail").mapNotNull { parseHomeItem(it) }
+        if (allItems.isEmpty()) return emptyList()
+        val featuredItems = allItems.take(10).map { item ->
+            when (item) {
+                is Movie -> item.copy(banner = item.banner ?: item.poster)
+                is TvShow -> item.copy(banner = item.banner ?: item.poster)
+                else -> item
+            }
+        }
+        enrichBannersWithTmdb(featuredItems)
+        val carouselItems = featuredItems.filter { item ->
+            val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+            b != null && b.contains("/t/p/")
+        }
+        val finalCarousel = if (carouselItems.size >= 5) carouselItems else featuredItems
+        if (finalCarousel.isNotEmpty()) categories.add(Category(name = Category.FEATURED, list = finalCarousel))
+        val featuredIds = finalCarousel.mapNotNull { when (it) { is TvShow -> it.id; is Movie -> it.id; else -> null } }.toSet()
+        categories.add(Category(name = "En cours", list = allItems.filter { item ->
+            val id = when (item) { is TvShow -> item.id; is Movie -> item.id; else -> "" }
+            id !in featuredIds
+        }))
+        return categories
+    }
+
+    /** 2026-10-30 : enrichissement TMDb des bannières du carrousel, factorisé depuis
+     *  getHome (utilisé par le carrousel VoirDrama ET par celui des nouveautés
+     *  DramaCool). Modifie les items EN PLACE — attend des copies profondes en entrée
+     *  (conflits itemType partagés évités par l'appelant). */
+    private suspend fun enrichBannersWithTmdb(featuredItems: List<Show>) {
+        val asianLanguages = setOf("ko", "ja", "zh", "th", "tl")
+        if (!UserPreferences.enableTmdb) return
+        for (item in featuredItems) {
+            try {
+                val title = when (item) {
+                    is Movie -> item.title
+                    is TvShow -> item.title
+                    else -> null
+                } ?: continue
+                val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer
+                    .cleanForTmdbSearch(title).ifBlank { title }
+                if (cleanTitle.length < 2) continue
+                val results = TMDb3.Search.multi(cleanTitle, language = "fr-FR")
+                // Matching strict : langue asiatique + titre similaire
+                val match = results.results.firstOrNull { result ->
+                    when (result) {
+                        is TMDb3.Movie -> result.originalLanguage in asianLanguages && result.backdropPath != null && run {
+                            val t = result.title?.trim() ?: ""; t.equals(cleanTitle, true) || t.contains(cleanTitle, true) || cleanTitle.contains(t, true)
+                        }
+                        is TMDb3.Tv -> result.originalLanguage in asianLanguages && result.backdropPath != null && run {
+                            val t = result.name?.trim() ?: ""; t.equals(cleanTitle, true) || t.contains(cleanTitle, true) || cleanTitle.contains(t, true)
+                        }
+                        else -> false
+                    }
+                }
+                val banner = when (match) {
+                    is TMDb3.Movie -> match.backdropPath?.original
+                    is TMDb3.Tv -> match.backdropPath?.original
+                    else -> null
+                }
+                if (banner != null) {
+                    when (item) {
+                        is Movie -> item.banner = banner
+                        is TvShow -> item.banner = banner
+                    }
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -641,10 +746,21 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                 }
                 // Dramacool seulement sur page 1 (pas de pagination cross-site)
                 val dramacoolDeferred = async {
-                    if (page <= 1) searchOnDramacool(query) else emptyList()
+                    if (page <= 1) dcFiltrerVides(searchOnDramacool(query)) else emptyList()
                 }
-                val voirDramaResults = voirDramaDeferred.await()
-                val dramacoolResults = dramacoolDeferred.await()
+                // 2026-10-30 : GoPlay ajouté à la recherche (page 1, comme DramaCool).
+                val goplayDeferred = async(kotlinx.coroutines.Dispatchers.IO) {
+                    if (page > 1) emptyList() else try {
+                        com.streamflixreborn.streamflix.utils.GoPlay.rechercheFiches(query).map { f ->
+                            TvShow(id = "$GP_PREFIX${f.chemin}", title = f.titre, poster = f.affiche)
+                        }
+                    } catch (e: Exception) { Log.w("VoirDramaProvider", "GoPlay search failed: ${e.message}"); emptyList() }
+                }
+                val vdiDeferred = async(kotlinx.coroutines.Dispatchers.IO) {
+                    if (page > 1) emptyList() else try { vdiShows(com.streamflixreborn.streamflix.utils.VoirDramaInk.recherche(query)) } catch (_: Exception) { emptyList() }
+                }
+                val voirDramaResults = vdiDeferred.await() + voirDramaDeferred.await()
+                val dramacoolResults = dramacoolDeferred.await() + goplayDeferred.await()
 
                 // Normalise les titres pour dédup
                 fun normalize(s: String) = s.lowercase()
@@ -672,72 +788,123 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
 
     // ==================== MOVIES / TV SHOWS ====================
 
-    override suspend fun getMovies(page: Int): List<Movie> = coroutineScope {
-        // Onglet "FR" — contenu VF via liste-dramas/?filter=dubbed
-        initializeService()
-        try {
-            val url = if (page > 1) "${baseUrl}liste-dramas/page/$page/?filter=dubbed"
-                      else "${baseUrl}liste-dramas/?filter=dubbed"
-            val document = service.getPage(url)
-            val items = document.select(".page-item-detail").mapNotNull { item ->
-                val show = parseHomeItem(item) ?: return@mapNotNull null
-                val id = when (show) { is Movie -> show.id; is TvShow -> show.id; else -> return@mapNotNull null }
-                val title = when (show) { is Movie -> show.title; is TvShow -> show.title; else -> return@mapNotNull null }
-                val poster = when (show) { is Movie -> show.poster; is TvShow -> show.poster; else -> return@mapNotNull null }
-                Triple(id, title, poster)
-            }
+    // 2026-10-30 (user : « d'un côté un style FR, de l'autre un style VOSTFR — on aurait dû garder
+    //   l'aspect séries et films et tout mettre dans un même paquet ; plein de sources appelées de ce
+    //   site n'arrivent même pas dans Séries et Films ») : les deux onglets étaient en fait « VF »
+    //   (liste-dramas ?filter=dubbed) et « VOSTFR » (?filter=subbed), tirés de VoirDrama SEUL (figé
+    //   depuis juin) et lents (une page de détail ouverte par titre pour deviner film/série).
+    //   Désormais : Films = films de toutes les sources, Séries = séries de toutes les sources ;
+    //   la langue se voit sur les serveurs ([VF] / [VOSTFR] / [VO]), plus sur l'onglet.
+    //   Chaque source sait déjà ce qui est film ou série, sans ouvrir les fiches :
+    //     • VoirDrama : recherche avancée ?type=MOVIE / ?type=TV (tri « latest »), VF et VOSTFR ;
+    //     • GoPlay : bibliothèque /browse?type=2 (Films) / type=1 (Séries) ;
+    //     • DramaCool (séries seulement — sa liste de films n'a ni affiche ni pagination) :
+    //       /category/latest-asian-drama-releases-hd/page/N/ (à jour, épisodes du jour).
 
-            // Vérifier chaque page détail en parallèle (batches de 5)
-            // >1 épisode = série, ≤1 épisode = film
-            items.chunked(5).flatMap { batch ->
-                batch.map { (id, title, poster) ->
-                    async {
-                        val hasMultipleEpisodes = try {
-                            val detailDoc = service.getPage("${baseUrl}drama/$id/")
-                            detailDoc.select("li.wp-manga-chapter").size > 1
-                        } catch (e: Exception) { false }
-                        Movie(id = id, title = title, poster = poster).apply { isSeries = hasMultipleEpisodes }
-                    }
-                }.awaitAll()
+    private fun vdListeTypee(type: String, page: Int): String {
+        val q = "?s=&post_type=wp-manga&type=$type&m_orderby=latest"
+        return if (page > 1) "${baseUrl}page/$page/$q" else "$baseUrl$q"
+    }
+
+    /** Titre ramené à l'essentiel pour dédoublonner entre sources. */
+    private fun cleTitre(s: String) = s.lowercase()
+        .replace(Regex("""\((vf|vostfr|\d{4})\)"""), " ")
+        .replace(Regex("""\b(vf|vostfr)\b"""), " ")
+        .replace(Regex("""[^\p{L}\p{N}]+"""), " ").trim()
+
+    /** Mélange les listes une par une (A1, B1, C1, A2, B2…) en retirant les doublons de titre. */
+    private fun <T> entrelacer(listes: List<List<T>>, titre: (T) -> String): List<T> {
+        val vus = HashSet<String>()
+        val res = ArrayList<T>()
+        val max = listes.maxOfOrNull { it.size } ?: 0
+        for (i in 0 until max) for (l in listes) {
+            val x = l.getOrNull(i) ?: continue
+            if (vus.add(cleTitre(titre(x)))) res.add(x)
+        }
+        return res
+    }
+
+    // ---- sources des onglets (chacune indépendante, erreurs avalées) ----
+
+    private suspend fun filmsVoirDrama(page: Int): List<Movie> = try {
+        parseSearchResults(service.getPage(vdListeTypee("MOVIE", page))).mapNotNull { it ->
+            when (it) {
+                is Movie -> it
+                is TvShow -> Movie(id = it.id, title = it.title, poster = it.poster)
+                else -> null
             }
-        } catch (e: Exception) {
-            Log.e("VoirDramaProvider", "getMovies error: ", e)
-            emptyList()
+        }
+    } catch (e: Exception) { Log.w("VoirDramaProvider", "Films VD p$page KO : ${e.message}"); emptyList() }
+
+    private suspend fun filmsGoPlay(page: Int): List<Movie> = try {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.streamflixreborn.streamflix.utils.GoPlay.bibliotheque(com.streamflixreborn.streamflix.utils.GoPlay.TYPE_FILMS, page)
+        }.map { f -> Movie(id = "$GP_PREFIX${f.chemin}", title = f.titre, poster = f.affiche, overview = f.resume) }
+    } catch (e: Exception) { Log.w("VoirDramaProvider", "Films GoPlay p$page KO : ${e.message}"); emptyList() }
+
+    private suspend fun seriesVoirDrama(page: Int): List<TvShow> = try {
+        parseSearchResults(service.getPage(vdListeTypee("TV", page))).mapNotNull { it as? TvShow }
+    } catch (e: Exception) { Log.w("VoirDramaProvider", "Séries VD p$page KO : ${e.message}"); emptyList() }
+
+    private suspend fun seriesGoPlay(page: Int): List<TvShow> = try {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.streamflixreborn.streamflix.utils.GoPlay.bibliotheque(com.streamflixreborn.streamflix.utils.GoPlay.TYPE_SERIES, page)
+        }.map { f -> TvShow(id = "$GP_PREFIX${f.chemin}", title = f.titre, poster = f.affiche, overview = f.resume) }
+    } catch (e: Exception) { Log.w("VoirDramaProvider", "Séries GoPlay p$page KO : ${e.message}"); emptyList() }
+
+    private suspend fun seriesDramaCool(page: Int): List<TvShow> = try {
+        val base = dcBaseUrl()
+        val url = if (page > 1) "${base}category/latest-asian-drama-releases-hd/page/$page/"
+                  else "${base}category/latest-asian-drama-releases-hd/"
+        val vus = HashSet<String>()
+        service.getPage(url).select("a.mask").mapNotNull { dcMaskToTvShow(it) }.filter { vus.add(it.id) }
+    } catch (e: Exception) { Log.w("VoirDramaProvider", "Séries DramaCool p$page KO : ${e.message}"); emptyList() }
+
+    /** Lance les sources en parallèle et émet la liste cumulée à chaque réponse. */
+    private fun <T> progressif(
+        etiquette: String,
+        sources: List<Pair<String, suspend () -> List<T>>>,
+        titre: (T) -> String,
+    ): kotlinx.coroutines.flow.Flow<List<T>> = channelFlow {
+        initializeService()
+        val t0 = System.currentTimeMillis()
+        // Chaque source qui répond s'AJOUTE à la suite (doublons de titre écartés) : ce qui est
+        //   déjà à l'écran ne bouge jamais.
+        val affiche = ArrayList<T>()
+        val vus = HashSet<String>()
+        val verrou = Mutex()
+        sources.forEach { (nom, charger) ->
+            launch {
+                val r = charger()
+                val instantane = verrou.withLock {
+                    r.forEach { if (vus.add(cleTitre(titre(it)))) affiche.add(it) }
+                    affiche.toList()
+                }
+                Log.d("VoirDramaProvider", "$etiquette : $nom=${r.size} (+${System.currentTimeMillis() - t0} ms) → ${instantane.size} affiché(s)")
+                if (r.isNotEmpty()) send(instantane)
+            }
         }
     }
 
-    override suspend fun getTvShows(page: Int): List<TvShow> = coroutineScope {
-        // Onglet "VOSTFR" — via liste-dramas/?filter=subbed
-        initializeService()
-        try {
-            val url = if (page > 1) "${baseUrl}liste-dramas/page/$page/?filter=subbed"
-                      else "${baseUrl}liste-dramas/?filter=subbed"
-            val document = service.getPage(url)
-            val items = document.select(".page-item-detail").mapNotNull { item ->
-                val show = parseHomeItem(item) ?: return@mapNotNull null
-                val id = when (show) { is Movie -> show.id; is TvShow -> show.id; else -> return@mapNotNull null }
-                val title = when (show) { is Movie -> show.title; is TvShow -> show.title; else -> return@mapNotNull null }
-                val poster = when (show) { is Movie -> show.poster; is TvShow -> show.poster; else -> return@mapNotNull null }
-                Triple(id, title, poster)
-            }
+    override fun getMoviesProgressive(page: Int): kotlinx.coroutines.flow.Flow<List<Movie>> =
+        progressif("onglet Films p$page", listOf(
+            "VoirDrama" to suspend { filmsVoirDrama(page) },
+            "GoPlay" to suspend { filmsGoPlay(page) },
+        )) { it.title }
 
-            // Vérifier chaque page détail en parallèle (batches de 5)
-            items.chunked(5).flatMap { batch ->
-                batch.map { (id, title, poster) ->
-                    async {
-                        val hasMultipleEpisodes = try {
-                            val detailDoc = service.getPage("${baseUrl}drama/$id/")
-                            detailDoc.select("li.wp-manga-chapter").size > 1
-                        } catch (e: Exception) { true }
-                        TvShow(id = id, title = title, poster = poster).apply { isMovie = !hasMultipleEpisodes }
-                    }
-                }.awaitAll()
-            }
-        } catch (e: Exception) {
-            Log.e("VoirDramaProvider", "getTvShows error: ", e)
-            emptyList()
-        }
-    }
+    override fun getTvShowsProgressive(page: Int): kotlinx.coroutines.flow.Flow<List<TvShow>> =
+        progressif("onglet Séries p$page", listOf(
+            "VoirDrama (nouveau site)" to suspend { try { vdiShows(com.streamflixreborn.streamflix.utils.VoirDramaInk.liste(page)) } catch (_: Exception) { emptyList() } },
+            "DramaCool" to suspend { seriesDramaCool(page) },
+            "GoPlay" to suspend { seriesGoPlay(page) },
+            "VoirDrama" to suspend { seriesVoirDrama(page) },
+        )) { it.title }
+
+    override suspend fun getMovies(page: Int): List<Movie> =
+        getMoviesProgressive(page).lastOrNull() ?: emptyList()
+
+    override suspend fun getTvShows(page: Int): List<TvShow> =
+        getTvShowsProgressive(page).lastOrNull() ?: emptyList()
 
 
 
@@ -758,6 +925,11 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                 banner = show.banner,
                 genres = show.genres,
             )
+        }
+        // 2026-10-30 : films GoPlay (onglet Films) — même fiche qu'une série, un seul épisode.
+        if (isGoPlay(id)) {
+            val show = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { getTvShowFromGoPlay(id.removePrefix(GP_PREFIX)) }
+            return Movie(id = id, title = show.title, overview = show.overview, poster = show.poster, banner = show.banner)
         }
         val url = if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
         val document = service.getPage(url)
@@ -804,6 +976,16 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
     override suspend fun getTvShow(id: String): TvShow {
         initializeService()
         if (isDramacool(id)) return getTvShowFromDramacool(dcStripPrefix(id))
+        if (isGoPlay(id)) return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { getTvShowFromGoPlay(id.removePrefix(GP_PREFIX)) }
+        if (isVdi(id)) {
+            val slug = id.removePrefix(com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE)
+            val d = com.streamflixreborn.streamflix.utils.VoirDramaInk.detail(slug) ?: return TvShow(id = id, title = slug.substringAfter('-').replace('-', ' '))
+            return TvShow(
+                id = id, title = d.titre, overview = d.resume, poster = d.affiche, banner = d.affiche,
+                genres = d.genres.map { Genre(id = it.lowercase(), name = it) },
+                seasons = d.saisons.map { (n, sid) -> Season(id = "${com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE}$sid", number = n, title = "Saison $n") },
+            )
+        }
         val url = if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
         val document = service.getPage(url)
 
@@ -861,6 +1043,10 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         initializeService()
         if (isDramacool(seasonId)) return getEpisodesFromDramacool(dcStripPrefix(seasonId))
+        if (isGoPlay(seasonId)) return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { getEpisodesFromGoPlay(seasonId.removePrefix(GP_PREFIX)) }
+        if (isVdi(seasonId)) return com.streamflixreborn.streamflix.utils.VoirDramaInk.episodes(seasonId.removePrefix(com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE)).map { e ->
+            Episode(id = "${com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE}${e.id}", number = e.numero, title = "Épisode ${e.numero}")
+        }
         val url = if (seasonId.startsWith("http")) seasonId else "${baseUrl}drama/$seasonId/"
         val document = service.getPage(url)
 
@@ -929,6 +1115,18 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
         // 2026-05-04 : Dramacool routing — IDs préfixés "dc::" sont servis par
         // les helpers Dramacool, pas par VoirDrama. Pour un movie DC on tape
         // sur episode-1.html, pour un épisode DC on construit l'URL via slug + ep.
+        if (isVdi(id)) return com.streamflixreborn.streamflix.utils.VoirDramaInk.serveurs(id.removePrefix(com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE))
+        if (isGoPlay(id)) {
+            // 2026-10-30 : film GoPlay → l'id est celui de la fiche ; son unique épisode (Episode-0).
+            if (videoType is Video.Type.Movie && !id.contains("/Episode-", ignoreCase = true)) {
+                val ep = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.utils.GoPlay.episodes(id.removePrefix(GP_PREFIX)).firstOrNull()
+                }
+                Log.d("VoirDramaProvider", "film GoPlay $id → ${ep?.chemin ?: "aucun épisode"}")
+                return ep?.let { listOf(com.streamflixreborn.streamflix.utils.GoPlay.serveurEpisode(it.chemin)) } ?: emptyList()
+            }
+            return goPlayServers(id)
+        }
         if (isDramacool(id)) {
             val stripped = dcStripPrefix(id)
             return when (videoType) {
@@ -1151,6 +1349,20 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
      *  plus d'attente bloquante sur Cloudstream/Moviebox avant de voir une source. */
     override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
         initializeService()
+        // 2026-10-30 : épisodes GoPlay (gp::) = leur page d'épisode ; le registre de secours
+        //   (DramaCool, KissKH…) tourne à côté, par titre, depuis PlayerViewModel.
+        if (isVdi(id)) {
+            val s = com.streamflixreborn.streamflix.utils.VoirDramaInk.serveurs(id.removePrefix(com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE))
+            if (s.isNotEmpty()) send(s)
+            return@channelFlow
+        }
+        if (isGoPlay(id)) {
+            // 2026-10-30 : getServers gère aussi les films GoPlay (id de fiche → son épisode unique).
+            val s = getServers(id, videoType)
+            Log.d("VoirDramaProvider", "GoPlay serveurs pour $id : ${s.size}")
+            if (s.isNotEmpty()) send(s)
+            return@channelFlow
+        }
         // Items Dramacool (dc::) = mono-source → une seule émission.
         if (isDramacool(id)) {
             try {
@@ -1184,6 +1396,11 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
+        if (server.id.startsWith(com.streamflixreborn.streamflix.utils.VoirDramaInk.PREFIXE_SERVEUR)) return com.streamflixreborn.streamflix.utils.VoirDramaInk.video(server)
+        // 2026-10-30 : serveur GoPlay (page cachée → flux DASH + sous-titres français d'origine).
+        if (server.id.startsWith(com.streamflixreborn.streamflix.utils.GoPlay.PREFIXE)) {
+            return com.streamflixreborn.streamflix.utils.GoPlay.video(server)
+        }
         val video = Extractor.extract(server.src)
         // Pour les dramas VOSTFR, garder les sous-titres activés par défaut
         if (server.name.contains("VOSTFR")) {
@@ -1370,7 +1587,12 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
      * Parse un seul élément de résultat de recherche (.c-tabs-item__content).
      */
     private fun parseSearchItem(element: Element): Show? {
-        val link = element.selectFirst(".post-title a, h3 a, h4 a, a[href*=/drama/]")
+        // 2026-10-30 (DIAG Oppo : 10 résultats « Type MOVIE », 3 seulement retenus) : un sélecteur
+        //   à virgules rend le 1er élément DANS L'ORDRE DU DOCUMENT — souvent le lien de l'image
+        //   (a[href*=/drama/], sans texte) → titre vide → résultat jeté. Lien du titre d'abord.
+        val link = element.selectFirst(".post-title a")
+            ?: element.selectFirst("h3 a, h4 a")
+            ?: element.select("a[href*=/drama/]").firstOrNull { it.text().isNotBlank() }
             ?: return null
 
         val href = link.attr("href").takeIf { it.isNotBlank() } ?: return null
@@ -1395,7 +1617,14 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
         }?.takeIf { it.isNotBlank() && it.startsWith("http") }
         val poster = improveImageUrl(rawPoster)
 
-        return TvShow(id = id, title = title, poster = poster)
+        // 2026-10-30 : chaque résultat porte « Type MOVIE / TV » (.post-content_item) — avant,
+        //   tout ressortait en série, même les films.
+        val estFilm = element.select(".post-content_item").any {
+            val t = it.text().trim()
+            t.startsWith("Type", ignoreCase = true) && t.contains("MOVIE", ignoreCase = true)
+        }
+        return if (estFilm) Movie(id = id, title = title, poster = poster)
+        else TvShow(id = id, title = title, poster = poster)
     }
 
     /**

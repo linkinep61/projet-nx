@@ -1,13 +1,17 @@
 package com.streamflixreborn.streamflix.extractors
 
 import android.util.Log
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.TraductionSousTitres
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
@@ -69,7 +73,7 @@ class VidbasicExtractor : Extractor() {
         val sousTitres = Regex("""[?&]sub=([^&]+)""").find(chemin)?.groupValues?.get(1)
             ?.let { java.net.URLDecoder.decode(it, "UTF-8") }
             ?.let { dechiffrer(it) }?.takeIf { it.startsWith("http") }
-            ?.let { listOf(Video.Subtitle(label = "Anglais", file = it)) }.orEmpty()
+            ?.let { sousTitresDechiffres(it, origine, client) }?.let { listOf(it) }.orEmpty()
         Log.d(TAG, "lecteur interne OK (${if (flux.contains(".m3u8")) "hls" else "mp4"}), sous-titres=${sousTitres.size}")
         return Video(
             source = flux,
@@ -78,6 +82,72 @@ class VidbasicExtractor : Extractor() {
             headers = mapOf("Referer" to "$origine/", "Origin" to origine, "User-Agent" to UA),
         )
     }
+
+    /**
+     * 2026-10-30 (user : sous-titres en charabia sur le lecteur interne) — le VTT servi par
+     * kk.vidbasic.top garde ses timings en clair mais CHIFFRE chaque réplique (base64 puis
+     * AES/CBC/PKCS5Padding, exactement la clé/IV du flux — vérifié dans le navigateur) :
+     * "vcIk4z/9oA1nKf7uEPDuVg==" → "=Bionic Trace=". On télécharge le VTT, on déchiffre
+     * réplique par réplique et on écrit un VTT LOCAL en clair (cache `st_vidbasic`, même
+     * ménage 30 jours que `st_traduits`). Renvoie la piste locale, ou null si ça échoue :
+     * pas de sous-titre plutôt que du charabia (sinon le lecteur affiche le base64 et la
+     * traduction traduit du charabia).
+     */
+    private suspend fun sousTitresDechiffres(url: String, origine: String, client: OkHttpClient): Video.Subtitle? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val dossier = File(StreamFlixApp.instance.applicationContext.cacheDir, "st_vidbasic").apply { mkdirs() }
+                TraductionSousTitres.menage(dossier)
+                // le jeton de l'URL expire à chaque lecture : la clé de cache ne le garde pas (cf. st_traduits)
+                val empreinte = MessageDigest.getInstance("MD5")
+                    .digest(url.substringBefore('?').toByteArray()).joinToString("") { "%02x".format(it) }
+                val fichier = File(dossier, "$empreinte.vtt")
+                if (fichier.exists() && fichier.length() > 20L) {
+                    Log.d(TAG, "sous-titres déjà déchiffrés (cache) : ${fichier.path}")
+                    return@runCatching Video.Subtitle(label = "Anglais", file = "file://" + fichier.absolutePath)
+                }
+                val brut = client.newCall(
+                    Request.Builder().url(url)
+                        .header("User-Agent", UA).header("Referer", "$origine/").header("Origin", origine)
+                        .build()
+                ).execute().use { r -> if (r.isSuccessful) r.body?.string() else null } ?: run {
+                    Log.w(TAG, "sous-titres : téléchargement KO ($url)")
+                    return@runCatching null
+                }
+                // Timings, numéros et en-têtes recopiés tels quels ; chaque ligne de texte
+                // déchiffrée est remplacée, une ligne qui ne se déchiffre pas est gardée
+                // d'origine (le site serait repassé en clair).
+                val clair = StringBuilder()
+                var repliques = 0; var dechiffrees = 0; var charabia = 0; var premiere: String? = null
+                for (ligne in brut.lineSequence()) {
+                    val l = ligne.trim()
+                    val estStructure = l.isEmpty() || l.contains("-->") || l.startsWith("WEBVTT") ||
+                        l.startsWith("Kind:") || l.startsWith("Language:") || l.startsWith("NOTE") ||
+                        l.startsWith("Style:") || l.startsWith("Region:") || NUMERO.matches(l)
+                    if (estStructure) { clair.appendLine(ligne); continue }
+                    repliques++
+                    val texte = dechiffrer(l)
+                    if (texte != null) {
+                        dechiffrees++
+                        if (premiere == null) premiere = texte
+                        clair.appendLine(texte)
+                    } else {
+                        if (BASE64.matches(l)) charabia++
+                        clair.appendLine(ligne)
+                    }
+                }
+                if (dechiffrees == 0 && charabia > 0) {
+                    Log.w(TAG, "sous-titres : $charabia réplique(s) restent chiffrées (clé changée ?) → piste ignorée")
+                    return@runCatching null
+                }
+                fichier.writeText(clair.toString(), Charsets.UTF_8)
+                Log.d(
+                    TAG, "sous-titres déchiffrés : $dechiffrees/$repliques réplique(s)" +
+                        ", 1re=\"${premiere?.take(60)}\", fichier=${fichier.path}"
+                )
+                Video.Subtitle(label = "Anglais", file = "file://" + fichier.absolutePath)
+            }.getOrNull()
+        }
 
     override val name = "Vidbasic"
     override val mainUrl = "https://vidbasic.top"
@@ -100,6 +170,10 @@ class VidbasicExtractor : Extractor() {
         /** Clé / IV du lecteur interne (écrits en clair dans 3rdplayer.html, relevés le 2026-10-22). */
         private const val CLE = "94588293375053432799222445521289"
         private const val IV = "5259228356829423"
+
+        /** 2026-10-30 : identifiant de bloc VTT (numéro seul) et ligne qui ressemble à du base64 chiffré. */
+        private val NUMERO = Regex("""\d+""")
+        private val BASE64 = Regex("""[A-Za-z0-9+/]{8,}={0,2}""")
     }
 
     override suspend fun extract(link: String): Video {

@@ -3519,7 +3519,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   Pluto TV (html.bet/?<hexId>#) : boot API → JWT → stream URL
         //   Autres : URL directe m3u8/ts → ExoPlayer direct
         if (server.id.startsWith("livehub::fast::")) {
-            val src = server.src
+            // 2026-10-30 (user : « Molahits ne fonctionne pas ») : la liste donne
+            //   http://ventdelnord.tv:8080/… → « connection reset ». Le site officiel
+            //   (ventdelnord.tv/molahits) lit le même flux en HTTPS sur ce port.
+            val src = if (server.src.startsWith("http://ventdelnord.tv:8080/"))
+                server.src.replaceFirst("http://", "https://") else server.src
             val channelName = fastChannelNames[server.id] ?: "FAST"
             Log.w(TAG, "FAST getVideo: $channelName src=${src.take(100)}")
 
@@ -5693,6 +5697,53 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 for (k in tinyKeys) {
                     intl.addAll(groups[k]!!)
                     groups.remove(k)
+                }
+                // 2026-10-30 (user « vérifie les 900 chaînes de clips » puis « celles qui sont
+                //   soi-disant mortes, mets-les à la fin au cas où ») : test des 939 flux depuis
+                //   la connexion du user (playlist → variante → 1er segment, 2 essais) :
+                //   209 en échec au 1er test ; 2e test ~2 h plus tard : 18 revenues (pannes
+                //   passagères) + 5 Xtream ultimateiptv OK une fois l'IP prise via DoH comme
+                //   l'appli (MTV France HD, M6 Music HD…). Les 186 restantes ont été lancées une
+                //   à une DANS l'appli sur l'Oppo : 9 démarrent (KroneHit, VIVA TV, TMF…) et sont
+                //   rendues. Aucune des autres n'est réparable (404, serveur disparu, 403/400
+                //   persistants quels que soient UA/Referer = blocage pays ou jeton). Les 177
+                //   adresses restantes (assets/musique_mortes.txt) sont masquées du dossier.
+                // 2026-10-30 (user « iptv-org n'est pas à jour, va voir leur dépôt ») : 156 des
+                //   chaînes HS venaient de iptv-org categories/music.m3u. Leur dépôt (master/streams)
+                //   contient pour 32 d'entre elles une AUTRE adresse, testée OK. On garde l'id
+                //   (favoris intacts) et on remplace seulement l'adresse lue.
+                run {
+                    val remplacements = try {
+                        com.streamflixreborn.streamflix.StreamFlixApp.instance.assets
+                            .open("musique_remplacements.tsv").bufferedReader().readLines()
+                            .filter { it.startsWith("http") && '\t' in it }
+                            .associate { it.substringBefore('\t').trim() to it.substringAfter('\t').trim() }
+                    } catch (t: Throwable) { emptyMap() }
+                    var remplacees = 0
+                    for (liste in groups.values) for (tv in liste) {
+                        val nouvelle = fastChannelUrls[tv.id]?.let { remplacements[it] } ?: continue
+                        fastChannelUrls[tv.id] = nouvelle
+                        remplacees++
+                    }
+                    if (remplacees > 0) Log.d(TAG, "Musique : $remplacees adresse(s) morte(s) remplacée(s) par celle du dépôt iptv-org")
+                }
+                run {
+                    val mortes = try {
+                        com.streamflixreborn.streamflix.StreamFlixApp.instance.assets
+                            .open("musique_mortes.txt").bufferedReader().readLines()
+                            .map { it.trim() }.filter { it.startsWith("http") }.toHashSet()
+                    } catch (t: Throwable) { emptySet<String>() }
+                    if (mortes.isNotEmpty()) {
+                        var enFin = 0
+                        for ((k, liste) in groups.entries.toList()) {
+                            val (enEchec, vivantes) = liste.partition { tv ->
+                                fastChannelUrls[tv.id]?.let { it in mortes } == true
+                            }
+                            enFin += enEchec.size
+                            groups[k] = vivantes.toMutableList()
+                        }
+                        Log.d(TAG, "Musique : $enFin chaîne(s) en échec aux tests masquées")
+                    }
                 }
                 // Français d'abord (si > 5 chaînes), puis le reste alpha
                 val ordered = groups.entries.sortedWith(

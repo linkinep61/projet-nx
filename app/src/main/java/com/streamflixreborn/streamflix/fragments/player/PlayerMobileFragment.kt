@@ -5457,6 +5457,9 @@ class PlayerMobileFragment : Fragment() {
                 //   Sur un serveur VF, on coupe donc carrément le type « texte ».
                 val serveurVf = currentServer?.name?.lowercase()?.let { n ->
                     when {
+                        // 2026-10-30 (Vidy « [MULTI] ») : le nom de fichier fourni par la source tranche d'abord.
+                        video.fileName?.lowercase()?.contains("vostfr") == true -> false
+                        video.fileName?.lowercase()?.contains("multi") == true -> true
                         Regex("""(^|[^a-z])vf([^a-z]|$)""").containsMatchIn(n) -> true
                         n.contains("vostfr") || n.contains("sous-titr") -> false
                         Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n) -> false
@@ -5546,12 +5549,25 @@ class PlayerMobileFragment : Fragment() {
             val teeFactory = com.streamflixreborn.streamflix.download.TeeDataSourceFactory(hlsBaseFactory)
             if (isHls) {
                 // 2026-05-09 v23 : retry 403 sur HLS Live (cf PlayerTvFragment).
+                // 2026-10-30 (user : « le faire abandonner plus vite — l'appli est faite pour checker le
+                //   premier serveur qui arrive en français, sinon VOSTFR, et abandonner ») — mesuré sur
+                //   EmbedWave (Squid Game S1E1) : son CDN renvoie des 500 au hasard ; 6 nouvelles
+                //   tentatives = 17-19 s d'écran noir avant de passer au serveur suivant. En VOD, une erreur
+                //   serveur franche (404/410/5xx) abandonne au 2e échec. Le direct garde ses tentatives
+                //   (IPTV saturés), les 403 aussi (rafraîchissement de jeton).
+                val enDirectErr = listOf("ch::", "sport::", "ola::", "ola_ep::", "vegeta::", "vegeta_ep::",
+                    "livehub::", "sportlive::", "match::", "vavoo::", "myiptv-live::").any { args.id.startsWith(it) }
                 val errorPolicy = object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
                     override fun getRetryDelayMsFor(info: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo): Long {
                         val ex = info.exception
                         if (ex is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException && ex.responseCode == 403) {
                             Log.d("PlayerMobileFragment", "HLS 403 → retry 1.5s (manifest refresh) : ${ex.dataSpec.uri.toString().substringBefore('?').takeLast(60)}")
                             return 1500L
+                        }
+                        if (!enDirectErr && ex is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException &&
+                            ex.responseCode in setOf(404, 410, 500, 502, 503, 504) && info.errorCount >= 2) {
+                            Log.w("PlayerMobileFragment", "HLS VOD : HTTP ${ex.responseCode} ×${info.errorCount} → abandon (serveur suivant) : ${ex.dataSpec.uri.toString().substringBefore('?').takeLast(50)}")
+                            return androidx.media3.common.C.TIME_UNSET
                         }
                         return super.getRetryDelayMsFor(info)
                     }
@@ -5562,7 +5578,11 @@ class PlayerMobileFragment : Fragment() {
                 //   les flux dont les PTS sont en ordre de decodage (segments Vidara :
                 //   PES avec PTS seul, +1 image/paquet malgre des B-frames → 1 image sur
                 //   4 jetee par ExoPlayer). Cf. utils/media3/H264ReaderAud.java.
-                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(teeFactory))
+                // 2026-10-30 : HLS GoPlay (Youku) — chiffrement seulement DÉCLARÉ (échantillons en clair) et
+                //   playlists à usage unique → source qui nettoie l'init et garde les playlists (cf. utils/GoPlayHls).
+                val clearKeyHls = video.drmType == "goplay-hls"
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(
+                        if (clearKeyHls) com.streamflixreborn.streamflix.utils.GoPlayHls.Source.Factory(teeFactory) else teeFactory))
                     .setAllowChunklessPreparation(true)
                     .setExtractorFactory(com.streamflixreborn.streamflix.utils.media3.HlsExtractorFactoryAud(0, true))
                     .setLoadErrorHandlingPolicy(errorPolicy)

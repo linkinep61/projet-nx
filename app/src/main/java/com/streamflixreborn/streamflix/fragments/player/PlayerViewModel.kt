@@ -910,7 +910,16 @@ class PlayerViewModel(
     private suspend fun avecTraductionSiBesoin(server: Video.Server, video: Video): Video {
         val outil = com.streamflixreborn.streamflix.utils.TraductionSousTitres
         outil.demandeTraduction = null
-        val (en, langue) = aTraduire(server, video) ?: run {
+        // 2026-10-30 (user : « le contenu qui est déjà affiché en sous-titré doit directement se
+        //   traduire ») — si la piste étrangère est DÉJÀ AFFICHÉE d'office (default, réglé juste avant
+        //   par reglerSousTitresSelonLangue), la traduction part toute seule, quel que soit le serveur.
+        val (en, langue) = aTraduire(server, video)
+            // (une piste française OpenSubtitles seulement PROPOSÉE, non affichée, ne bloque pas :
+            //   Oppo, GoPlay — anglais affiché + « Français (OpenSubtitles) » non activé → rien traduit)
+            ?: aTraduire(server, video.copy(subtitles = video.subtitles.filter { it.default || !it.label.contains("OpenSubtitles") }),
+                ignorerGarde = true)?.takeIf { it.first.default }
+                ?.also { Log.d("PlayerViewModel", "traduction auto : piste « ${it.first.label} » déjà affichée (${server.name})") }
+            ?: run {
             // 2026-10-22 : VOSTFR aux sous-titres gravés → traduction PROPOSÉE (menu), pas lancée.
             aTraduire(server, video, ignorerGarde = true)?.let { (piste, code) ->
                 outil.demandeTraduction = {
@@ -925,7 +934,11 @@ class PlayerViewModel(
         outil.suivre(en.file, langue)
         val fichier = outil.dejaTraduit(en.file, langue) ?: run {
             Log.d("PlayerViewModel", "traduction : lancement $langue→fr (${server.name})")
-            kotlinx.coroutines.withTimeoutOrNull(12_000L) { outil.lancer(en.file, video.headers, langue).await() }
+            // 2026-10-30 (user : « t'as vu le temps que ça met à se lancer alors qu'il n'y a qu'un
+            //   seul serveur ? ») — 12 s d'attente ici retardaient TOUT lancement traduit (Oppo :
+            //   860 répliques = 25 s, donc 12 s perdues pour rien). La traduction s'affiche de toute
+            //   façon en cours de lecture dès qu'elle est prête → on n'attend plus que 3 s.
+            kotlinx.coroutines.withTimeoutOrNull(3_000L) { outil.lancer(en.file, video.headers, langue).await() }
         }
         if (fichier == null) {
             // 2026-10-22 (film de 2 269 répliques = 65 s) : la lecture démarre en anglais ; dès que
@@ -1541,7 +1554,10 @@ class PlayerViewModel(
         //   PAS si un VF arrive vite (elle démarre dessus dès qu'il arrive) ; elle ne bloque
         //   l'auto-play que tant qu'il n'y a QUE du VOSTFR, jusqu'au fallback 12s.
         val isDessinAnimeProvider = providerName.equals("DessinAnime", ignoreCase = true)
-        val FR_GRACE_MS: Long = if (isAnimeProvider && !isDessinAnimeProvider) 0L else 12_000L
+        // 2026-10-30 (user : « t'as vu le temps que ça met à se lancer alors qu'il n'y a qu'un seul
+        //   serveur ? ») : fiches GoPlay (gp::) = dramas en VO sous-titrée par nature, aucun VF à
+        //   attendre → pas de grâce de 12 s.
+        val FR_GRACE_MS: Long = if ((isAnimeProvider && !isDessinAnimeProvider) || id.startsWith("gp::")) 0L else 12_000L
         val gracePeriodStartedAt = mutableListOf<Long>()  // wrapper pour val mutable
         fun isVf(s: Video.Server): Boolean {
             val n = s.name.lowercase()
@@ -2453,7 +2469,8 @@ class PlayerViewModel(
             "filemoon", "lukefirst", "weneverbeenfree", "moflix-stream", "bysebuho",
             "bysezoxexe", "bysejikuar", "bysekoze", "bysesayeveum", "gn1r5n", "1day1movie",
         ).any { s.contains(it) }
-        val patienceMs = if (lentParNature) 40_000L else 12_000L
+        // 2026-10-30 : GoPlay → 8 s (les autres serveurs sont préparés pendant ce temps, cf. getVideo).
+        val patienceMs = if (lentParNature) 40_000L else if (s.contains("goplay.su")) 8_000L else 12_000L
         patienceJob = viewModelScope.launch {
             kotlinx.coroutines.delay(patienceMs)
             if (!job.isActive || getVideoJob !== job) return@launch
@@ -2488,7 +2505,14 @@ class PlayerViewModel(
         //   job running en background, sinon plusieurs extractions WebView en
         //   parallèle saturent CPU + mémoire et le player tourne dans le vide.
         getVideoJob?.cancel()
-        preExtractJob?.cancel()
+        // 2026-10-30 (user : « comme si le lecteur était bloqué » / « les serveurs arrivent, il ne se
+        //   passe rien ») — journal Oppo : GoPlay (❤) lancé à 16:37:12, son lien n'arrive qu'après
+        //   10-20 s (page ouverte dans une WebView cachée) ; ce lancement ANNULAIT la préparation des
+        //   autres serveurs → aucune alternative prête → la patience n'avait rien vers quoi basculer.
+        //   Pour GoPlay, on laisse la préparation des autres tourner (sauf mode léger : petites box).
+        val lentWebView = server.src.contains("goplay.su", ignoreCase = true)
+        if (!lentWebView || UserPreferences.modeLeger) preExtractJob?.cancel()
+        else Log.d("PlayerViewModel", "getVideo ${server.name} (lent, WebView) : préparation des autres serveurs conservée")
         patienceJob?.cancel()
         getVideoServerId = server.id
         // 2026-06-30 (user "la qualité serveur ne se déclenche plus") : NE PLUS
@@ -2510,13 +2534,24 @@ class PlayerViewModel(
             // signale "ça tourne dans le vide et ne bascule pas auto". Avec
             // timeout, l'extraction throw → FailedLoadingVideo → fallback.
             val provider = UserPreferences.currentProvider ?: return@launch
-            var video = kotlinx.coroutines.withTimeoutOrNull(60_000L) {
+            // 2026-10-30 (user : « pourquoi quand il abandonne, il ne passe pas au serveur suivant ? ») —
+            //   journal Oppo : après l'abandon d'EmbedWave, bascule auto sur Movix · Moiflix, dont la
+            //   page n'affiche jamais son bouton lecture (« no .play-btn after 10s ») → 60 s d'attente
+            //   (son délai interne) avant l'échec et le serveur suivant. Limite ramenée à 25 s ; les
+            //   serveurs lents PAR NATURE (vérification humaine Filemoon & co, GoPlay) gardent 45 s.
+            val srcBas = server.src.lowercase()
+            val lentParNature = listOf(
+                "filemoon", "lukefirst", "weneverbeenfree", "moflix-stream", "bysebuho",
+                "bysezoxexe", "bysejikuar", "bysekoze", "bysesayeveum", "gn1r5n", "1day1movie", "goplay.su",
+            ).any { srcBas.contains(it) }
+            val limiteMs = if (lentParNature) 45_000L else 25_000L
+            var video = kotlinx.coroutines.withTimeoutOrNull(limiteMs) {
                 // 2026-07-04 (registre central) : un serveur backup (id `bkreg::…`) se lit via
                 //   le registre, qui ré-aiguille vers le getVideo de la source d'origine.
                 if (server.id.startsWith(com.streamflixreborn.streamflix.utils.BackupRegistry.PREFIX))
                     com.streamflixreborn.streamflix.utils.BackupRegistry.getVideo(server)
                 else provider.getVideo(server)
-            } ?: throw Exception("Extraction timeout (60s) — server unresponsive")
+            } ?: throw Exception("Extraction timeout (${limiteMs / 1000}s) — server unresponsive")
             if (video.source.isEmpty()) throw Exception("No source found")
 
             // LOGICA SOTTOTITOLI GLOBALE: 

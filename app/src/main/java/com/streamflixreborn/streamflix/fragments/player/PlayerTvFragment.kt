@@ -5399,6 +5399,9 @@ class PlayerTvFragment : Fragment() {
                     //   choisir. Décision user : « si VOSTFR tu actives, si VF tu désactives ».
                     val serveurVf = currentServer?.name?.lowercase()?.let { n ->
                         when {
+                            // 2026-10-30 (Vidy « [MULTI] ») : le nom de fichier fourni par la source tranche d'abord.
+                            video.fileName?.lowercase()?.contains("vostfr") == true -> false
+                            video.fileName?.lowercase()?.contains("multi") == true -> true
                             Regex("""(^|[^a-z])vf([^a-z]|$)""").containsMatchIn(n) -> true
                             n.contains("vostfr") || n.contains("sous-titr") -> false
                             Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n) -> false
@@ -5593,7 +5596,11 @@ class PlayerTvFragment : Fragment() {
                     //   alors que le master et les trois qualités vidéo répondent 200.
                     val dsFactoryHlsFiltre =
                         com.streamflixreborn.streamflix.utils.FiltreManifesteHls.Fabrique(dsFactoryHls)
-                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dsFactoryHlsFiltre))
+                    // 2026-10-30 : HLS GoPlay (Youku) — chiffrement seulement DÉCLARÉ (échantillons en clair) et
+                    //   playlists à usage unique → source qui nettoie l'init et garde les playlists (cf. utils/GoPlayHls).
+                    val clearKeyHls = video.drmType == "goplay-hls"
+                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(
+                            if (clearKeyHls) com.streamflixreborn.streamflix.utils.GoPlayHls.Source.Factory(dsFactoryHlsFiltre) else dsFactoryHlsFiltre))
                         .setAllowChunklessPreparation(true)
                         .setExtractorFactory(hlsExtractorFactory)
                         // 2026-08-08 (user, sur « J1F · upbolt.to (VF) » en rouge : « donc il
@@ -9057,6 +9064,14 @@ class PlayerTvFragment : Fragment() {
                     val ex = loadErrorInfo.exception
                     if (ex is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
                         val code = ex.responseCode
+                        // 2026-10-30 (user : « abandonner plus vite » — l'appli prend le 1er serveur FR,
+                        //   sinon VOSTFR) : en VOD, une erreur serveur franche (404/410/5xx) abandonne au
+                        //   2e échec → serveur suivant en ~3 s au lieu de ~30 s. Le direct (Xtream
+                        //   rate-limité) garde le backoff ci-dessous ; les 403 aussi.
+                        if (!isLiveIptv && code in setOf(404, 410, 500, 502, 503, 504) && loadErrorInfo.errorCount >= 2) {
+                            Log.w("PlayerTvFragment", "VOD : HTTP $code ×${loadErrorInfo.errorCount} → abandon (serveur suivant)")
+                            return androidx.media3.common.C.TIME_UNSET
+                        }
                         // 403/500/502/503 sur Xtream = rate-limit souvent transitoire.
                         if (code == 403 || code == 500 || code == 502 || code == 503 || code == 509 || code == 429) {
                             val attempt = loadErrorInfo.errorCount

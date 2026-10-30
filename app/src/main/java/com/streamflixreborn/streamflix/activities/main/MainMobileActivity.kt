@@ -523,8 +523,10 @@ class MainMobileActivity : FragmentActivity() {
         val supportsMovies = Provider.supportsMovies(provider)
         val supportsTvShows = Provider.supportsTvShows(provider)
         val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
+        // 2026-10-30 (user) : VoirDrama retiré — ses onglets redeviennent Films / Séries
+        //   (toutes sources mêlées, la langue se lit sur les serveurs), plus « FR / VOSTFR ».
         val animeOnlyProviders = setOf(
-            "VoirDrama", "VoirAnime", "AnimeSama", "FrenchManga",
+            "VoirAnime", "AnimeSama", "FrenchManga",
         )
         val isAnimeOnly = provider.name in animeOnlyProviders
 

@@ -82,7 +82,8 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
         }
     }.flowOn(Dispatchers.IO)
 
-    private val typeFilterProviders = listOf("VoirDrama", "VoirAnime", "AnimeSama", "FrenchManga")
+    // 2026-10-30 : VoirDrama retiré (onglets Films / Séries toutes sources, plus de tri série/film ici)
+    private val typeFilterProviders = listOf("VoirAnime", "AnimeSama", "FrenchManga")
 
     private var page = 1
     private var languageFilter: String = when {
@@ -156,6 +157,19 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
                         .setActiveTabContext(languageFilter, fromMovies = false)
                 }
                 Log.d("TvShowsViewModel", "getTvShows: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter, genreId=$genreId")
+                // 2026-10-30 (user « il faut un affichage progressif ») : chaque source s'affiche
+                //   dès qu'elle répond (1re page, sans genre ni filtre de langue).
+                if (provider is com.streamflixreborn.streamflix.providers.ProgressiveListProvider &&
+                    genreId == null && provider !is FilterableProvider) {
+                    var vu = false
+                    provider.getTvShowsProgressive(1).collect { lot ->
+                        vu = true
+                        page = 1
+                        _state.emit(State.SuccessLoading(ParentalControlUtils.filterItems(lot).filterIsInstance<TvShow>(), true))
+                    }
+                    if (!vu) { page = 1; _state.emit(State.SuccessLoading(emptyList(), false)) }
+                    return@launch
+                }
                 var tvShows = if (genreId != null && GenreFilter.isSupported(provider.name)) {
                     Log.d("TvShowsViewModel", "getTvShows: using GENRE filter id=$genreId")
                     ParentalControlUtils.filterItems(

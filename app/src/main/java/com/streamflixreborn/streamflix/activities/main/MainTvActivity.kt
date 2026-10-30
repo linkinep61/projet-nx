@@ -1352,8 +1352,10 @@ class MainTvActivity : FragmentActivity() {
         }
         binding.navMain.menu.findItem(R.id.search)?.isVisible = true
         // Anime providers : titles/icons spécifiques (Films→Séries VOSTFR, etc.)
+        // 2026-10-30 (user) : VoirDrama retiré — ses onglets redeviennent Films / Séries
+        //   (toutes sources mêlées, la langue se lit sur les serveurs), plus « FR / VOSTFR ».
         val animeOnlyProviders = setOf(
-            "VoirDrama", "VoirAnime", "AnimeSama", "FrenchManga",
+            "VoirAnime", "AnimeSama", "FrenchManga",
         )
         val isAnimeOnly = provider.name in animeOnlyProviders
         binding.navMain.menu.findItem(R.id.movies)?.apply {

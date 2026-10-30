@@ -134,11 +134,43 @@ object WebViewStreamResolver {
         //   (`/player/source2/?vp=<chiffré>&vc=…`, Content-Type HLS) → motif sur l'URL COMPLÈTE.
         //   Vide par défaut → aucun changement pour les autres sources.
         motifsUrlFlux: List<Regex> = emptyList(),
+        // 2026-10-30 (GoPlay, sous-titres) : ne capter QUE les motifs ci-dessus (pas les .m3u8/.mpd) -
+        //   la page joue sa vidéo normalement et l'on capte une autre requête (ex. /service/subs.vtt).
+        //   false par défaut -> aucun changement pour les autres sources.
+        seulementMotifs: Boolean = false,
+        // 2026-10-30 (Vidy, serveur « Paris » = pistes audio françaises) : la page ne permet pas de
+        //   choisir son serveur par l'adresse → on RÉÉCRIT certaines requêtes de la page (ex.
+        //   /miami/sources → /paris/sources) : on fait la requête nous-mêmes et on rend la réponse
+        //   à la page. null par défaut → aucun changement pour les autres sources.
+        reecrireRequete: ((String) -> String?)? = null,
+        // 2026-10-30 (voirdrama.ink) : script exécuté UNE fois dans la page principale après son
+        //   chargement (ex. choisir un lecteur dans une liste). null par défaut → aucun changement.
+        jsAuChargement: String? = null,
     ): Resolved? = withContext(Dispatchers.Main) {
         withTimeoutOrNull(timeoutMs) {
-            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs, hotesIgnores, motifsUrlFlux)
+            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs, hotesIgnores, motifsUrlFlux, seulementMotifs, reecrireRequete, jsAuChargement)
         }
     }
+
+    /** 2026-10-30 : exécute nous-mêmes une requête de la page vers une AUTRE adresse (mêmes en-têtes,
+     *  cookies de la WebView) et rend la réponse telle quelle à la page (cf. `reecrireRequete`). */
+    private fun requeteReecrite(request: WebResourceRequest, nouvelle: String): WebResourceResponse? = runCatching {
+        if (!request.method.equals("GET", true)) return null
+        val b = okhttp3.Request.Builder().url(nouvelle)
+        request.requestHeaders?.forEach { (k, v) -> if (!k.equals("Accept-Encoding", true)) b.header(k, v) }
+        android.webkit.CookieManager.getInstance().getCookie(nouvelle)?.let { b.header("Cookie", it) }
+        NetworkClient.default.newCall(b.build()).execute().use { r ->
+            val corps = r.body?.bytes() ?: ByteArray(0)
+            val type = r.header("Content-Type") ?: "application/json"
+            val entetes = HashMap<String, String>()
+            r.headers.names().forEach { n -> if (!n.equals("Content-Encoding", true) && !n.equals("Content-Length", true)) r.header(n)?.let { entetes[n] = it } }
+            if (entetes.keys.none { it.equals("Access-Control-Allow-Origin", true) }) {
+                entetes["Access-Control-Allow-Origin"] = request.requestHeaders?.entries?.firstOrNull { it.key.equals("Origin", true) }?.value ?: "*"
+            }
+            android.util.Log.d("WebViewStreamResolver", "requête réécrite → ${nouvelle.substringBefore('?')} : HTTP ${r.code} (${corps.size} o)")
+            WebResourceResponse(type.substringBefore(';').trim(), "utf-8", r.code, r.message.ifBlank { "OK" }, entetes, java.io.ByteArrayInputStream(corps))
+        }
+    }.onFailure { android.util.Log.w("WebViewStreamResolver", "requête réécrite KO : ${it.message}") }.getOrNull()
 
     /** Décode le résultat brut d'evaluateJavascript (chaîne JSON entre guillemets, ou "null"). */
     private fun decoderJs(brut: String?): String? {
@@ -176,6 +208,9 @@ object WebViewStreamResolver {
         delaiAbandonMs: Long = 12_000L,
         hotesIgnores: List<String> = emptyList(),
         motifsUrlFlux: List<Regex> = emptyList(),
+        seulementMotifs: Boolean = false,
+        reecrireRequete: ((String) -> String?)? = null,
+        jsAuChargement: String? = null,
     ): Resolved? = suspendCancellableCoroutine { cont ->
         val context = StreamFlixApp.instance.applicationContext
         var resolved = false
@@ -183,6 +218,7 @@ object WebViewStreamResolver {
         //   être demandées par la page — on ne relance pas une 2e lecture pour elles.
         val captureEnCours = java.util.concurrent.atomic.AtomicBoolean(false)
         var toucherLance = false
+        var jsLance = false
         var attachedParent: android.view.ViewGroup? = null
 
         val webView = WebView(context).apply {
@@ -295,13 +331,14 @@ object WebViewStreamResolver {
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
                 val reqUrl = request?.url?.toString() ?: return null
+                reecrireRequete?.invoke(reqUrl)?.let { nouvelle -> return requeteReecrite(request, nouvelle) }
                 val host = request.url?.host ?: ""
 
                 // 1. Cible trouvée ? On matche l'extension dans le CHEMIN uniquement (pas les query
                 //   params) — sinon un tracker avec « ?t=titre.mp4 » déclenche un faux positif.
                 val exts = if (captureMp4) STREAM_EXTS + ".mp4" else STREAM_EXTS
                 val reqPath = try { android.net.Uri.parse(reqUrl).path ?: "" } catch (_: Throwable) { reqUrl.substringBefore("?") }
-                val isStream = exts.any { reqPath.contains(it, ignoreCase = true) } ||
+                val isStream = (!seulementMotifs && exts.any { reqPath.contains(it, ignoreCase = true) }) ||
                     motifsFlux.any { reqPath.contains(it) } ||
                     motifsUrlFlux.any { it.containsMatchIn(reqUrl) }
                 if (isStream && !POISONED_TARGET_HOSTS.any { host.contains(it) } &&
@@ -361,6 +398,11 @@ object WebViewStreamResolver {
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                if (!resolved && view != null && jsAuChargement != null && !jsLance) {
+                    jsLance = true
+                    view.postDelayed({ if (!resolved) view.evaluateJavascript(jsAuChargement) { r ->
+                        android.util.Log.d("WebViewStreamResolver", "jsAuChargement → $r") } }, 600L)
+                }
                 if (!resolved && view != null && toucherCentre && !toucherLance) {
                     toucherLance = true
                     var t = 0

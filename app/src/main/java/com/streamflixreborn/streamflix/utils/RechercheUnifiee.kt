@@ -190,7 +190,16 @@ object RechercheUnifiee {
         if (nq.length < 2) return items
         val contient = items.filter { RechercheFloue.normaliser(titre(it)).contains(nq) }
         if (contient.isNotEmpty()) return contient
-        return items.filter { RechercheFloue.correspond(titre(it), q) }
+        val proches = items.filter { RechercheFloue.correspond(titre(it), q) }
+        if (proches.isNotEmpty()) return proches
+        // 2026-10-30 (user, « log la recherche » sur « Un job mortel ») : Cloudstream et Movix
+        //   trouvaient bien la série (1 résultat chacun) mais sous son nom d'origine « 꿀알바 »
+        //   (TMDB n'a pas de titre français dans ses résultats) → écartée faute de mot commun.
+        //   Un titre SANS lettre latine ne peut avoir été trouvé que par un autre titre (français,
+        //   anglais…) : la source l'a donc jugé pertinent → on le garde.
+        val nonLatins = items.filter { i -> titre(i).let { t -> t.isNotBlank() && t.none { c -> c in 'a'..'z' || c in 'A'..'Z' } } }
+        if (nonLatins.isNotEmpty()) Log.i(TAG, "« $q » : ${nonLatins.size} résultat(s) au titre non latin gardé(s) (${nonLatins.joinToString { titre(it) }})")
+        return nonLatins
     }
 
     /** Résultats d'un provider pour le mode choisi. */
