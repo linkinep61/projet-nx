@@ -116,7 +116,10 @@ object VoirDramaInk {
             if (!cle.contains('_') || !texte.contains('—')) return@mapNotNull null
             val hebergeur = texte.substringBefore('—').trim()
             val langue = texte.substringAfter('—').trim().uppercase()
-            Video.Server(id = "$PREFIXE_SERVEUR$episodeId#$cle", name = "$hebergeur [$langue]", src = "$url#$cle")
+            Video.Server(id = "$PREFIXE_SERVEUR$episodeId#$cle", name = "$hebergeur [$langue]", src = "$url#lecteur=$cle")
+            // ↑ « #lecteur= » : le dédoublonnage du lecteur coupe l'URL au « # » sauf ce marqueur
+            //   (cf. PlayerViewModel, cas FRAnime) → sans lui, les 4 lecteurs (même page
+            //   d'épisode) étaient fusionnés en un seul et seul VOE restait.
         }
         Log.d(TAG, "épisode $episodeId : ${liste.size} lecteur(s) ${liste.map { it.name }}")
         return liste
@@ -124,7 +127,7 @@ object VoirDramaInk {
 
     suspend fun video(server: Video.Server): Video {
         val url = server.src.substringBefore('#')
-        val cle = server.src.substringAfter('#', "").replace("'", "")
+        val cle = server.src.substringAfter('#', "").removePrefix("lecteur=").replace("'", "")
         val js = """(function(){var s=document.getElementById('serial-player-select');if(!s)return 'pas de liste';
             s.value='$cle';s.dispatchEvent(new Event('change',{bubbles:true}));return 'clé '+s.value;})()"""
         // 1er essai sur l'Oppo : clé choisie (« clé voe_vostfr »), Turnstile passé, mais aucun flux capté
@@ -139,6 +142,11 @@ object VoirDramaInk {
             ),
         ) ?: throw Exception("VoirDrama (nouveau site) : lecteur introuvable ($cle)")
         Log.i(TAG, "lecteur capté ($cle) : ${r.url.substringBefore('?').take(80)} → extracteur")
-        return com.streamflixreborn.streamflix.extractors.Extractor.extract(r.url.substringBefore('#'))
+        val lien = r.url.substringBefore('#')
+        // 2026-10-30 : Filemoon passe par des domaines miroirs tournants (kaydendown.lol…) que
+        //   l'aiguillage par domaine ne connaît pas → la clé du site dit déjà l'hébergeur.
+        if (cle.startsWith("filemoon", ignoreCase = true))
+            return com.streamflixreborn.streamflix.extractors.FilemoonExtractor().extract(lien)
+        return com.streamflixreborn.streamflix.extractors.Extractor.extract(lien)
     }
 }

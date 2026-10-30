@@ -53,6 +53,20 @@ object XonaflixProvider {
         .readTimeout(18, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS)
         .followRedirects(true)
+        // 2026-10-30 (Chuck S2E8 → vidéo leurre de 3 min 27) : sans les cookies de session
+        //   posés par la fiche/l'épisode, /embed/ renvoie une source LEURRE
+        //   (xonaflix.space/media/…) au lieu du CDN. Vérifié dans Chrome : fetch sans
+        //   cookies → /media/, avec cookies → cdnNN.zen-blk.store. On garde donc les cookies.
+        .cookieJar(object : okhttp3.CookieJar {
+            private val pot = java.util.concurrent.ConcurrentHashMap<String, okhttp3.Cookie>()
+            override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
+                cookies.forEach { pot["${it.domain}|${it.name}"] = it }
+            }
+            override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> {
+                val now = System.currentTimeMillis()
+                return pot.values.filter { it.expiresAt > now && it.matches(url) }
+            }
+        })
         .build()
 
     /** GET complet : (code, corps) — null uniquement si injoignable (réseau/timeout). */
@@ -314,6 +328,13 @@ object XonaflixProvider {
         // Les chemins du CDN contiennent des accents (ex. « Dune-Prémière-Partie ») →
         // percent-encodage des caractères non-ASCII (toASCIIString), réservés conservés.
         val urlAscii = runCatching { java.net.URI(url).toASCIIString() }.getOrDefault(url)
+
+        // Source leurre (servie sans session) : on refuse → getVideo relit la fiche et réessaie.
+        val hoteSource = runCatching { java.net.URI(urlAscii).host ?: "" }.getOrDefault("")
+        if (hoteSource.contains("xonaflix", true) && urlAscii.contains("/media/")) {
+            Log.w(TAG, "embed LEURRE (sans session) : ${urlAscii.substringBefore("?").takeLast(60)} → refusé")
+            return null
+        }
 
         Log.i(TAG, "embed résolu : ${urlAscii.substringBefore("?").takeLast(60)}")
         return Video(

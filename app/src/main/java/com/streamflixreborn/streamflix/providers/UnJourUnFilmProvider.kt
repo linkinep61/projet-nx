@@ -1533,7 +1533,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 .addInterceptor { chain ->
                     val r = chain.request()
                     val page = r.method == "GET" && !r.url.encodedPath.contains("/wp-json/")
-                    chain.proceed(r.newBuilder()
+                    val req = r.newBuilder()
                         .header("User-Agent", com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA)
                         .apply {
                             if (page) {
@@ -1544,9 +1544,42 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                                 header("Sec-Fetch-Site", "none")
                                 header("Upgrade-Insecure-Requests", "1")
                             }
-                        }.build())
+                        }.build()
+                    val cookieAvant = cookiesDe(req.url.toString())
+                    val rep = chain.proceed(req)
+                    if (!page || rep.code != 403 || rep.header("cf-mitigated") != "challenge") return@addInterceptor rep
+                    // 2026-10-30 (signalement « 1 jour 1 film HTTP 403 ») : Cloudflare pose
+                    //   maintenant un challenge sur /films/ et /saisons/. On récupère le
+                    //   cookie cf_clearance par une WebView invisible, puis on relance.
+                    rep.close()
+                    synchronized(cfVerrou) {
+                        val cookieMaintenant = cookiesDe(req.url.toString())
+                        val dejaRafraichi = cookieMaintenant != cookieAvant && cookieMaintenant.contains("cf_clearance=")
+                        val maintenant = System.currentTimeMillis()
+                        if (!dejaRafraichi && maintenant >= cfPauseJusqua) {
+                            Log.i("UnJourUnFilm", "CF challenge sur ${req.url.encodedPath} → WebView invisible")
+                            try {
+                                kotlinx.coroutines.runBlocking {
+                                    com.streamflixreborn.streamflix.utils.WebViewResolver(com.streamflixreborn.streamflix.StreamFlixApp.instance)
+                                        .get(req.url.toString(), silent = true, clearanceOnly = true)
+                                }
+                            } catch (e: Throwable) { Log.w("UnJourUnFilm", "WebView CF : ${e.message}") }
+                            val ok = cookiesDe(req.url.toString()).contains("cf_clearance=")
+                            Log.i("UnJourUnFilm", "CF cf_clearance ${if (ok) "obtenu" else "ABSENT"}")
+                            if (!ok) cfPauseJusqua = maintenant + 60_000L
+                        }
+                    }
+                    val rep2 = chain.proceed(req)
+                    Log.i("UnJourUnFilm", "CF relance ${req.url.encodedPath} → ${rep2.code}")
+                    rep2
                 }
                 .build()
+
+            private val cfVerrou = Any()
+            @Volatile private var cfPauseJusqua = 0L
+            private fun cookiesDe(url: String): String = try {
+                android.webkit.CookieManager.getInstance().getCookie(url) ?: ""
+            } catch (_: Throwable) { "" }
 
             fun buildAddressFetcher(): Service {
                 val addressRetrofit = Retrofit.Builder()
