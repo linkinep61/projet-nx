@@ -134,7 +134,7 @@ object BackupRegistry {
         "Papadustream V2" to "Papadustream V2",
         "Wiflix" to "Wiflix",
         "FrenchStream" to "FrenchStream",
-        "1Jour1Film" to "1Jour1Film",
+        "1Jour1Film" to "Firestorm",
         "aplouf" to "aplouf",
         "AnimeSama" to "AnimeSama (animes)",
         "VoirAnime" to "VoirAnime (animes)",

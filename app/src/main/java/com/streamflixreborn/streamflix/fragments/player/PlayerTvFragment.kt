@@ -1291,7 +1291,7 @@ class PlayerTvFragment : Fragment() {
                             }
                             try {
                                 Toast.makeText(requireContext(),
-                                    "Chargement ${server.name}…",
+                                    "Chargement ${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)}…",
                                     Toast.LENGTH_SHORT).show()
                             } catch (_: Exception) {}
                             val target = state.servers.find { server.id == it.id }
@@ -1622,7 +1622,7 @@ class PlayerTvFragment : Fragment() {
                             if (modeExterne() && listeExterne != null) {
                                 hideLoadingOverlay()
                                 listeExterne?.echec(state.server)
-                                if (listeExterne?.visible != true) ouvrirListeExterne("${state.server.name} ne répond pas, choisis-en un autre.")
+                                if (listeExterne?.visible != true) ouvrirListeExterne("${com.streamflixreborn.streamflix.utils.NomAffiche.de(state.server.name)} ne répond pas, choisis-en un autre.")
                                 return@collect
                             }
                             // IPTV: never auto-advance on extractor failure (same sticky
@@ -1856,7 +1856,7 @@ class PlayerTvFragment : Fragment() {
                         try { player.stop() } catch (_: Exception) {}
                         try {
                             Toast.makeText(requireContext(),
-                                "Chargement ${sel.name}…",
+                                "Chargement ${com.streamflixreborn.streamflix.utils.NomAffiche.de(sel.name)}…",
                                 Toast.LENGTH_SHORT).show()
                         } catch (_: Exception) {}
                         val target = servers.find { sel.id == it.id }
@@ -6494,7 +6494,7 @@ class PlayerTvFragment : Fragment() {
                                     try {
                                         android.widget.Toast.makeText(
                                             requireContext(),
-                                            "Pas d'audio sur ${server.name} — change de serveur via le menu",
+                                            "Pas d'audio sur ${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)} — change de serveur via le menu",
                                             android.widget.Toast.LENGTH_LONG,
                                         ).show()
                                     } catch (_: Exception) {}
@@ -7452,7 +7452,7 @@ class PlayerTvFragment : Fragment() {
                         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                             Toast.makeText(
                                 requireContext(),
-                                "Ce serveur nécessite un navigateur, téléchargement impossible (${server.name})",
+                                "Ce serveur nécessite un navigateur, téléchargement impossible (${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)})",
                                 Toast.LENGTH_LONG
                             ).show()
                         }
@@ -7468,7 +7468,7 @@ class PlayerTvFragment : Fragment() {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                         Toast.makeText(
                             requireContext(),
-                            "Téléchargement ajouté : ${server.name}",
+                            "Téléchargement ajouté : ${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)}",
                             Toast.LENGTH_SHORT
                         ).show()
                     }

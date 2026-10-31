@@ -35,7 +35,7 @@ class DownloadAdapterTv(
 
         fun bind(item: DownloadEntity) {
             binding.tvTitle.text = item.title
-            binding.tvSubtitle.text = item.subtitle ?: item.providerName
+            binding.tvSubtitle.text = item.subtitle ?: com.streamflixreborn.streamflix.utils.NomAffiche.de(item.providerName)
             binding.tvSubtitle.visibility = if (item.subtitle != null) View.VISIBLE else View.GONE
 
             // Poster

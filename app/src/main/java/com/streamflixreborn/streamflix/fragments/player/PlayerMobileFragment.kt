@@ -4720,7 +4720,7 @@ class PlayerMobileFragment : Fragment() {
                     withContext(Dispatchers.Main) {
                         Toast.makeText(
                             requireContext(),
-                            "Ce serveur nécessite un navigateur, téléchargement impossible (${server.name})",
+                            "Ce serveur nécessite un navigateur, téléchargement impossible (${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)})",
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -4738,7 +4738,7 @@ class PlayerMobileFragment : Fragment() {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(
                         requireContext(),
-                        "Téléchargement ajouté : ${server.name}",
+                        "Téléchargement ajouté : ${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)}",
                         Toast.LENGTH_SHORT
                     ).show()
                 }

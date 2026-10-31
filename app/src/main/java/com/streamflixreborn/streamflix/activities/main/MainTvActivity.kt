@@ -688,7 +688,7 @@ class MainTvActivity : FragmentActivity() {
                     .load(UserPreferences.currentProvider?.logo?.takeIf { it.isNotEmpty() } ?: R.drawable.ic_provider_default_logo)
                     .error(R.drawable.ic_provider_default_logo)
                     .into(header.ivNavigationHeaderIcon)
-                header.tvNavigationHeaderTitle.text = UserPreferences.currentProvider?.name
+                header.tvNavigationHeaderTitle.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(UserPreferences.currentProvider?.name)
                 header.tvNavigationHeaderSubtitle.text = getString(R.string.main_menu_change_provider)
                 val palette = ThemeManager.palette(UserPreferences.selectedTheme)
                 header.tvNavigationHeaderTitle.setTextColor(palette.tvHeaderPrimary)

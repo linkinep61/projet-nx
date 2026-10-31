@@ -2022,7 +2022,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         if (parts.size != 2) return emptyList()
         val tvId = parts[0].toIntOrNull() ?: return emptyList()
         val seNum = parts[1].toIntOrNull() ?: return emptyList()
-        return runCatching {
+        val tmdbEps = runCatching {
             TMDb3.TvSeasons.details(seriesId = tvId, seasonNumber = seNum, language = language)
                 .episodes?.map {
                     Episode(
@@ -2034,6 +2034,31 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     )
                 } ?: emptyList()
         }.getOrDefault(emptyList())
+        // 2026-10-31 (signalement « Sorcières Academy » S1 : 10 épisodes au lieu de 21) : TMDB
+        //   n'en recense que 10, MovieBox en a 21 (maxEp de /season-info). On complète avec les
+        //   numéros manquants (même id « tmdb:se:ep » → getServers retrouve la fiche MovieBox).
+        val complement = runCatching {
+            val d = TMDb3.TvSeries.details(seriesId = tvId, language = language,
+                appendToResponse = listOf(TMDb3.Params.AppendToResponse.Tv.ALTERNATIVE_TITLES))
+            val titres = linkedSetOf<String>()
+            d.name.takeIf { it.isNotBlank() }?.let { titres.add(it) }
+            d.originalName.takeIf { it.isNotBlank() }?.let { titres.add(it) }
+            d.alternativeTitles?.all()?.mapNotNull { it.title?.takeIf { t -> t.isNotBlank() } }?.forEach { titres.add(it) }
+            var sid: String? = null
+            for (t in titres) { sid = findSubjectId(t, null, TYPE_SERIE); if (!sid.isNullOrBlank()) break }
+            if (sid.isNullOrBlank()) return@runCatching emptyList<Episode>()
+            val arr = apiGet(SEASON_INFO_PATH, mapOf("subjectId" to sid))?.optJSONObject("data")?.optJSONArray("seasons")
+            var maxEp = 0
+            if (arr != null) for (i in 0 until arr.length()) {
+                val s = arr.optJSONObject(i) ?: continue
+                if (s.optInt("se", -1) == seNum) { maxEp = s.optInt("maxEp", s.optInt("epNum", 0)); break }
+            }
+            val dejaMax = tmdbEps.maxOfOrNull { it.number } ?: 0
+            Log.i(TAG, "épisodes TMDB $tvId S$seNum : TMDB=${tmdbEps.size} MovieBox(sid=$sid) maxEp=$maxEp")
+            if (maxEp <= dejaMax) emptyList()
+            else ((dejaMax + 1)..maxEp).map { n -> Episode(id = "$tvId:$seNum:$n", number = n, title = "Épisode $n") }
+        }.getOrDefault(emptyList())
+        return tmdbEps + complement
     }
 
     /** Liste des épisodes d'une série Cloudstream via /resource paginé.
@@ -2065,6 +2090,25 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             val pager = data.optJSONObject("pager")
             if (pager?.optBoolean("hasMore", false) != true) break
             page++
+        }
+        // 2026-10-31 (signalement : « Sorcières Academy » S1 = 10 épisodes au lieu de 21 ;
+        //   MovieBox web en montre bien 21) : /resource s'arrête parfois après la 1re page.
+        //   On complète avec maxEp de /season-info (même logique que le secours ci-dessous).
+        if (episodes.isNotEmpty()) {
+            val maxEp = runCatching {
+                val arr = apiGet(SEASON_INFO_PATH, mapOf("subjectId" to sid))?.optJSONObject("data")?.optJSONArray("seasons")
+                var m = 0
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val s = arr.optJSONObject(i) ?: continue
+                    if (s.optInt("se", -1) == seNum) { m = s.optInt("maxEp", s.optInt("epNum", 0)); break }
+                }
+                m
+            }.getOrDefault(0)
+            Log.i(TAG, "épisodes $sid S$seNum : /resource=${episodes.size} (pages=$page) maxEp=$maxEp")
+            if (maxEp > (episodes.keys.maxOrNull() ?: 0)) {
+                for (ep in 1..maxEp) episodes.putIfAbsent(ep,
+                    Episode(id = "cs::ep::$sid::$seNum::$ep", number = ep, title = "Épisode $ep"))
+            }
         }
         if (episodes.isEmpty()) {
             // Fallback : season-info pour récupérer maxEp

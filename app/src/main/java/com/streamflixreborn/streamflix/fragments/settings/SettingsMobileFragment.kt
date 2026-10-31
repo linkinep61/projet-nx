@@ -858,7 +858,7 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             }
 
             findPreference<EditTextPreference>("provider_url")?.apply {
-                isVisible = configProvider != null
+                isVisible = configProvider != null && !com.streamflixreborn.streamflix.utils.NomAffiche.adresseMasquee(provider)
                 isEnabled = autoUpdateVal == false
                 if (isVisible && provider != null && configProvider != null) {
                     summary = UserPreferences
@@ -895,7 +895,7 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             }
 
             findPreference<EditTextPreference>("provider_portal_url")?.apply {
-                isVisible = portalProvider != null
+                isVisible = portalProvider != null && !com.streamflixreborn.streamflix.utils.NomAffiche.adresseMasquee(provider)
                 if (isVisible && provider != null && portalProvider != null) {
                     summary = UserPreferences
                         .getProviderCache(
@@ -1525,7 +1525,7 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
     }
 
     private fun updateOverviewLabels() {
-        val providerName = UserPreferences.currentProvider?.name
+        val providerName = UserPreferences.currentProvider?.name?.let { com.streamflixreborn.streamflix.utils.NomAffiche.de(it) }
 
         findPreference<PreferenceScreen>("screen_provider")?.apply {
             title = getString(R.string.settings_provider_connection_title)

@@ -148,7 +148,7 @@ class CategoryViewHolder(
         onMovieClick: ((Movie) -> Unit)?,
         onTvShowClick: ((TvShow) -> Unit)?
     ) {
-        binding.tvCategoryTitle.text = category.name
+        binding.tvCategoryTitle.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(category.name)
 
         // 2026-06-22 : poubelle pour vider la section (cœur / favoris)
         setupClearButton(binding.ivCategoryClear, category)
@@ -168,7 +168,7 @@ class CategoryViewHolder(
                 spannable.setSpan(imgSpan, spannable.length - 1, spannable.length, android.text.Spannable.SPAN_INCLUSIVE_EXCLUSIVE)
                 binding.tvCategoryTitle.text = spannable
             } catch (_: Exception) {
-                binding.tvCategoryTitle.text = category.name
+                binding.tvCategoryTitle.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(category.name)
             }
             binding.tvCategoryTitle.setCompoundDrawables(null, null, null, null)
             binding.tvCategoryTitle.setOnClickListener {
@@ -200,7 +200,7 @@ class CategoryViewHolder(
         onMovieClick: ((Movie) -> Unit)?,
         onTvShowClick: ((TvShow) -> Unit)?
     ) {
-        binding.tvCategoryTitle.text = category.name
+        binding.tvCategoryTitle.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(category.name)
 
         // 2026-06-22 : poubelle pour vider la section (cœur / favoris)
         setupClearButton(binding.ivCategoryClear, category)
@@ -356,7 +356,7 @@ class CategoryViewHolder(
             lp.height = androidx.recyclerview.widget.RecyclerView.LayoutParams.WRAP_CONTENT
             itemView.layoutParams = lp
         }
-        binding.tvCategoryTitle.text = category.name
+        binding.tvCategoryTitle.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(category.name)
         val handler = Handler(Looper.getMainLooper())
         swiperHandler = handler
         swiperViewPager = binding.vpCategorySwiper
@@ -442,7 +442,7 @@ class CategoryViewHolder(
     }
 
     private fun displayTvSwiper(binding: ContentCategorySwiperTvBinding) {
-        binding.tvCategoryTitle.text = category.name
+        binding.tvCategoryTitle.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(category.name)
         val selected = category.list.getOrNull(category.selectedIndex) as? Show ?: return
 
         fun checkProviderAndRun(show: Show, action: () -> Unit) {

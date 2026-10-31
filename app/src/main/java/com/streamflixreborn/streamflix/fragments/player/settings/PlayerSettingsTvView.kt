@@ -658,7 +658,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
 
             val ouverte = settingsView.estOuverte(source)
             val enCours = source.membres.any { it.isLoading }
-            binding.tvSettingMainText.text = if (enCours) "${source.nom} ⟳" else source.nom
+            binding.tvSettingMainText.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(if (enCours) "${source.nom} ⟳" else source.nom)
 
             val etats = source.membres.map {
                 com.streamflixreborn.streamflix.utils.ExtractorRanker.statusOf(
@@ -1174,7 +1174,8 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         val nom = if (settingsView.estEnSousListe(item))
                             "      ↳ " + SourceServeurs.libelleDansSource(item.name)
                         else item.name
-                        if (item.isLoading) "$nom ⟳" else nom
+                        val nomVu = com.streamflixreborn.streamflix.utils.NomAffiche.de(nom)
+                        if (item.isLoading) "$nomVu ⟳" else nomVu
                     }
 
                     else -> ""

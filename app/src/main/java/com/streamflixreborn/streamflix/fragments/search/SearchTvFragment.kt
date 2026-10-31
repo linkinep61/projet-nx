@@ -55,7 +55,7 @@ class SearchTvFragment : Fragment() {
 
                 if (movie.providerName != UserPreferences.currentProvider?.name) {
                     UserPreferences.currentProvider = Provider.providers.keys.find { it.name == movie.providerName }
-                    Toast.makeText(requireContext(), getString(R.string.switching_to_provider, movie.providerName), Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), getString(R.string.switching_to_provider, com.streamflixreborn.streamflix.utils.NomAffiche.de(movie.providerName)), Toast.LENGTH_SHORT).show()
                 }
                 findNavController().navigate(
                     SearchTvFragmentDirections.actionSearchToMovie(id = movie.id)
@@ -65,7 +65,7 @@ class SearchTvFragment : Fragment() {
 
                 if (tvShow.providerName != UserPreferences.currentProvider?.name) {
                     UserPreferences.currentProvider = Provider.providers.keys.find { it.name == tvShow.providerName }
-                    Toast.makeText(requireContext(), getString(R.string.switching_to_provider, tvShow.providerName), Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), getString(R.string.switching_to_provider, com.streamflixreborn.streamflix.utils.NomAffiche.de(tvShow.providerName)), Toast.LENGTH_SHORT).show()
                 }
                 findNavController().navigate(
                     SearchTvFragmentDirections.actionSearchToTvShow(

@@ -36,7 +36,28 @@ import java.util.concurrent.TimeUnit
 object CoflixWikiProvider {
 
     private const val TAG = "CoflixWikiProvider"
-    private const val BASE_URL = "https://coflix.wiki"
+    // 2026-10-31 (Sorcières Academy : « AUCUN match strict » alors que le site a la série) :
+    //   coflix.wiki redirige vers le domaine actuel (coflix.gold) EN PERDANT LE CHEMIN
+    //   (/ajax/search/suggest?… → coflix.gold/?keyword=…) → l'appli recevait la page d'accueil
+    //   au lieu du JSON et la source ne trouvait plus RIEN. On suit la redirection une fois pour
+    //   connaître le domaine actuel, puis on l'interroge directement.
+    private const val BASE_URL_ORIGINE = "https://coflix.wiki"
+    @Volatile private var baseActuel: String? = null
+    @Volatile private var baseEssaiA = 0L
+    private val BASE_URL: String get() = baseActuel ?: BASE_URL_ORIGINE
+
+    private fun decouvrirBase() {
+        if (baseActuel != null || System.currentTimeMillis() - baseEssaiA < 10 * 60_000L) return
+        baseEssaiA = System.currentTimeMillis()
+        runCatching {
+            val req = Request.Builder().url("$BASE_URL_ORIGINE/").get().header("User-Agent", USER_AGENT).build()
+            pageClient.newCall(req).execute().use { resp ->
+                val u = resp.request.url
+                baseActuel = "${u.scheme}://${u.host}"
+                Log.i(TAG, "domaine actuel : $BASE_URL_ORIGINE → $baseActuel (HTTP ${resp.code})")
+            }
+        }.onFailure { Log.i(TAG, "domaine actuel introuvable : ${it.message}") }
+    }
 
     /** 2026-07-31 : nb max de liens conservés pour un MÊME hébergeur (URLs différentes).
      *  >1 permet de garder un second lien quand le premier pointe sur un fichier supprimé. */
@@ -62,6 +83,7 @@ object CoflixWikiProvider {
     // ── HTTP helpers ───────────────────────────────────────────────────────
 
     private suspend fun ajaxPost(path: String): String? = withContext(Dispatchers.IO) {
+        decouvrirBase()
         try {
             val url = "$BASE_URL$path"
             val emptyBody = "".toRequestBody("application/x-www-form-urlencoded".toMediaType())
@@ -88,6 +110,7 @@ object CoflixWikiProvider {
 
     /** GET AJAX (X-Requested-With) — utilisé pour /ajax/episode/list-episode. */
     private suspend fun ajaxGet(path: String): String? = withContext(Dispatchers.IO) {
+        decouvrirBase()
         try {
             val req = Request.Builder()
                 .url("$BASE_URL$path")
@@ -115,6 +138,7 @@ object CoflixWikiProvider {
      * Utilise le client BORNÉ (jamais de hang) + détecte un éventuel challenge CF (→ null).
      */
     private suspend fun fetchPage(path: String): String? = withContext(Dispatchers.IO) {
+        decouvrirBase()
         try {
             val req = Request.Builder()
                 .url("$BASE_URL$path")
@@ -315,7 +339,10 @@ object CoflixWikiProvider {
         val encoded = URLEncoder.encode(cleanTitle, "UTF-8")
         val body = ajaxPost("/ajax/search/suggest?keyword=$encoded") ?: return emptyList()
 
-        val json = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
+        val json = runCatching { JSONObject(body) }.getOrNull() ?: run {
+            Log.i(TAG, "Suggest '$cleanTitle' : réponse non JSON (${body.take(60).replace('\n', ' ')})")
+            return emptyList()
+        }
         if (json.optBoolean("status") != true) return emptyList()
 
         val html = json.optString("html").takeIf { it.isNotBlank() } ?: return emptyList()
@@ -446,7 +473,8 @@ object CoflixWikiProvider {
         //   « Movie 2025 Completed »). On parse PAR BLOC <a>…</a> pour associer titre + slug +
         //   ep-id + Type + Année → gate type/année en aval. Bien plus fort que le titre seul.
         val blockRegex = Regex(
-            """<a\s+[^>]*href="https?://coflix\.wiki/film/([^"]+/ep-(\d+))"[\s\S]*?</a>""",
+            // 2026-10-31 : domaine libre (coflix.wiki → coflix.gold…), seul le chemin /film/ compte.
+            """<a\s+[^>]*href="https?://[^/"]+/film/([^"]+/ep-(\d+))"[\s\S]*?</a>""",
             RegexOption.IGNORE_CASE,
         )
         for (b in blockRegex.findAll(html)) {
@@ -472,7 +500,7 @@ object CoflixWikiProvider {
         //   extract (titre/slug/ep-id seuls, sans type/année) pour ne pas tout perdre.
         if (results.isEmpty()) {
             val itemRegex = Regex(
-                """href="https?://coflix\.wiki/film/([^"]+/ep-(\d+))"[\s\S]*?data-jp="([^"]*)"""",
+                """href="https?://[^/"]+/film/([^"]+/ep-(\d+))"[\s\S]*?data-jp="([^"]*)"""",
             )
             for (m in itemRegex.findAll(html)) {
                 val slug = m.groupValues[1]
