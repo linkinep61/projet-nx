@@ -93,7 +93,9 @@ class MainMobileActivity : FragmentActivity() {
         //   `src/main/mobile/` démarre lui aussi directement ici, sans passer
         //   par SplashActivity : sans ce garde, l'APK mobile distribué ignorait
         //   la coupure exactement comme la version TV.
-        if (com.streamflixreborn.streamflix.utils.EtatApp.garder(this)) return
+        // 2026-10-31 (user) : interrupteur à distance DÉSACTIVÉ — il interrogeait l'API à chaque
+        //   ouverture de l'appli (27 % de ses requêtes). Le code reste dans EtatApp.kt.
+        // if (com.streamflixreborn.streamflix.utils.EtatApp.garder(this)) return
         // 2026-10-28 : animation avec le logo de l'événement en cours (Halloween, Noël…), sinon rien.
         com.streamflixreborn.streamflix.utils.AnimationEvenement.afficherSiEvenement(this)
 

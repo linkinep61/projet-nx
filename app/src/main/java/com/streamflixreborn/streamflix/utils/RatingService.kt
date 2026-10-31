@@ -220,62 +220,22 @@ object RatingService {
      * les 6 h suffit largement. Le vote de l'utilisateur, lui, met le cache à jour
      * immédiatement (cf. [submitRating]) — il voit donc son étoile tout de suite.
      */
-    private const val CACHE_TTL_MS = 6 * 60 * 60 * 1000L
-    private val cacheNotes = ConcurrentHashMap<String, Pair<Long, RatingInfo?>>()
-
     /** Vide l'entrée d'un contenu (après un vote) pour forcer une relecture fraîche. */
-    private fun invaliderCache(contentKey: String) {
-        cacheNotes.keys.filter { it.startsWith("$contentKey|") }.forEach { cacheNotes.remove(it) }
-    }
+    private fun invaliderCache(contentKey: String) = FicheCommunaute.invalider(contentKey)
 
+    /**
+     * 2026-10-31 : passe par [FicheCommunaute] — UN appel pour la note ET la langue,
+     * gardé 24 h sur l'appareil (avant : 2 appels par fiche, cache 6 h vidé à la fermeture).
+     */
     suspend fun getRating(contentKey: String, deviceId: String): RatingInfo? {
-        val cleCache = "$contentKey|$deviceId"
-        cacheNotes[cleCache]?.let { (pose, valeur) ->
-            if (System.currentTimeMillis() - pose < CACHE_TTL_MS) {
-                // Rien sur le réseau : c'est tout l'intérêt.
-                return valeur
-            }
-        }
-        return withContext(Dispatchers.IO) {
-            try {
-                val body = JSONObject().apply {
-                    put("contentKey", contentKey)
-                }
-                val request = Request.Builder()
-                    .url("$API_URL/rating/get")
-                    .post(body.toString().toRequestBody(JSON_MEDIA))
-                    .build()
-
-                val response = NetworkClient.default.newCall(request).execute()
-                val respBody = response.body?.string()
-                response.close()
-
-                if (!response.isSuccessful || respBody == null) return@withContext null
-
-                val json = JSONObject(respBody)
-                val avg = json.optDouble("averageRating", 0.0)
-                val total = json.optInt("totalVotes", 0)
-
-                // Aucun vote : on mémorise CE résultAT AUSSI (c'est le cas le plus
-                //   fréquent, et le re-demander en boucle ne sert à rien).
-                if (total == 0 && avg == 0.0) {
-                    cacheNotes[cleCache] = System.currentTimeMillis() to null
-                    return@withContext null
-                }
-
-                // Le vote individuel est lu depuis le cache local
-                val userRating = getLocalVote(contentKey, deviceId)
-
-                RatingInfo(
-                    averageRating = avg,
-                    totalVotes = total,
-                    userRating = userRating,
-                ).also { cacheNotes[cleCache] = System.currentTimeMillis() to it }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to get rating for $contentKey", e)
-                null
-            }
-        }
+        val c = FicheCommunaute.lire(contentKey) ?: return null
+        // Aucun vote : rien à afficher (cas le plus fréquent).
+        if (c.totalVotes == 0 && c.moyenne == 0.0) return null
+        return RatingInfo(
+            averageRating = c.moyenne,
+            totalVotes = c.totalVotes,
+            userRating = getLocalVote(contentKey, deviceId),  // le vote de CE device est local
+        )
     }
 
     // ── Utilitaires ─────────────────────────────────────────────────────

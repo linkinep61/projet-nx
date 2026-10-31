@@ -26,16 +26,20 @@ import java.util.concurrent.Future
 class ParallelRangeDataSource(
     private val client: OkHttpClient,
     private val entetes: Map<String, String>,
+    // 2026-10-31 : nombre de connexions réglable (8 pour le CDN Vidara, 4 par défaut / SendVid).
+    private val PARALLELE: Int = 4,
 ) : BaseDataSource(true), HttpDataSource {
 
     companion object {
         private const val TAG = "ParallelRange"
         private const val PREMIER = 256 * 1024L      // petit premier morceau : démarrage rapide
-        private const val MORCEAU = 1024 * 1024L
-        private const val PARALLELE = 4
     }
 
     // Recréé à chaque open() : le lecteur réutilise le même objet après close().
+    // Morceaux plus petits quand on ouvre plus de connexions : un segment HLS de ~4 Mo doit
+    //   se répartir sur toutes.
+    private val MORCEAU = if (PARALLELE > 4) 512 * 1024L else 1024 * 1024L
+
     private var pool: ExecutorService? = null
     private var transfertDemarre = false
     private val enCours = ArrayDeque<Future<ByteArray>>()
@@ -65,7 +69,11 @@ class ParallelRangeDataSource(
             }
             codeReponse = r.code
             entetesReponse = r.headers.toMultimap()
-            return r.body?.bytes() ?: ByteArray(0)
+            val corps = r.body?.bytes() ?: ByteArray(0)
+            // 2026-10-31 : un 200 (Range ignoré) rend le fichier ENTIER → c'est la fin, sinon
+            //   on redemanderait des morceaux au-delà (416). Cas des playlists HLS.
+            if (r.code == 200 && fin == C.LENGTH_UNSET.toLong()) fin = debut + corps.size
+            return corps
         }
     }
 
@@ -147,11 +155,11 @@ class ParallelRangeDataSource(
     override fun getResponseCode(): Int = codeReponse
     override fun getResponseHeaders(): Map<String, List<String>> = entetesReponse
 
-    class Factory(private val client: OkHttpClient) : HttpDataSource.Factory {
+    class Factory(private val client: OkHttpClient, private val parallele: Int = 4) : HttpDataSource.Factory {
         private val defauts = HashMap<String, String>()
         override fun setDefaultRequestProperties(props: Map<String, String>): HttpDataSource.Factory {
             defauts.clear(); defauts.putAll(props); return this
         }
-        override fun createDataSource(): HttpDataSource = ParallelRangeDataSource(client, HashMap(defauts))
+        override fun createDataSource(): HttpDataSource = ParallelRangeDataSource(client, HashMap(defauts), parallele)
     }
 }

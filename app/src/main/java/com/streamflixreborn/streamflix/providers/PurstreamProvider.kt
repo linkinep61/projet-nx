@@ -145,6 +145,10 @@ object PurstreamProvider {
         season: Int = 0,
         episode: Int = 0,
         titles: List<String> = emptyList(),
+        // 2026-10-31 — ESSAI base d'index : id Purstream déjà connu (saute la recherche) /
+        //   rappel quand on le trouve (pour le mémoriser). L'id est vérifié par le n° TMDB.
+        idConnu: Long? = null,
+        surTrouve: ((Long) -> Unit)? = null,
     ): List<Video.Server> = withContext(Dispatchers.IO) {
         val wanted = tmdbId.trim().toLongOrNull() ?: return@withContext emptyList()
 
@@ -161,9 +165,10 @@ object PurstreamProvider {
         val typeAttendu = if (estEpisode) "tv" else "movie"
 
         // 1) chercher par titre, 2) CONFIRMER par tmdbId exact sur la fiche.
-        var mediaId: Long? = null
+        var mediaId: Long? = idConnu
+        if (idConnu != null) Log.i(TAG, "INDEX : id Purstream connu $idConnu pour tmdb=$wanted → pas de recherche")
         val vus = HashSet<Long>()
-        boucle@ for (titre in titreCandidats.take(4)) {
+        boucle@ for (titre in (if (mediaId != null) emptyList() else titreCandidats.take(4))) {
             val q = URLEncoder.encode(titre.trim(), "UTF-8").replace("+", "%20")
             val body = get("/api/v1/search-bar/search/$q") ?: continue
             val hits = parse<SearchItems>(body)?.movies?.items ?: continue
@@ -185,6 +190,7 @@ object PurstreamProvider {
             Log.d(TAG, "aucun media Purstream pour tmdb=$wanted")
             return@withContext emptyList()
         }
+        if (idConnu == null) surTrouve?.invoke(id)
 
         // 3) flux — UN seul appel, meme pour une serie entiere.
         val streamBody = get("/api/v1/stream/$id") ?: return@withContext emptyList()

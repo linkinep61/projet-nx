@@ -96,7 +96,11 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
         val titre = doc?.title()?.substringBefore(" (Épisode")?.substringBefore(" - GoPlay")?.trim()?.ifBlank { null }
             ?: com.streamflixreborn.streamflix.utils.GoPlay.titreDuSlug(slug)
         val affiche = doc?.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
+            ?: doc?.selectFirst("img#selectedepisode")?.absUrl("src")?.ifBlank { null }
+        // 2026-10-31 : la fiche GoPlay n'a pas de <meta description> ; le résumé est dans #desctext.
         val resume = doc?.selectFirst("meta[name=description], meta[property=og:description]")?.attr("content")?.ifBlank { null }
+            ?: doc?.selectFirst("#desctext")?.text()?.trim()?.ifBlank { null }
+        Log.d("VoirDramaProvider", "GoPlay $chemin : résumé ${resume?.length ?: 0} car.")
         return TvShow(
             id = "$GP_PREFIX$chemin",
             title = titre,

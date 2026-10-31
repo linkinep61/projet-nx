@@ -160,6 +160,8 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
 
     private const val MAIN_PAGE_PATH = "/wefeed-mobile-bff/tab-operating"
     private const val SEARCH_PATH = "/wefeed-mobile-bff/subject-api/search/v2"
+    /** Nom sous lequel la base d'index garde le subjectId MovieBox d'un film TMDB. */
+    private const val SITE_INDEX_SID = "MovieBoxSid"
     private const val SUBJECT_GET_PATH = "/wefeed-mobile-bff/subject-api/get"
     private const val RESOURCE_PATH = "/wefeed-mobile-bff/subject-api/resource"
     private const val PLAY_INFO_PATH = "/wefeed-mobile-bff/subject-api/play-info"
@@ -2022,7 +2024,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         if (parts.size != 2) return emptyList()
         val tvId = parts[0].toIntOrNull() ?: return emptyList()
         val seNum = parts[1].toIntOrNull() ?: return emptyList()
-        return runCatching {
+        val tmdbEps = runCatching {
             TMDb3.TvSeasons.details(seriesId = tvId, seasonNumber = seNum, language = language)
                 .episodes?.map {
                     Episode(
@@ -2034,6 +2036,31 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     )
                 } ?: emptyList()
         }.getOrDefault(emptyList())
+        // 2026-10-31 (signalement « Sorcières Academy » S1 : 10 épisodes au lieu de 21) : TMDB
+        //   n'en recense que 10, MovieBox en a 21 (maxEp de /season-info). On complète avec les
+        //   numéros manquants (même id « tmdb:se:ep » → getServers retrouve la fiche MovieBox).
+        val complement = runCatching {
+            val d = TMDb3.TvSeries.details(seriesId = tvId, language = language,
+                appendToResponse = listOf(TMDb3.Params.AppendToResponse.Tv.ALTERNATIVE_TITLES))
+            val titres = linkedSetOf<String>()
+            d.name.takeIf { it.isNotBlank() }?.let { titres.add(it) }
+            d.originalName.takeIf { it.isNotBlank() }?.let { titres.add(it) }
+            d.alternativeTitles?.all()?.mapNotNull { it.title?.takeIf { t -> t.isNotBlank() } }?.forEach { titres.add(it) }
+            var sid: String? = null
+            for (t in titres) { sid = findSubjectId(t, null, TYPE_SERIE); if (!sid.isNullOrBlank()) break }
+            if (sid.isNullOrBlank()) return@runCatching emptyList<Episode>()
+            val arr = apiGet(SEASON_INFO_PATH, mapOf("subjectId" to sid))?.optJSONObject("data")?.optJSONArray("seasons")
+            var maxEp = 0
+            if (arr != null) for (i in 0 until arr.length()) {
+                val s = arr.optJSONObject(i) ?: continue
+                if (s.optInt("se", -1) == seNum) { maxEp = s.optInt("maxEp", s.optInt("epNum", 0)); break }
+            }
+            val dejaMax = tmdbEps.maxOfOrNull { it.number } ?: 0
+            Log.i(TAG, "épisodes TMDB $tvId S$seNum : TMDB=${tmdbEps.size} MovieBox(sid=$sid) maxEp=$maxEp")
+            if (maxEp <= dejaMax) emptyList()
+            else ((dejaMax + 1)..maxEp).map { n -> Episode(id = "$tvId:$seNum:$n", number = n, title = "Épisode $n") }
+        }.getOrDefault(emptyList())
+        return tmdbEps + complement
     }
 
     /** Liste des épisodes d'une série Cloudstream via /resource paginé.
@@ -2065,6 +2092,25 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             val pager = data.optJSONObject("pager")
             if (pager?.optBoolean("hasMore", false) != true) break
             page++
+        }
+        // 2026-10-31 (signalement : « Sorcières Academy » S1 = 10 épisodes au lieu de 21 ;
+        //   MovieBox web en montre bien 21) : /resource s'arrête parfois après la 1re page.
+        //   On complète avec maxEp de /season-info (même logique que le secours ci-dessous).
+        if (episodes.isNotEmpty()) {
+            val maxEp = runCatching {
+                val arr = apiGet(SEASON_INFO_PATH, mapOf("subjectId" to sid))?.optJSONObject("data")?.optJSONArray("seasons")
+                var m = 0
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val s = arr.optJSONObject(i) ?: continue
+                    if (s.optInt("se", -1) == seNum) { m = s.optInt("maxEp", s.optInt("epNum", 0)); break }
+                }
+                m
+            }.getOrDefault(0)
+            Log.i(TAG, "épisodes $sid S$seNum : /resource=${episodes.size} (pages=$page) maxEp=$maxEp")
+            if (maxEp > (episodes.keys.maxOrNull() ?: 0)) {
+                for (ep in 1..maxEp) episodes.putIfAbsent(ep,
+                    Episode(id = "cs::ep::$sid::$seNum::$ep", number = ep, title = "Épisode $ep"))
+            }
         }
         if (episodes.isEmpty()) {
             // Fallback : season-info pour récupérer maxEp
@@ -2252,7 +2298,21 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                         ep = parts.getOrNull(2)?.toIntOrNull() ?: videoType.number
                     }
                 }
+                // 2026-11-01 — BASE D'INDEX : l'identifiant MovieBox (subjectId) d'un film/série
+                //   ne change jamais, seuls les liens vidéo (?sign=&t=) expirent. Mesuré sur
+                //   Fight Club : ~1,4 s sur 2,5 s partaient dans TMDB (titres alternatifs) +
+                //   la recherche par titre ci-dessous. Si la base le connaît (confirmé par
+                //   2 appareils), on saute tout ça ; sinon recherche habituelle, puis on
+                //   envoie le sid trouvé (série : sid de la SÉRIE, saison 0).
+                val filmIndex = videoType is Video.Type.Movie
                 if (!queryTitle.isBlank()) {
+                    val sidBase = runCatching { com.streamflixreborn.streamflix.utils.IndexOnyx.cleSignalee(SITE_INDEX_SID, tmdbId, filmIndex) }.getOrNull()
+                    if (!sidBase.isNullOrBlank() && sidBase.all(Char::isDigit)) {
+                        subjectId = sidBase
+                        Log.d(TAG, "getServers TMDB→Cloudstream : sid=$sidBase donné par la base → pas de recherche")
+                    }
+                }
+                if (subjectId.isNullOrBlank() && !queryTitle.isBlank()) {
                     // 2026-07-11 (user « pareil sur Cloudstream ») : aoneroom indexe souvent les
                     //   séries (dramas coréens, anime…) sous un AUTRE nom que le titre fr TMDB
                     //   (ex. Navillera → « Navillera - Like a Butterfly » / « 나빌레라 »). On essaie
@@ -2286,8 +2346,9 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                         Log.d(TAG, "getServers : pas de subjectId Cloudstream pour '$queryTitle' ($year) [${titles.size} titres testés] — fallback Nakios si TMDB id dispo")
                     } else {
                         Log.d(TAG, "getServers TMDB→Cloudstream : '$matched' ($year) → sid=$subjectId, se=$se ep=$ep")
+                        com.streamflixreborn.streamflix.utils.IndexOnyx.signaler(SITE_INDEX_SID, subjectId!!, tmdbId, filmIndex, matched, 0)
                     }
-                } else {
+                } else if (queryTitle.isBlank()) {
                     Log.d(TAG, "getServers : titre vide pour $id")
                 }
             }

@@ -206,6 +206,15 @@ object XonaflixProvider {
     }
 
     /**
+     * 2026-10-31 — Base d'index : la page du film est déjà connue (étiquette TMDB vérifiée par
+     * l'IMDb de la fiche) → on lit directement ses lecteurs, sans recherche.
+     */
+    suspend fun serveursDePage(pagePath: String): List<Video.Server> = withContext(Dispatchers.IO) {
+        val html = getPage(pagePath) ?: return@withContext emptyList()
+        emitServers(html, pagePath)
+    }
+
+    /**
      * Backup par titre. Recherche, match STRICT bidirectionnel, épisode ciblé pour les séries,
      * gate d'année best-effort pour les films. Retourne [] si rien ne matche.
      */

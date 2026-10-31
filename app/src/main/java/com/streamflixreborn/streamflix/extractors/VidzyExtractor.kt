@@ -182,11 +182,24 @@ class VidzyExtractor : Extractor() {
      * tout le reste → 403. Ajoutée au master.m3u8, le CDN la recopie dans les playlists et les
      * segments. En cas d'échec on rend l'adresse telle quelle (comportement précédent).
      */
+    private val empreinte: Pair<String, Int> by lazy {
+        val r = java.security.SecureRandom()
+        val hex = (1..16).map { "0123456789abcdef"[r.nextInt(16)] }.joinToString("")
+        hex to (9000 + r.nextInt(3500))
+    }
+
+    private fun empreinteCanvas(): Pair<String, Int> = empreinte
+
     private suspend fun avecCleSession(url: String): String {
         if (!url.contains("/hls2/") && !url.contains("/v/")) return url
         if (url.contains("gk=")) return url
         return withContext(Dispatchers.IO) {
-            val gate = "https://v6.vidzy.cc/gate.php?v=p1&cw=159.56&cw2=170.34&wg=1&dpr=2.625&sw=412&hw=8&ft=TOP&rf="
+            // 2026-10-31 : gate.php exige en plus `ca` (empreinte canvas, 16 hex) et `cl`
+            //   (longueur du dataURL). Sans eux → {"ok":0}. Le serveur ne vérifie que la forme :
+            //   on fournit une empreinte stable propre à l'installation (pas une valeur figée
+            //   commune à tous, qui serait facile à bannir).
+            val (ca, cl) = empreinteCanvas()
+            val gate = "https://v6.vidzy.cc/gate.php?v=p1&cw=159.56&cw2=170.34&wg=1&ca=$ca&cl=$cl&dpr=2.625&sw=412&hw=8&ft=TOP&rf="
             repeat(3) { essai ->
                 try {
                     val corps = client.newCall(
@@ -198,6 +211,7 @@ class VidzyExtractor : Extractor() {
                             .build()
                     ).execute().use { it.body?.string().orEmpty() }
                     val gk = org.json.JSONObject(corps).optString("gk")
+                    if (gk.isBlank()) Log.w(TAG, "gate.php refuse (essai ${essai + 1}) : ${corps.take(40)}")
                     if (gk.isNotBlank()) {
                         Log.d(TAG, "clé de session gk obtenue (essai ${essai + 1})")
                         return@withContext url + (if (url.contains('?')) "&" else "?") + "gk=" + java.net.URLEncoder.encode(gk, "UTF-8")

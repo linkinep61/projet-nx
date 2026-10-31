@@ -500,6 +500,38 @@ object OkRuProvider {
         }
 
         val hls = meta.optString("hlsManifestUrl", "").takeIf { it.isNotBlank() }
+        val dash = meta.optString("ondemandDash", "").takeIf { it.isNotBlank() }
+        // 2026-10-31 (Oppo, « L'Odyssée » 2026 : 37 s d'écran noir avant l'image) : mesuré dans
+        //   Chrome — le MP4 commence par un index (moov) de 8,3 Mo et le serveur ne débite que
+        //   ~250 Ko/s → ~35 s avant la 1re image. Le DASH du site démarre sur un petit segment.
+        //   On lit l'en-tête du MP4 : index > 2 Mo (long film) ou MP4 muet → lecture du DASH.
+        val mp4Ok = meilleure?.let { url ->
+            val t0 = System.currentTimeMillis()
+            val tailleIndex: Long? = runCatching {
+                client.newBuilder().callTimeout(6, java.util.concurrent.TimeUnit.SECONDS).build()
+                    .newCall(Request.Builder().url(url).header("User-Agent", UA)
+                        .header("Referer", "$BASE/").header("Range", "bytes=0-63").build())
+                    .execute().use { rep ->
+                        val b = rep.body?.bytes() ?: return@use null
+                        if (rep.code !in 200..299 || b.size < 16) return@use null
+                        fun u32(o: Int) = ((b[o].toLong() and 0xFF) shl 24) or ((b[o + 1].toLong() and 0xFF) shl 16) or
+                            ((b[o + 2].toLong() and 0xFF) shl 8) or (b[o + 3].toLong() and 0xFF)
+                        fun type(o: Int) = String(b, o + 4, 4, Charsets.ISO_8859_1)
+                        val s1 = u32(0).toInt()
+                        if (s1 + 8 <= b.size && type(s1) == "moov") u32(s1) else 0L
+                    }
+            }.getOrNull()
+            Log.d(TAG, "sonde MP4 $id : index=${tailleIndex?.let { "${it / 1024} Ko" } ?: "muet"} en ${System.currentTimeMillis() - t0} ms")
+            tailleIndex != null && tailleIndex < 2L * 1024 * 1024
+        } ?: false
+        if (!mp4Ok && dash != null) {
+            Log.i(TAG, "getVideo $id → MP4 ${if (meilleure == null) "absent" else "lent à démarrer"}, lecture du DASH")
+            return Video(
+                source = dash,
+                type = androidx.media3.common.MimeTypes.APPLICATION_MPD,
+                headers = mapOf("User-Agent" to UA, "Referer" to "$BASE/"),
+            )
+        }
         val choisi = meilleure
         val source = choisi ?: hls ?: throw Exception("ok.ru : aucun flux")
 

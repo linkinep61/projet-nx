@@ -438,7 +438,7 @@ class GlobalFavoritesTvFragment : Fragment() {
         when (val r = reprises[repriseIndex]) {
             is Movie -> {
                 b.tvResumeTitle.text = r.title
-                b.tvResumeSource.text = r.providerName ?: ""
+                b.tvResumeSource.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(r.providerName)
                 val wh = r.watchHistory
                 val reste = if (wh != null && wh.durationMillis > 0) ((wh.durationMillis - wh.lastPlaybackPositionMillis) / 60000L).coerceAtLeast(1) else 0L
                 b.tvResumeSub.text = if (reste > 0) "Film · reste $reste min" else "Film"
@@ -447,7 +447,7 @@ class GlobalFavoritesTvFragment : Fragment() {
             }
             is GlobalFavorites.ContinueWatchingSeriesItem -> {
                 b.tvResumeTitle.text = r.tvShow.title
-                b.tvResumeSource.text = r.providerName
+                b.tvResumeSource.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(r.providerName)
                 val wh = r.lastEpisode.watchHistory
                 val ep = (if (r.seasonNumber > 0) "S${r.seasonNumber} " else "") + "E${r.episodeNumber}"
                 val reste = if (wh != null && wh.durationMillis > 0) ((wh.durationMillis - wh.lastPlaybackPositionMillis) / 60000L).coerceAtLeast(1) else 0L

@@ -155,7 +155,7 @@ class ProviderViewHolder(
         // 2026-05-05 : préfixe le nom avec 🔒 si verrouillé
         val isLocked = com.streamflixreborn.streamflix.utils.ProviderLockStore
             .isLocked(context, provider.name)
-        binding.tvProviderName.text = if (isLocked) "🔒 ${provider.name}" else provider.name
+        binding.tvProviderName.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(if (isLocked) "🔒 ${provider.name}" else provider.name)
         binding.tvProviderName.setTextColor(com.streamflixreborn.streamflix.utils.UserPreferences.appTextColorInt)
 
         binding.tvProviderLanguage.text = Locale.forLanguageTag(provider.language)
@@ -215,7 +215,7 @@ class ProviderViewHolder(
 
         val isLocked = com.streamflixreborn.streamflix.utils.ProviderLockStore
             .isLocked(context, provider.name)
-        binding.tvProviderName.text = if (isLocked) "🔒 ${provider.name}" else provider.name
+        binding.tvProviderName.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(if (isLocked) "🔒 ${provider.name}" else provider.name)
         binding.tvProviderName.setTextColor(com.streamflixreborn.streamflix.utils.UserPreferences.appTextColorInt)
 
         binding.tvProviderLanguage.text = Locale.forLanguageTag(provider.language)

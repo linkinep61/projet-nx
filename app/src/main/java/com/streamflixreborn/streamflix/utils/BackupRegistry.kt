@@ -134,7 +134,7 @@ object BackupRegistry {
         "Papadustream V2" to "Papadustream V2",
         "Wiflix" to "Wiflix",
         "FrenchStream" to "FrenchStream",
-        "1Jour1Film" to "1Jour1Film",
+        "1Jour1Film" to "Firestorm",
         "aplouf" to "aplouf",
         "AnimeSama" to "AnimeSama (animes)",
         "VoirAnime" to "VoirAnime (animes)",
@@ -1268,6 +1268,8 @@ object BackupRegistry {
         }
 
         Log.i(TAG, "fetchAll title='${key.title}' knownTitles=$knownTitles tmdbId=$resolvedTmdbId year=${key.year} effectiveYear=$effectiveYear season=${key.season} ep=${key.episode}")
+        // 2026-10-31 — ESSAI base d'index : on la consulte TOUT DE SUITE, en parallèle (≤ 600 ms).
+        launch { runCatching { IndexOnyx.prechauffer(resolvedTmdbId, key.isMovie, key.season ?: 0, key.episode ?: 0) } }
         val seen = ConcurrentHashMap.newKeySet<String>()
         /** Sources ayant fourni au moins un serveur nouveau (mode léger : seuil de pause). */
         val sourcesAvecServeurs = ConcurrentHashMap.newKeySet<String>()
@@ -1396,15 +1398,19 @@ object BackupRegistry {
                         }
                     }
                 }
+                // 2026-10-31 — ESSAI base d'index : page déjà connue → plus de recherche, donc plus
+                //   rien de lourd. La source part tout de suite, sans file d'attente ni pause.
+                val pageConnue = IndexOnyx.connaitDeja(source)
+                if (pageConnue) Log.i(TAG, "$source → page connue de la base : lancée sans attendre")
                 // 2026-10-22 : une source pas encore partie attend la 1ʳᵉ image (cf. signalerDemarrage).
-                if (demarrageEnCours()) {
+                if (!pageConnue && demarrageEnCours()) {
                     Log.i(TAG, "$source → attend la première image avant de chercher")
                     while (demarrageEnCours()) kotlinx.coroutines.delay(250L)
                     Log.i(TAG, "$source → lancée")
                 }
                 // Mode léger : file d'attente 3 par 3 (l'attente de la place ne compte PAS dans le
                 //   délai de la source) ; les gourmandes prennent leur ticket en dernier.
-                if (UserPreferences.modeLeger) {
+                if (UserPreferences.modeLeger && !pageConnue) {
                     // Pause tant que la vidéo joue et que 5 sources différentes ont déjà répondu.
                     suspend fun pauseSiLectureSuffit() {
                         var annonce = false
@@ -1458,7 +1464,9 @@ object BackupRegistry {
         //   [enDernier] attendent que TOUTES les autres aient fini de chercher avant de partir.
         //   Les 3 s du départ laissent les autres démarrer (vagues, 2ᵉ vague CF à 0,8 s).
         val autresEnCours = java.util.concurrent.atomic.AtomicInteger(0)
-        suspend fun emit(source: String, fetch: suspend () -> List<Video.Server>) {
+        suspend fun emit(source: String, fetchBrut: suspend () -> List<Video.Server>) {
+            // Base d'index : sources aux liens stables → serveurs mémorisés servis sans recherche.
+            val fetch = IndexOnyx.avecMemoire(source, fetchBrut)
             if (source in enDernier) {
                 if (source in exclude || (seulement != null && source !in seulement)) return
                 kotlinx.coroutines.delay(3_000L)
@@ -1558,11 +1566,21 @@ object BackupRegistry {
         //   CoflixSourceProvider mis à jour pour le nouveau format (cfServers inline + WP search).
         //   Essaie tous les titres connus (alt TMDB inclus) comme CoflixWiki.
         launch { emit("Coflix Boston") {
+            // 2026-10-31 — ESSAI base d'index : page connue → lecteurs directs ; sinon recherche
+            //   habituelle puis signalement de la page trouvée (recherche déjà filtrée par l'année).
+            if (key.isMovie) IndexOnyx.cleSignalee("Coflix Boston", resolvedTmdbId, true)?.let { page ->
+                Log.i(TAG, "DIAG [Coflix Boston] INDEX : page connue → pas de recherche")
+                val d = CoflixSourceProvider.sourcesDePage(page)
+                if (d.isNotEmpty()) return@emit d
+            }
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue
-                result = if (key.isMovie) CoflixSourceProvider.getMovieSources(titleTry, key.year)
-                          else CoflixSourceProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
+                result = if (key.isMovie) {
+                    val (page, srv) = CoflixSourceProvider.getMovieSourcesAvecPage(titleTry, key.year)
+                    if (page != null && srv.isNotEmpty() && key.year != null) IndexOnyx.signaler("Coflix Boston", page, resolvedTmdbId, true, titleTry)
+                    srv
+                } else CoflixSourceProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
                 if (result.isNotEmpty()) break
             }
             result
@@ -1574,11 +1592,21 @@ object BackupRegistry {
         //   (anime + films live-action), et le matching strict empêche les faux positifs.
         //   Tous les backups tournent quel que soit le provider/contenu.
         launch { emit("CoflixWiki") {
+            // 2026-10-31 — ESSAI base d'index : fiches connues → lecteurs directs ; sinon recherche
+            //   habituelle (filtrée par l'année) puis signalement des fiches trouvées.
+            if (key.isMovie) IndexOnyx.cleSignalee("CoflixWiki", resolvedTmdbId, true)?.let { cles ->
+                Log.i(TAG, "DIAG [CoflixWiki] INDEX : fiches connues → pas de recherche")
+                val d = CoflixWikiProvider.sourcesDeCles(cles)
+                if (d.isNotEmpty()) return@emit d
+            }
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue
-                result = if (key.isMovie) CoflixWikiProvider.getMovieSources(titleTry, key.year)
-                          else CoflixWikiProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
+                result = if (key.isMovie) {
+                    val (cles, srv) = CoflixWikiProvider.getMovieSourcesAvecCles(titleTry, key.year)
+                    if (cles.isNotBlank() && srv.isNotEmpty() && key.year != null) IndexOnyx.signaler("CoflixWiki", cles, resolvedTmdbId, true, titleTry)
+                    srv
+                } else CoflixWikiProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
                 if (result.isNotEmpty()) break
             }
             result
@@ -1915,8 +1943,13 @@ object BackupRegistry {
             //   ne couvre pas : chez eux `purstream/tv` répond 404.
             launch {
                 emit("Purstream") {
+                    // 2026-10-31 — ESSAI base d'index : id Purstream connu → pas de recherche ;
+                    //   sinon recherche (confirmée par le n° TMDB) puis signalement de l'id trouvé.
+                    val idPurstream = IndexOnyx.cleSignalee("Purstream", resolvedTmdbId, key.isMovie)?.toLongOrNull()
                     com.streamflixreborn.streamflix.providers.PurstreamProvider
-                        .fetchPurstreamBackupServers(resolvedTmdbId, videoType, key.season, key.episode, knownTitles.toList())
+                        .fetchPurstreamBackupServers(resolvedTmdbId, videoType, key.season, key.episode, knownTitles.toList(),
+                            idConnu = idPurstream,
+                            surTrouve = { IndexOnyx.signaler("Purstream", it.toString(), resolvedTmdbId, key.isMovie, key.title) })
                 }
             }
 
@@ -2427,6 +2460,12 @@ object BackupRegistry {
                             kotlinx.coroutines.delay(CF_SECOND_WAVE_MS)
                         }
                         emit(p.name) {
+                        // 2026-10-31 — Base d'index : au plus DEUX passes. 1re avec la page connue de la
+                        //   base ; si elle ne rend AUCUN serveur (fiche supprimée, numéro changé…), 2e passe
+                        //   = recherche habituelle, comme si la base n'existait pas. On ne perd aucun serveur.
+                        var ignorerIndex = false
+                        var resultatFinal = emptyList<Video.Server>()
+                        passes@ for (passe in 0..1) {
                         // 2026-07-09 : DIAGNOSTIC complet pour chaque provider de la boucle générique.
                         //   Log le résultat de chaque étape (search, type, matching, resolve, servers)
                         //   pour comprendre POURQUOI un provider ne remonte pas de serveurs.
@@ -2451,7 +2490,12 @@ object BackupRegistry {
                                 .lastOrNull()
 
                         val t0 = System.currentTimeMillis()
-                        val searchResults = try {
+                        // 2026-10-31 — ESSAI base d'index : si la base connaît la page de CETTE
+                        //   source pour ce film (étiquette TMDB vérifiée), on la donne à la place
+                        //   de la recherche par titre. Sinon : recherche habituelle, inchangée.
+                        val ficheIndex = if (ignorerIndex) null else runCatching { IndexOnyx.ficheDirecte(p.name, resolvedTmdbId, key.isMovie, key.season ?: 0, key.episode ?: 0) }.getOrNull()
+                        if (ficheIndex != null) Log.i(TAG, "DIAG [${p.name}] INDEX : page connue '${(ficheIndex as? com.streamflixreborn.streamflix.models.Movie)?.title ?: (ficheIndex as? com.streamflixreborn.streamflix.models.TvShow)?.title}' id=${(ficheIndex as? com.streamflixreborn.streamflix.models.Movie)?.id ?: (ficheIndex as? com.streamflixreborn.streamflix.models.TvShow)?.id} → pas de recherche")
+                        val searchResults = if (ficheIndex != null) listOf<com.streamflixreborn.streamflix.adapters.AppAdapter.Item>(ficheIndex) else try {
                             p.search(key.title, 1)
                         } catch (e: Exception) {
                             Log.w(TAG, "DIAG [${p.name}] search('${key.title}') EXCEPTION en ${System.currentTimeMillis()-t0}ms: ${e.javaClass.simpleName}: ${e.message}")
@@ -2522,9 +2566,21 @@ object BackupRegistry {
                             if (sousTitreCompatible(titreDe(c), key.title)) 0 else 1
                         val triés = candidatsValides.sortedBy { scoreSousTitre(it) }
                         var match = if (anneeVoulue != null) {
-                            val compatible = triés.firstOrNull { c ->
-                                val a = anneeDe(c); a == null || kotlin.math.abs(a - anneeVoulue) <= 1
+                            // 2026-10-31 (user : Wiflix « L'Odyssée » → le film de 2016 au lieu de 2026) :
+                            //   le site liste « L'Odyssée » (sans année = 2016) AVANT « L'Odyssée (2026) ».
+                            //   Un candidat dont l'année CORRESPOND passe désormais devant ceux sans année.
+                            fun rangAnnee(c: Any): Int {
+                                val a = anneeDe(c)
+                                return when {
+                                    a == null -> 1
+                                    kotlin.math.abs(a - anneeVoulue) <= 1 -> 0
+                                    else -> 2 // année incompatible → exclu
+                                }
                             }
+                            val compatible = candidatsValides
+                                .filter { rangAnnee(it) < 2 }
+                                .sortedWith(compareBy({ scoreSousTitre(it) }, { rangAnnee(it) }))
+                                .firstOrNull()
                             val premier = candidatsValides.firstOrNull()
                             if (compatible !== premier && premier != null) {
                                 Log.i(
@@ -2656,6 +2712,14 @@ object BackupRegistry {
                         }
                         if (match == null) {
                             Log.i(TAG, "DIAG [${p.name}] AUCUN MATCH → 0 serveurs (total ${System.currentTimeMillis()-t0}ms)")
+                            // Page de la base refusée par les garde-fous → recherche habituelle.
+                            if (ficheIndex != null) {
+                                Log.i(TAG, "DIAG [${p.name}] INDEX : page connue refusée → recherche habituelle")
+                                // 2026-10-31 : on le dit à la base (retirée après 2 appareils différents).
+                                IndexOnyx.refuser(p.name, resolvedTmdbId, key.isMovie, key.season ?: 0)
+                                ignorerIndex = true
+                                continue@passes
+                            }
                             return@emit emptyList()
                         }
                         val matchTitle = (match as? com.streamflixreborn.streamflix.models.Movie)?.title
@@ -2663,6 +2727,35 @@ object BackupRegistry {
                         val matchId = (match as? com.streamflixreborn.streamflix.models.Movie)?.id
                             ?: (match as? com.streamflixreborn.streamflix.models.TvShow)?.id ?: "?"
                         Log.i(TAG, "DIAG [${p.name}] MATCH trouvé: '$matchTitle' id=$matchId → résolution serveurs…")
+                        // 2026-10-31 — ESSAI base d'index, MÉMOIRE PARTICIPATIVE : on ne signale qu'une
+                        //   correspondance SÛRE (année de la fiche = année du film à ±1, ou même id TMDB).
+                        //   Une fiche sans année (piège « L'Odyssée » 2016) n'est jamais signalée.
+                        if (ficheIndex == null && key.isMovie) {
+                            val a = anneeDe(match)
+                            val anneeFilm: Int? = key.year
+                            val sur = (a != null && anneeFilm != null && kotlin.math.abs(a - anneeFilm) <= 1) ||
+                                (!resolvedTmdbId.isNullOrBlank() && matchId == resolvedTmdbId)
+                            if (sur) IndexOnyx.signaler(p.name, matchId, resolvedTmdbId, true, matchTitle)
+                            else Log.d(TAG, "DIAG [${p.name}] pas signalé à la base (année ${a ?: "absente"} ≠ ${key.year})")
+                        }
+                        // 2026-10-31 — Séries : la page trouvée vaut pour toute la SAISON. Plus strict
+                        //   que pour un film (une page de saison porte l'année de la saison, pas de la
+                        //   série) : même id TMDB, OU titre identique (hors « Saison N ») ET page datée
+                        //   entre l'année de la série −1 et l'année en cours +1. Sans année → jamais.
+                        if (ficheIndex == null && !key.isMovie && (key.season ?: 0) > 0) {
+                            val a = anneeDe(match)
+                            val debut: Int? = key.year
+                            val anneeCourante = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+                            fun nu(t: String) = java.text.Normalizer.normalize(t, java.text.Normalizer.Form.NFD)
+                                .replace(Regex("\\p{M}+"), "").lowercase()
+                                .replace(Regex("[-–:]?\\s*(saison|season)\\s*\\d+.*$"), "")
+                                .replace(Regex("[^a-z0-9]+"), " ").trim()
+                            val memeTitre = nu(matchTitle) == nu(key.title)
+                            val sur = (!resolvedTmdbId.isNullOrBlank() && matchId == resolvedTmdbId) ||
+                                (memeTitre && a != null && debut != null && a >= debut - 1 && a <= anneeCourante + 1)
+                            if (sur) IndexOnyx.signaler(p.name, matchId, resolvedTmdbId, false, matchTitle, key.season ?: 0)
+                            else Log.d(TAG, "DIAG [${p.name}] série pas signalée (titre ${if (memeTitre) "identique" else "différent"}, année ${a ?: "absente"}, série $debut)")
+                        }
                         // ── 2026-08-06 (user : « est-ce qu'on ferme trop tôt les portes pour
                         //   l'arrivée des serveurs ? ») — OUI, et c'était bien vu ─────────────
                         //   Journal de deux collectes successives sur la même série :
@@ -2689,7 +2782,15 @@ object BackupRegistry {
                         val budget = if (p.name in SLOW_CF_SOURCES) 50_000L else 30_000L
                         val servers = CrossProviderResolver.resolveAndFetchServers(p, match, videoType, timeoutMs = budget)
                         Log.i(TAG, "DIAG [${p.name}] → ${servers.size} serveurs (total ${System.currentTimeMillis()-t0}ms)")
-                        servers
+                        if (servers.isEmpty() && ficheIndex != null) {
+                            Log.i(TAG, "DIAG [${p.name}] INDEX : page connue sans serveur → recherche habituelle")
+                            ignorerIndex = true
+                            continue@passes
+                        }
+                        resultatFinal = servers
+                        break@passes
+                        }
+                        resultatFinal
                     } }
                 }
         }
@@ -2784,6 +2885,23 @@ object BackupRegistry {
         //   = mp4 signé sur le CDN zen-blk (même CDN que Movix), « VOSTFR » = vidzy (extracteur
         //   existant) ; « VF 2 » (moviez) écarté provisoirement (résolution inconnue).
         if (key.title.length >= 2) launch { emit("Xonaflix") {
+            // Base d'index : page du film déjà connue (étiquette vérifiée par l'IMDb de la fiche).
+            IndexOnyx.cheminDe("xonaflix", resolvedTmdbId, key.isMovie)?.let { chemin ->
+                Log.i(TAG, "DIAG [Xonaflix] INDEX : page connue $chemin → pas de recherche")
+                val direct = XonaflixProvider.serveursDePage(chemin)
+                if (direct.isNotEmpty()) return@emit direct
+                Log.i(TAG, "DIAG [Xonaflix] INDEX : page sans lecteur → recherche habituelle")
+            }
+            // Série : la base connaît le slug de la SÉRIE → page de l'épisode directement.
+            if (!key.isMovie && (key.season ?: 0) > 0 && (key.episode ?: 0) > 0) {
+                IndexOnyx.cleSignalee("xonaflix", resolvedTmdbId, false)?.let { slug ->
+                    val chemin = "/episode/$slug/${key.season}-${key.episode}"
+                    Log.i(TAG, "DIAG [Xonaflix] INDEX : série connue → $chemin (pas de recherche)")
+                    val direct = XonaflixProvider.serveursDePage(chemin)
+                    if (direct.isNotEmpty()) return@emit direct
+                    Log.i(TAG, "DIAG [Xonaflix] INDEX : épisode sans lecteur → recherche habituelle")
+                }
+            }
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue

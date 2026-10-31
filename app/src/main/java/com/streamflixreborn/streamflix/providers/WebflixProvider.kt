@@ -49,6 +49,8 @@ object WebflixProvider {
         val quality: String? = null,
         val language: String? = null,
         val lang: String? = null,
+        // Séries : l'API renvoie désormais tous les épisodes, clé "saison-épisode".
+        val episodes: Map<String, FastfluxData>? = null,
     )
 
     /**
@@ -92,10 +94,16 @@ object WebflixProvider {
             Log.e(TAG, "parse failed: ${e.message}"); return@withContext emptyList()
         }
         if (resp == null || !resp.success || !resp.available || resp.data == null) return@withContext emptyList()
-        val src = (resp.data.url ?: resp.data.file ?: resp.data.src)
+        val d = if (videoType is Video.Type.Episode && resp.data.episodes != null) {
+            resp.data.episodes["$season-$episode"] ?: run {
+                Log.i(TAG, "tmdb=$tmdbId S${season}E$episode absent (${resp.data.episodes.size} épisodes listés)")
+                return@withContext emptyList()
+            }
+        } else resp.data
+        val src = (d.url ?: d.file ?: d.src)
             ?.takeIf { it.startsWith("http") } ?: return@withContext emptyList()
-        val quality = resp.data.quality?.takeIf { it.isNotBlank() && !it.equals("Unknown", ignoreCase = true) }
-        val lang = (resp.data.language ?: resp.data.lang)?.takeIf { it.isNotBlank() } ?: "VF"
+        val quality = d.quality?.takeIf { it.isNotBlank() && !it.equals("Unknown", ignoreCase = true) }
+        val lang = (d.language ?: d.lang)?.takeIf { it.isNotBlank() } ?: "VF"
         val label = buildString {
             append("Webflix")
             quality?.let { append(" $it") }
@@ -106,13 +114,37 @@ object WebflixProvider {
 
     /** Lecture : le MP4 est sur cdn.drinkoflix.lol (Cloudflare) → cf_clearance + STEALTH_UA. */
     suspend fun getVideo(server: Video.Server): Video {
-        val src = server.src
+        val src = resoudreLienFinal(server.src)
         val cookie = resolveCfClearance(src)
         val h = HashMap<String, String>()
         h["User-Agent"] = WebViewResolver.STEALTH_UA
         h["Referer"] = "$BASE/"
         if (!cookie.isNullOrBlank()) h["Cookie"] = cookie
         return Video(source = src, type = androidx.media3.common.MimeTypes.VIDEO_MP4, headers = h)
+    }
+
+    /**
+     * CDN zen-blk : le MP4 passe par 2 redirections (proxy → lien à jeton ?ff=). Sans Referer
+     * webflix.art sur TOUTE la chaîne, il renvoie une page Telegram (lecteur : « container
+     * unsupported »). On suit la chaîne ici avec le Referer et on donne au lecteur le lien final
+     * à jeton, qui se lit sans Referer.
+     */
+    private suspend fun resoudreLienFinal(src: String): String = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder().url(src)
+                .header("User-Agent", WebViewResolver.STEALTH_UA)
+                .header("Referer", "$BASE/")
+                .header("Range", "bytes=0-0")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                val fin = resp.request.url.toString()
+                val type = resp.header("Content-Type").orEmpty()
+                Log.i(TAG, "lien final HTTP ${resp.code} type=$type redirigé=${fin != src} → ${fin.take(120)}")
+                if (resp.isSuccessful) fin else src
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "résolution du lien final échouée : ${e.message}"); src
+        }
     }
 
     /** Récupère un cf_clearance DÉJÀ présent pour le CDN drinkoflix. */

@@ -234,10 +234,15 @@ class OnRegardeOuExtractor : Extractor() {
         val ajax = Regex("""VPM_AJAX\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1)?.replace("\\/", "/") ?: return statiques
         val slug = Regex("""VPM_SLUG\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1) ?: return statiques
         val cle = Regex("""VPM_NONCE\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1) ?: return statiques
+        // 2026-10-31 : les pages d'ÉPISODE appellent `vpm_get_episode_sources` (les films
+        //   `vpm_get_sources`) ; la mauvaise action → 403 « forbidden », 0 lecteur → séries cassées.
+        //   On lit l'action dans la page elle-même.
+        val action = Regex("""vpmRequest\(\s*['"](vpm_get_\w*sources)['"]""").find(html)?.groupValues?.get(1)
+            ?: "vpm_get_sources"
         return runCatching {
             val req = Request.Builder().url(ajax)
                 .post(okhttp3.FormBody.Builder()
-                    .add("action", "vpm_get_sources").add("slug", slug).add("vpm_src_nonce", cle).build())
+                    .add("action", action).add("slug", slug).add("vpm_src_nonce", cle).build())
                 .header("User-Agent", ANDROID_CHROME_UA)
                 .header("Referer", pageUrl)
                 .header("Origin", Regex("^(https?://[^/]+)").find(pageUrl)?.groupValues?.get(1) ?: pageUrl)
@@ -246,7 +251,7 @@ class OnRegardeOuExtractor : Extractor() {
             NetworkClient.default.newCall(req).execute().use { r ->
                 val j = JSONObject(r.body?.string().orEmpty())
                 j.optJSONObject("data")?.optJSONArray("servers").also {
-                    android.util.Log.d("OnRegardeOu", "vpm_get_sources ($slug) : HTTP ${r.code}, ${it?.length() ?: 0} lecteur(s)")
+                    android.util.Log.d("OnRegardeOu", "$action ($slug) : HTTP ${r.code}, ${it?.length() ?: 0} lecteur(s)")
                 }
             }
         }.getOrNull() ?: statiques
@@ -912,7 +917,9 @@ class OnRegardeOuExtractor : Extractor() {
         //   L'ORDRE DU SITE (Serveur 1 → 4), chacun via son extracteur dédié ; la WebView
         //   générique ne reste qu'en dernier recours. (User : « sur le site il n'y a que le
         //   Serveur 1 qui marche pour ce film » → c'est précisément le premier essayé.)
-        if (hoteDe(link).contains("onregardeou")) {
+        // 2026-10-31 : la page aux lecteurs est aussi servie sous cetaitmieuxavant.website
+        //   (nouvelle adresse) → même traitement, sinon on chargeait le 1er lecteur en WebView.
+        if (hoteDe(link).contains("onregardeou") || hoteDe(link).contains("cetaitmieuxavant")) {
             val miroirs = parseMirrors(link)
             for ((nom, url) in miroirs) {
                 val h = hoteDe(url)

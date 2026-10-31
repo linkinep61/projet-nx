@@ -123,7 +123,11 @@ class GlideCustomModule : AppGlideModule() {
                     host.contains("dessinanime") || host.contains("dessins-animes") ||
                     host.contains("frenchanime") || host.contains("french-anime") ||
                     host.contains("papadustream")
-                val ua = if (isCfHost)
+                // 2026-10-31 : 1jour1film (nouveau domaine) refuse tout UA « Android … Pixel »,
+                //   images comprises (403) → affiches grises. Même UA que le provider.
+                val ua = if (host.contains("1jour1film"))
+                    com.streamflixreborn.streamflix.providers.UnJourUnFilmProvider.UA_J1F
+                else if (isCfHost)
                     com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
                 else
                     com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT

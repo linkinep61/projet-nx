@@ -337,7 +337,9 @@ class MainTvActivity : FragmentActivity() {
         //   est maintenant posé au point d'entrée réel. finish() est appelé
         //   dans onCreate → Android n'enchaîne que onDestroy, rien n'est
         //   initialisé à moitié.
-        if (com.streamflixreborn.streamflix.utils.EtatApp.garder(this)) return
+        // 2026-10-31 (user) : interrupteur à distance DÉSACTIVÉ — il interrogeait l'API à chaque
+        //   ouverture de l'appli (27 % de ses requêtes). Le code reste dans EtatApp.kt.
+        // if (com.streamflixreborn.streamflix.utils.EtatApp.garder(this)) return
         // 2026-10-28 : animation avec le logo de l'événement en cours (Halloween, Noël…), sinon rien.
         com.streamflixreborn.streamflix.utils.AnimationEvenement.afficherSiEvenement(this)
 
@@ -688,7 +690,7 @@ class MainTvActivity : FragmentActivity() {
                     .load(UserPreferences.currentProvider?.logo?.takeIf { it.isNotEmpty() } ?: R.drawable.ic_provider_default_logo)
                     .error(R.drawable.ic_provider_default_logo)
                     .into(header.ivNavigationHeaderIcon)
-                header.tvNavigationHeaderTitle.text = UserPreferences.currentProvider?.name
+                header.tvNavigationHeaderTitle.text = com.streamflixreborn.streamflix.utils.NomAffiche.de(UserPreferences.currentProvider?.name)
                 header.tvNavigationHeaderSubtitle.text = getString(R.string.main_menu_change_provider)
                 val palette = ThemeManager.palette(UserPreferences.selectedTheme)
                 header.tvNavigationHeaderTitle.setTextColor(palette.tvHeaderPrimary)
@@ -1123,7 +1125,7 @@ class MainTvActivity : FragmentActivity() {
      *  HomeCacheStore et notifie pour rafraîchir le home. */
     fun showCatalogFilterPicker() {
         val provider = UserPreferences.currentProvider ?: return
-        val modes = com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.entries
+        val modes = com.streamflixreborn.streamflix.utils.CatalogFilter.modesFor(provider.name)
         val current = com.streamflixreborn.streamflix.utils.CatalogFilter.get(provider.name)
         val currentIdx = modes.indexOf(current).coerceAtLeast(0)
         androidx.appcompat.app.AlertDialog.Builder(this)

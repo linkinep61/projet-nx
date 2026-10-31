@@ -4720,7 +4720,7 @@ class PlayerMobileFragment : Fragment() {
                     withContext(Dispatchers.Main) {
                         Toast.makeText(
                             requireContext(),
-                            "Ce serveur nécessite un navigateur, téléchargement impossible (${server.name})",
+                            "Ce serveur nécessite un navigateur, téléchargement impossible (${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)})",
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -4738,7 +4738,7 @@ class PlayerMobileFragment : Fragment() {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(
                         requireContext(),
-                        "Téléchargement ajouté : ${server.name}",
+                        "Téléchargement ajouté : ${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)}",
                         Toast.LENGTH_SHORT
                     ).show()
                 }
@@ -5300,10 +5300,13 @@ class PlayerMobileFragment : Fragment() {
             val exigeDoh = needsDoH(video.source)
             // 2026-10-29 : SendVid → téléchargement parallèle (l'UA de l'extracteur passe par
             //   setDefaultRequestProperties plus bas, ParallelRangeDataSource le respecte).
-            if (sourceHost.contains("sendvid")) {
-                httpDataSource = com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default)
+            // 2026-10-31 : + CDN Vidara (s1q2105/97bf1) sur 8 connexions. Avant, ce bloc
+            //   remplaçait la fabrique parallèle par « Custom UA from extractor » (Vidara fournit un UA).
+            val parallelVidara = sourceHost.contains("s1q2105.com") || sourceHost.contains("97bf1.com")
+            if (sourceHost.contains("sendvid") || parallelVidara) {
+                httpDataSource = com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default, if (parallelVidara) 8 else 4)
                 dataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(requireContext(), httpDataSource)
-                Log.d("PlayerNetwork", "SendVid → téléchargement parallèle (4 connexions)")
+                Log.d("PlayerNetwork", "$sourceHost → téléchargement parallèle")
             } else if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !exigeDoh &&
                 !(sourceHost.contains("uqload") || sourceHost.contains("abyssa") || sourceHost.contains("abysscdn")
                     || sourceHost.contains("citron-edge") || sourceHost.contains("vidzy"))) {
@@ -8129,9 +8132,14 @@ class PlayerMobileFragment : Fragment() {
     private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
         // 2026-10-29 (user) : SendVid plafonne chaque connexion à ~250 Ko/s → téléchargement
         //   sur 4 connexions en parallèle (cf. ParallelRangeDataSource).
-        if (videoUrl.contains("sendvid.com", ignoreCase = true)) {
-            Log.d("PlayerNetwork", "SendVid → téléchargement parallèle (4 connexions)")
-            return com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default)
+        // 2026-10-31 (user, Netu FrenchStream = front Vidara) : CDN Vidara s1q2105/97bf1 servi à
+        //   ~220 Ko/s par connexion (segments de 10 s ≈ 6 Mo en 25-28 s) → même remède.
+        if (videoUrl.contains("sendvid.com", ignoreCase = true) ||
+            videoUrl.contains("s1q2105.com", ignoreCase = true) ||
+            videoUrl.contains("97bf1.com", ignoreCase = true)) {
+            Log.d("PlayerNetwork", "${hostOf(videoUrl)} → téléchargement parallèle (4 connexions)")
+            return com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default,
+                if (videoUrl.contains("sendvid.com", ignoreCase = true)) 4 else 8)
         }
         // Hôte connu comme DNS-bloqué par le FAI → DoT-OkHttp d'office (résout via dot.sb).
         val vHost = hostOf(videoUrl)

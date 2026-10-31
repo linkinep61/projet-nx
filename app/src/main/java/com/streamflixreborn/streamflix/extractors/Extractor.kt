@@ -1250,6 +1250,24 @@ abstract class Extractor {
                 android.net.Uri.parse(finalLink).host ?: "?"
             } catch (e: Exception) { "?" }
             Log.w("Extractor", "HOTE NON COUVERT: $hoteInconnu (aucun extracteur) — $finalLink")
+
+            // 2026-10-31 (Netu FrenchStream → h308sa.com) : la famille Vidara change de front
+            //   sans arrêt (gaqghe, ykfrtza, h308sa…), toujours en /e/<filecode> avec un
+            //   jwplayer qui pointe vers vidara.so. Plutôt que d'attendre un « rouge » pour
+            //   ajouter chaque domaine, on reconnaît la page elle-même.
+            if (Regex("""^https?://[^/]+/e/[A-Za-z0-9]+""").containsMatchIn(finalLink)) {
+                val estVidara = runCatching {
+                    sharedClient.newCall(
+                        okhttp3.Request.Builder().url(finalLink)
+                            .header("User-Agent", DEFAULT_USER_AGENT)
+                            .build()
+                    ).execute().use { r -> r.isSuccessful && (r.body?.string().orEmpty().contains("vidara.so", true)) }
+                }.getOrDefault(false)
+                if (estVidara) {
+                    Log.i("Extractor", "Front Vidara reconnu à la page : $hoteInconnu → VidaraExtractor")
+                    return enforceFrenchSubtitlesOnly(VidaraExtractor().extract(finalLink))
+                }
+            }
             throw Exception("No extractors found for URL: $finalLink")
         }
 

@@ -1441,7 +1441,7 @@ class HomeMobileFragment : Fragment() {
      */
     private fun showCatalogFilterPicker() {
         val provider = UserPreferences.currentProvider ?: return
-        val modes = com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.entries
+        val modes = com.streamflixreborn.streamflix.utils.CatalogFilter.modesFor(provider.name)
         val current = com.streamflixreborn.streamflix.utils.CatalogFilter.get(provider.name)
         val currentIdx = modes.indexOf(current).coerceAtLeast(0)
         androidx.appcompat.app.AlertDialog.Builder(requireContext())

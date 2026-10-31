@@ -52,6 +52,15 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     override val name = "1Jour1Film"
 
     const val USER_AGENT = NetworkClient.USER_AGENT
+    // 2026-10-31 (user : « 1Jour1Film le home ne charge plus ») : nouveau domaine
+    //   1jour1film1026b.shop. Son pare-feu renvoie 403 (en ~50 ms, sans challenge) à tout
+    //   UA « Android … Pixel … » — y compris l'API wp-json. Vérifié depuis le PC : Pixel 7 /
+    //   Pixel 8 Pro → 403 ; Samsung, Oppo, BRAVIA, iPhone, Windows, « Android 10; K » → 200.
+    //   On se présente comme un vrai Chrome Android actuel (format réduit « Android 10; K »),
+    //   en gardant la vraie version de Chrome du moteur. Propre à cette source.
+    val UA_J1F: String
+        get() = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
+            .replace(Regex("""\(Linux; Android [^)]*\)"""), "(Linux; Android 10; K)")
     // 2026-06-19 (user "l'adresse de redirection a changé") : 1jour1film-officiel.site
     //   est mort, nouveau portail = https://1jour1film2026.site/
     // ── 2026-08-28 (user « ca fait tres longtemps que je vois plus ce backup ») ─────────
@@ -90,7 +99,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         }
 
     override val logo: String
-        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_unjourunfilm"
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_firestorm"
     override val language = "fr"
     override val changeUrlMutex = Mutex()
 
@@ -1021,7 +1030,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         runCatching {
             val req = okhttp3.Request.Builder()
                 .url(baseUrl.trimEnd('/') + chemin)
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", UA_J1F)
                 .header("Accept", "application/json")
                 .build()
             NetworkClient.default.newCall(req).execute().use { r ->
@@ -1153,7 +1162,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 .post(okhttp3.FormBody.Builder().apply {
                     corps.split('&').forEach { p -> add(p.substringBefore('='), p.substringAfter('=', "")) }
                 }.build())
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", UA_J1F)
                 .header("Referer", baseUrl)
                 .header("X-Requested-With", "XMLHttpRequest")
                 .build()
@@ -1714,7 +1723,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                     val r = chain.request()
                     val page = r.method == "GET" && !r.url.encodedPath.contains("/wp-json/")
                     val req = r.newBuilder()
-                        .header("User-Agent", com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA)
+                        .header("User-Agent", UA_J1F)
                         .apply {
                             if (page) {
                                 header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
@@ -1727,6 +1736,8 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                         }.build()
                     val cookieAvant = cookiesDe(req.url.toString())
                     val rep = chain.proceed(req)
+                    if (rep.code == 403 && rep.header("cf-mitigated") == null)
+                        Log.w("UnJourUnFilm", "403 SANS challenge (pare-feu) ${req.url.encodedPath} UA=${UA_J1F.substringAfter("(").substringBefore(")")}")
                     if (!page || rep.code != 403 || rep.header("cf-mitigated") != "challenge") return@addInterceptor rep
                     // 2026-10-30 (signalement « 1 jour 1 film HTTP 403 ») : Cloudflare pose
                     //   maintenant un challenge sur /films/ et /saisons/. On récupère le
@@ -1752,7 +1763,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                     // Le cookie cf_clearance est lié au User-Agent ; la WebView a pu normaliser
                     //   STEALTH_UA (vraie version) APRÈS la 1re requête → on relance avec l'UA à jour.
                     val uaAvant = req.header("User-Agent")
-                    val uaMaintenant = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
+                    val uaMaintenant = UA_J1F
                     val rep2 = chain.proceed(req.newBuilder().header("User-Agent", uaMaintenant).build())
                     Log.i("UnJourUnFilm", "CF relance ${req.url.encodedPath} → ${rep2.code} (UA ${if (uaAvant == uaMaintenant) "inchangé" else "MIS À JOUR : ${uaAvant?.substringAfter("Chrome/")?.take(14)} → ${uaMaintenant.substringAfter("Chrome/").take(14)}"}, cookie cf=${cookiesDe(req.url.toString()).contains("cf_clearance=")})")
                     if (rep2.code != 403 || rep2.header("cf-mitigated") != "challenge") return@addInterceptor rep2

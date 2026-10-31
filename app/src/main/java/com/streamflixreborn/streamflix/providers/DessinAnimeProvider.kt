@@ -843,6 +843,18 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     //   Le site DessinAnime a 363+ pages d'animation sur TMDB. On utilise Discover (genre
     //   Animation=16) + Trending pour peupler le home. Le CF bypass tourne EN FOND (warmUpCf)
     //   pour être prêt quand le user cliquera sur un titre (= getServers, seul endroit CF).
+    // 2026-11-01 (user) : « univers » choisi avec le bouton filtre (CatalogFilter, propre à
+    //   DessinAnime) → appliqué à l'accueil, aux Films, aux Séries et aux genres de la recherche.
+    private fun univers() = com.streamflixreborn.streamflix.utils.CatalogFilter.get(name)
+
+    private suspend fun discoverFilms(tri: String, page: Int = 1, extra: Map<String, String> = emptyMap()) =
+        TMDb3.Discover.movie(mapOf("with_genres" to "16", "language" to "fr-FR", "sort_by" to tri,
+            "page" to page.toString()) + extra + univers().filtresFilms)
+
+    private suspend fun discoverSeries(tri: String, page: Int = 1, extra: Map<String, String> = emptyMap()) =
+        TMDb3.Discover.tv(mapOf("with_genres" to "16", "language" to "fr-FR", "sort_by" to tri,
+            "page" to page.toString()) + extra + univers().filtresSeries)
+
     override suspend fun getHome(): List<Category> = coroutineScope {
         // 2026-07-12 : warmUpCf() RETIRÉ du getHome. Le home est 100% TMDB (zéro CF),
         //   pas besoin de charger le moteur Chromium/WebView ici. Le CF se chauffe
@@ -854,82 +866,60 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         val categories = mutableListOf<Category>()
 
         try {
-            // ── FEATURED (carrousel) : Tendances animation de la semaine ──
-            val trending = TMDb3.Trending.all(TMDb3.Params.TimeWindow.WEEK, language = "fr-FR")
-            val trendingAnim = trending.results.filter { item ->
-                when (item) {
-                    is TMDb3.Movie -> 16 in item.genresIds
-                    is TMDb3.Tv -> 16 in item.genresIds
-                    else -> false
-                }
-            }.take(12)
-            if (trendingAnim.isNotEmpty()) {
-                // 2026-10-19 : ordre MÉLANGÉ à chaque ouverture (avant : même ordre toute la
-                //   semaine). « En Tendance » reçoit le reste du même tirage → aucun doublon.
-                val melange = trendingAnim.shuffled()
-                val featured = melange.take(6).map { it.toAppItem(banner = true) }
-                categories.add(Category(name = Category.FEATURED, list = featured))
+            // 2026-11-01 (user) : l'« univers » choisi avec le bouton filtre (Animés japonais,
+            //   Disney, DreamWorks…) s'applique à TOUTES les rangées. Requêtes en parallèle.
+            val u = univers()
+            val aujourdhui = java.time.LocalDate.now()
+            val dPopF = async { runCatching { discoverFilms("popularity.desc") }.getOrNull() }
+            val dPopS = async { runCatching { discoverSeries("popularity.desc") }.getOrNull() }
+            val dEnCours = async { runCatching { discoverSeries("popularity.desc", extra = mapOf(
+                "air_date.gte" to aujourdhui.minusDays(7).toString(),
+                "air_date.lte" to aujourdhui.plusDays(1).toString())) }.getOrNull() }
+            val dTop = async { runCatching { discoverFilms("vote_average.desc", extra = mapOf("vote_count.gte" to "100")) }.getOrNull() }
+            val dNewF = async { runCatching { discoverFilms("primary_release_date.desc", extra = mapOf(
+                "vote_count.gte" to "5", "primary_release_date.lte" to aujourdhui.toString())) }.getOrNull() }
+            val dNewS = async { runCatching { discoverSeries("first_air_date.desc", extra = mapOf(
+                "vote_count.gte" to "5", "first_air_date.lte" to aujourdhui.toString())) }.getOrNull() }
+            val popF = dPopF.await()?.results.orEmpty()
+            val popS = dPopS.await()?.results.orEmpty()
+
+            // ── FEATURED (carrousel) ──
+            //   « Toute l'animation » : tendances animation de la semaine (comme avant).
+            //   Univers choisi : ses titres les plus populaires (films et séries mêlés).
+            val vedettes: List<TMDb3.MultiItem> = if (u == com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.ANIM_TOUT) {
+                runCatching { TMDb3.Trending.all(TMDb3.Params.TimeWindow.WEEK, language = "fr-FR").results }
+                    .getOrDefault(emptyList())
+                    .filter { item ->
+                        when (item) {
+                            is TMDb3.Movie -> 16 in item.genresIds
+                            is TMDb3.Tv -> 16 in item.genresIds
+                            else -> false
+                        }
+                    }.take(12)
+            } else buildList { addAll(popF.take(6)); addAll(popS.take(6)) }
+            if (vedettes.isNotEmpty()) {
+                // 2026-10-19 : ordre MÉLANGÉ à chaque ouverture. « En Tendance » reçoit le reste
+                //   du même tirage → aucun doublon.
+                val melange = vedettes.shuffled()
+                categories.add(Category(name = Category.FEATURED, list = melange.take(6).map { it.toAppItem(banner = true) }))
                 if (melange.size > 6) {
                     categories.add(Category(name = "En Tendance", list = melange.drop(6).map { it.toAppItem() }))
                 }
             }
 
-            // ── Films Populaires ──
-            val popMovies = TMDb3.Discover.movie(
-                withGenres = animGenreMovie,
-                language = "fr-FR",
-                sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-                page = 1,
-            )
-            if (popMovies.results.isNotEmpty()) {
-                categories.add(Category(name = "Films Populaires", list = popMovies.results.take(20).map { it.toAppMovie() }))
+            dEnCours.await()?.results?.takeIf { it.isNotEmpty() }?.let {
+                categories.add(Category(name = "En cours de diffusion", list = it.take(20).map { s -> s.toAppTvShow() }))
             }
-
-            // ── Séries Populaires ──
-            val popTv = TMDb3.Discover.tv(
-                withGenres = animGenreTv,
-                language = "fr-FR",
-                sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
-                page = 1,
-            )
-            if (popTv.results.isNotEmpty()) {
-                categories.add(Category(name = "Séries Populaires", list = popTv.results.take(20).map { it.toAppTvShow() }))
+            if (popF.isNotEmpty()) categories.add(Category(name = "Films Populaires", list = popF.take(20).map { it.toAppMovie() }))
+            if (popS.isNotEmpty()) categories.add(Category(name = "Séries Populaires", list = popS.take(20).map { it.toAppTvShow() }))
+            dTop.await()?.results?.takeIf { it.isNotEmpty() }?.let {
+                categories.add(Category(name = "Mieux Notés", list = it.take(20).map { m -> m.toAppMovie() }))
             }
-
-            // ── Mieux Notés (films animation avec ≥100 votes) ──
-            val topRated = TMDb3.Discover.movie(
-                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
-                language = "fr-FR",
-                sortBy = TMDb3.Params.SortBy.Movie.VOTE_AVERAGE_DESC,
-                voteCount = TMDb3.Params.Range(gte = 100),
-                page = 1,
-            )
-            if (topRated.results.isNotEmpty()) {
-                categories.add(Category(name = "Mieux Notés", list = topRated.results.take(20).map { it.toAppMovie() }))
+            dNewF.await()?.results?.takeIf { it.isNotEmpty() }?.let {
+                categories.add(Category(name = "Nouveaux Films", list = it.take(20).map { m -> m.toAppMovie() }))
             }
-
-            // ── Nouveautés Films ──
-            val newMovies = TMDb3.Discover.movie(
-                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
-                language = "fr-FR",
-                sortBy = TMDb3.Params.SortBy.Movie.PRIMARY_RELEASE_DATE_DESC,
-                voteCount = TMDb3.Params.Range(gte = 5),
-                page = 1,
-            )
-            if (newMovies.results.isNotEmpty()) {
-                categories.add(Category(name = "Nouveaux Films", list = newMovies.results.take(20).map { it.toAppMovie() }))
-            }
-
-            // ── Nouveautés Séries ──
-            val newTv = TMDb3.Discover.tv(
-                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
-                language = "fr-FR",
-                sortBy = TMDb3.Params.SortBy.Tv.FIRST_AIR_DATE_DESC,
-                voteCount = TMDb3.Params.Range(gte = 5),
-                page = 1,
-            )
-            if (newTv.results.isNotEmpty()) {
-                categories.add(Category(name = "Nouvelles Séries", list = newTv.results.take(20).map { it.toAppTvShow() }))
+            dNewS.await()?.results?.takeIf { it.isNotEmpty() }?.let {
+                categories.add(Category(name = "Nouvelles Séries", list = it.take(20).map { s -> s.toAppTvShow() }))
             }
         } catch (e: Exception) {
             Log.e(TAG, "getHome TMDB failed: ${e.message}")
@@ -1031,14 +1021,8 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     //   TMDB a 363+ pages d'animation. Pagination native TMDB (20 items/page).
     override suspend fun getMovies(page: Int): List<Movie> = withContext(Dispatchers.IO) {
         try {
-            val result = TMDb3.Discover.movie(
-                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
-                language = "fr-FR",
-                sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-                page = page,
-            )
-            val movies = result.results.map { it.toAppMovie() }
-            Log.d(TAG, "getMovies(page=$page) → ${movies.size} movies (TMDB Discover)")
+            val movies = discoverFilms("popularity.desc", page).results.map { it.toAppMovie() }
+            Log.d(TAG, "getMovies(page=$page, ${univers().pref}) → ${movies.size} movies (TMDB Discover)")
             movies
         } catch (e: Exception) {
             Log.w(TAG, "getMovies TMDB failed: ${e.message}")
@@ -1048,14 +1032,8 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
 
     override suspend fun getTvShows(page: Int): List<TvShow> = withContext(Dispatchers.IO) {
         try {
-            val result = TMDb3.Discover.tv(
-                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
-                language = "fr-FR",
-                sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
-                page = page,
-            )
-            val shows = result.results.map { it.toAppTvShow() }
-            Log.d(TAG, "getTvShows(page=$page) → ${shows.size} shows (TMDB Discover)")
+            val shows = discoverSeries("popularity.desc", page).results.map { it.toAppTvShow() }
+            Log.d(TAG, "getTvShows(page=$page, ${univers().pref}) → ${shows.size} shows (TMDB Discover)")
             shows
         } catch (e: Exception) {
             Log.w(TAG, "getTvShows TMDB failed: ${e.message}")
@@ -1271,25 +1249,10 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         if (page > 1) return@withContext Genre(id = id, name = id, shows = emptyList())
         try {
             val shows: List<com.streamflixreborn.streamflix.models.Show> = when (id) {
-                "movies" -> TMDb3.Discover.movie(
-                    withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
-                    language = "fr-FR", sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, page = 1,
-                ).results.take(20).map { it.toAppMovie() }
-                "tv" -> TMDb3.Discover.tv(
-                    withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
-                    language = "fr-FR", sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, page = 1,
-                ).results.take(20).map { it.toAppTvShow() }
-                else -> {
-                    val movies = TMDb3.Discover.movie(
-                        withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
-                        language = "fr-FR", sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, page = 1,
-                    ).results.take(10).map { it.toAppMovie() }
-                    val tvShows = TMDb3.Discover.tv(
-                        withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
-                        language = "fr-FR", sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, page = 1,
-                    ).results.take(10).map { it.toAppTvShow() }
-                    movies + tvShows
-                }
+                "movies" -> discoverFilms("popularity.desc").results.take(20).map { it.toAppMovie() }
+                "tv" -> discoverSeries("popularity.desc").results.take(20).map { it.toAppTvShow() }
+                else -> discoverFilms("popularity.desc").results.take(10).map { it.toAppMovie() } +
+                    discoverSeries("popularity.desc").results.take(10).map { it.toAppTvShow() }
             }
             Genre(id = id, name = when (id) {
                 "movies" -> "Films"

@@ -211,7 +211,14 @@ object CoflixSourceProvider {
      * @return Liste de [Video.Server] (un par hoster Coflix), ou empty si
      *         aucun match ou erreur.
      */
-    suspend fun getMovieSources(title: String, year: Int? = null, altTitle: String? = null): List<Video.Server> {
+    suspend fun getMovieSources(title: String, year: Int? = null, altTitle: String? = null): List<Video.Server> =
+        getMovieSourcesAvecPage(title, year, altTitle).second
+
+    /** 2026-10-31 — ESSAI base d'index : lecteurs d'une page Coflix déjà connue (sans recherche). */
+    suspend fun sourcesDePage(pageUrl: String): List<Video.Server> = extractFromCoflixPage(pageUrl, label = "Coflix Boston")
+
+    /** Comme [getMovieSources], mais rend aussi l'adresse de la page trouvée (à mémoriser). */
+    suspend fun getMovieSourcesAvecPage(title: String, year: Int? = null, altTitle: String? = null): Pair<String?, List<Video.Server>> {
         // 2026-06-03 (user "Pourquoi ce film là Il est pas trouvé par Ce site
         //   Dans l'application" pour Aventures croisées 2026) : essai du titre
         //   principal puis fallback titre alternatif (souvent le titre original
@@ -228,8 +235,8 @@ object CoflixSourceProvider {
             ?: resolveFrenchTitleViaTmdb(title, year, isMovie = true)
                 ?.takeIf { !it.equals(title, ignoreCase = true) }
                 ?.let { Log.d(TAG, "Coflix fallback FR title TMDB: '$title' -> '$it'"); searchBest(it, year, type = "movies") }
-            ?: return emptyList()
-        return extractFromCoflixPage(match.url, label = "Coflix Boston")
+            ?: return null to emptyList()
+        return match.url to extractFromCoflixPage(match.url, label = "Coflix Boston")
     }
 
     /**

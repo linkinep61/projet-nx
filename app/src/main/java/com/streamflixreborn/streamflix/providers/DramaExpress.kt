@@ -285,9 +285,23 @@ object DramaExpress {
         val k = "$slug|$n"
         flux[k]?.let { if (System.currentTimeMillis() - it.date < FLUX_MS) return it }
         val brut = getHtml(episodeUrl(slug, n), "sourceFirst")
-        val t = brut.replace("\\\"", "\"").replace("\\/", "/")
+        // 2026-11-01 : la page lue par le WebView est échappée UNE FOIS DE PLUS (`\\\"` au lieu
+        //   de `\"`) → l'ancien remplacement unique ne retrouvait plus `"sourceFirst":{` et le
+        //   lecteur ne donnait rien. On retire les couches jusqu'à ce qu'il n'y en ait plus.
+        var t = brut
+        repeat(4) {
+            val u = t.replace("\\\"", "\"").replace("\\/", "/")
+            if (u == t) return@repeat
+            t = u
+        }
         val i = t.indexOf("\"sourceFirst\":{")
-        if (i < 0) { Log.w(TAG, "$k : pas de sourceFirst"); return Flux(emptyList(), null, System.currentTimeMillis()) }
+        if (i < 0) {
+            // Si le site change encore sa page : ces marqueurs disent ce qu'on a reçu.
+            Log.w(TAG, "$k : pas de sourceFirst — page ${brut.length} car., marqueurs : " +
+                listOf("__next_f", "chain", "\"enc\"", "m3u8", ".mp4", "source", "player", "iframe", "Just a moment")
+                    .joinToString { "$it=${brut.contains(it)}" })
+            return Flux(emptyList(), null, System.currentTimeMillis())
+        }
         var bloc = t.substring(i, minOf(t.length, i + 8000))
         bloc.indexOf("\"nextSourceFirst\"").takeIf { it > 0 }?.let { bloc = bloc.substring(0, it) }
         val source = Regex("\"source\":\"([^\"]+)\"").find(bloc)?.groupValues?.get(1) ?: "DramaExpress"

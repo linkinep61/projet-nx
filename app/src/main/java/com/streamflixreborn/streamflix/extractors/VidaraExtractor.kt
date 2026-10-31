@@ -86,6 +86,10 @@ class VidaraExtractor : Extractor() {
         //   COUVERT: ykfrtza.com ». Vérifié dans Chrome : jwplayer `abouttext:"Vidara"`, même
         //   POST /api/stream avec filecode — c'est un nouveau front Vidara.
         "https://ykfrtza.com",
+        // 2026-10-31 (user : Netu FrenchStream rouge, OK sur le site) : kokoflix.lol/grandline_go.php
+        //   redirige désormais vers h308sa.com/e/<id>. Vérifié : jwplayer aboutlink vidara.so et
+        //   POST /api/stream rend le flux s1q2105.com/hls/… que lit le site.
+        "https://h308sa.com",
     )
 
     /**

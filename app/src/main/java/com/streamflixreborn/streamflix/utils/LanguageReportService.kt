@@ -223,53 +223,19 @@ object LanguageReportService {
      * affichage de fiche, alors que le résultat ne bouge pratiquement jamais. Le vote
      * de l'utilisateur invalide l'entrée, donc son choix reste visible immédiatement.
      */
-    private const val CACHE_TTL_MS = 6 * 60 * 60 * 1000L
-    private val cacheLangues = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, LanguageInfo?>>()
+    private fun invaliderCache(contentKey: String) = FicheCommunaute.invalider(contentKey)
 
-    private fun invaliderCache(contentKey: String) {
-        cacheLangues.keys.filter { it.startsWith("$contentKey|") }.forEach { cacheLangues.remove(it) }
-    }
-
+    /** 2026-10-31 : même lecture groupée que la note, voir [FicheCommunaute]. */
     suspend fun getLanguage(contentKey: String, deviceId: String): LanguageInfo? {
-        val cleCache = "$contentKey|$deviceId"
-        cacheLangues[cleCache]?.let { (pose, valeur) ->
-            if (System.currentTimeMillis() - pose < CACHE_TTL_MS) return valeur
-        }
-        return withContext(Dispatchers.IO) {
-            try {
-                val body = JSONObject().apply {
-                    put("contentKey", contentKey)
-                }
-                val request = Request.Builder()
-                    .url("$API_URL/lang/get")
-                    .post(body.toString().toRequestBody(JSON_MEDIA))
-                    .build()
-
-                val response = NetworkClient.default.newCall(request).execute()
-                val respBody = response.body?.string()
-                response.close()
-
-                if (!response.isSuccessful || respBody == null) return@withContext null
-
-                val json = JSONObject(respBody)
-                val (vf, vostfr, vo) = parseVoteCounts(json)
-
-                // Le vote individuel est lu depuis le cache local
-                val userVote = getLocalLangVote(contentKey, deviceId)
-
-                val res = resolve(vf, vostfr, vo)
-                LanguageInfo(
-                    votesVF = vf,
-                    votesVOSTFR = vostfr,
-                    votesVO = vo,
-                    userVote = userVote,
-                    label = res.label,
-                    locked = res.locked,
-                ).also { cacheLangues[cleCache] = System.currentTimeMillis() to it }
-            } catch (e: Exception) {
-                Log.e(TAG, "getLanguage failed for $contentKey", e)
-                null
-            }
-        }
+        val c = FicheCommunaute.lire(contentKey) ?: return null
+        val res = resolve(c.vf, c.vostfr, c.vo)
+        return LanguageInfo(
+            votesVF = c.vf,
+            votesVOSTFR = c.vostfr,
+            votesVO = c.vo,
+            userVote = getLocalLangVote(contentKey, deviceId),
+            label = res.label,
+            locked = res.locked,
+        )
     }
 }

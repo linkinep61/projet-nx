@@ -1291,7 +1291,7 @@ class PlayerTvFragment : Fragment() {
                             }
                             try {
                                 Toast.makeText(requireContext(),
-                                    "Chargement ${server.name}…",
+                                    "Chargement ${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)}…",
                                     Toast.LENGTH_SHORT).show()
                             } catch (_: Exception) {}
                             val target = state.servers.find { server.id == it.id }
@@ -1622,7 +1622,7 @@ class PlayerTvFragment : Fragment() {
                             if (modeExterne() && listeExterne != null) {
                                 hideLoadingOverlay()
                                 listeExterne?.echec(state.server)
-                                if (listeExterne?.visible != true) ouvrirListeExterne("${state.server.name} ne répond pas, choisis-en un autre.")
+                                if (listeExterne?.visible != true) ouvrirListeExterne("${com.streamflixreborn.streamflix.utils.NomAffiche.de(state.server.name)} ne répond pas, choisis-en un autre.")
                                 return@collect
                             }
                             // IPTV: never auto-advance on extractor failure (same sticky
@@ -1856,7 +1856,7 @@ class PlayerTvFragment : Fragment() {
                         try { player.stop() } catch (_: Exception) {}
                         try {
                             Toast.makeText(requireContext(),
-                                "Chargement ${sel.name}…",
+                                "Chargement ${com.streamflixreborn.streamflix.utils.NomAffiche.de(sel.name)}…",
                                 Toast.LENGTH_SHORT).show()
                         } catch (_: Exception) {}
                         val target = servers.find { sel.id == it.id }
@@ -5477,10 +5477,14 @@ class PlayerTvFragment : Fragment() {
                 //   `setDefaultRequestProperties`, juste en dessous, le pose de toute façon.
                 val exigeDoh = needsDoH(video.source)
                 // 2026-10-29 : SendVid → téléchargement parallèle (cf. ParallelRangeDataSource).
-                if (video.source.contains("sendvid.com", ignoreCase = true)) {
-                    httpDataSource = com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default)
+                // 2026-10-31 : + CDN Vidara (s1q2105/97bf1) sur 8 connexions (sinon la branche
+                //   « UA de l'extracteur » ci-dessous écrasait la fabrique parallèle).
+                val parallelVidara = video.source.contains("s1q2105.com", ignoreCase = true) ||
+                    video.source.contains("97bf1.com", ignoreCase = true)
+                if (video.source.contains("sendvid.com", ignoreCase = true) || parallelVidara) {
+                    httpDataSource = com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default, if (parallelVidara) 8 else 4)
                     dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
-                    Log.d("PlayerNetwork", "TV: SendVid → téléchargement parallèle (4 connexions)")
+                    Log.d("PlayerNetwork", "TV: téléchargement parallèle (${if (parallelVidara) 8 else 4} connexions)")
                 } else if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !isJa3Host && !exigeDoh) {
                     try {
                         val customFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
@@ -6494,7 +6498,7 @@ class PlayerTvFragment : Fragment() {
                                     try {
                                         android.widget.Toast.makeText(
                                             requireContext(),
-                                            "Pas d'audio sur ${server.name} — change de serveur via le menu",
+                                            "Pas d'audio sur ${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)} — change de serveur via le menu",
                                             android.widget.Toast.LENGTH_LONG,
                                         ).show()
                                     } catch (_: Exception) {}
@@ -7452,7 +7456,7 @@ class PlayerTvFragment : Fragment() {
                         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                             Toast.makeText(
                                 requireContext(),
-                                "Ce serveur nécessite un navigateur, téléchargement impossible (${server.name})",
+                                "Ce serveur nécessite un navigateur, téléchargement impossible (${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)})",
                                 Toast.LENGTH_LONG
                             ).show()
                         }
@@ -7468,7 +7472,7 @@ class PlayerTvFragment : Fragment() {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                         Toast.makeText(
                             requireContext(),
-                            "Téléchargement ajouté : ${server.name}",
+                            "Téléchargement ajouté : ${com.streamflixreborn.streamflix.utils.NomAffiche.de(server.name)}",
                             Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -9355,9 +9359,13 @@ class PlayerTvFragment : Fragment() {
         private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
             // 2026-10-29 (user) : SendVid plafonne chaque connexion à ~250 Ko/s → téléchargement
             //   sur 4 connexions en parallèle (cf. ParallelRangeDataSource).
-            if (videoUrl.contains("sendvid.com", ignoreCase = true)) {
-                Log.d("PlayerNetwork", "SendVid → téléchargement parallèle (4 connexions)")
-                return com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default)
+            // 2026-10-31 : idem pour le CDN Vidara (s1q2105/97bf1, ~220 Ko/s par connexion).
+            if (videoUrl.contains("sendvid.com", ignoreCase = true) ||
+                videoUrl.contains("s1q2105.com", ignoreCase = true) ||
+                videoUrl.contains("97bf1.com", ignoreCase = true)) {
+                Log.d("PlayerNetwork", "téléchargement parallèle : ${videoUrl.substringAfter("://").substringBefore('/')}")
+                return com.streamflixreborn.streamflix.utils.ParallelRangeDataSource.Factory(NetworkClient.default,
+                if (videoUrl.contains("sendvid.com", ignoreCase = true)) 4 else 8)
             }
             // 2026-08-08 (user : « ça peut sûrement être contourné ») — CDN hakunaymatata
             //   (Cloudstream / MovieBox+) : ON PASSE PAR NOTRE RÉSOLVEUR, PAS PAR CELUI DU SYSTÈME.
