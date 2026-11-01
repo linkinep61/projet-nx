@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.utils
 
+import kotlinx.coroutines.sync.withLock
 import android.util.Log
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.providers.CloudstreamProvider
@@ -284,8 +285,13 @@ object BackupRegistry {
      *  vocation à couvrir un anime japonais — les sources anime et mixtes, elles, ne sont pas
      *  touchées (le filtre large avait justement été retiré le 09/07 pour cette raison). */
     private val GENERALIST_SOURCES = setOf(
-        "Coflix Boston", "CoflixWiki", "Moviebox", "Papadustream V2", "Webflix", "LoiFlix",
+        "Coflix Boston", "CoflixWiki", "Moviebox", "Papadustream V2", "LoiFlix",
     )
+    // 2026-11-01 (user : « si tu arrives à ne pas avoir de mauvais matchs, on ne va pas le sauter ») :
+    //   Webflix RETIRÉ de la liste — il interroge son API par identifiant TMDB (pas de titre) et
+    //   suit la numérotation TMDB : vérifié dans Chrome, Bleach S2E1-26 (Mille Ans) en VF. Aucun
+    //   faux match possible. Les autres (recherche par TITRE) ne partent sur un animé que si la
+    //   base connaît déjà LEUR page pour cette œuvre (cf. emitInterne).
 
     // ── Mémoire des échecs par source (2026-08-16) ───────────────────────────
     /**
@@ -1337,9 +1343,17 @@ object BackupRegistry {
             //   animé américain ouvert depuis DessinAnime lui retirerait des serveurs légitimes.
             //   On ne coupe donc que sur du contenu RÉELLEMENT japonais (TMDB originalLanguage=ja,
             //   ou œuvre reconnue par AniList).
+            // 2026-11-01 : plus de saut aveugle — une page donnée par la BASE (étiquette TMDB vérifiée)
+            //   n'est pas une recherche par titre, donc pas de faux match : la source part.
+            //   ⚠ Seulement là où la source SE SERT de cette page : Coflix Boston / CoflixWiki la lisent
+            //   pour les FILMS ; pour une série elles refont une recherche par titre → reste sauté.
             if (isAnimeContent && source in GENERALIST_SOURCES) {
-                Log.i(TAG, "$source → SAUTÉ : source généraliste sur un contenu anime")
-                return
+                if (key.isMovie && source in setOf("Coflix Boston", "CoflixWiki") && IndexOnyx.connaitDeja(source)) {
+                    Log.i(TAG, "$source → généraliste sur un animé, mais page connue de la base → lancée")
+                } else {
+                    Log.i(TAG, "$source → SAUTÉ : source généraliste sur un contenu anime (page inconnue de la base)")
+                    return
+                }
             }
             // 2026-07-21 (user : « comment ça se fait qu'on n'a pas reçu d'alerte pour ce genre de
             //   cas — à la base on avait mis le système d'alerte exprès pour ça ») :
@@ -1456,6 +1470,8 @@ object BackupRegistry {
             }
             // 2026-08-21 : le signalement automatique vers GitHub a été retiré ; en cas
             //   d'échec on se contente du journal (ligne « $source failed » ci-dessus).
+            // 2026-11-01 : compteur anonyme pour le bilan de santé des sources (cf. SanteSources).
+            SanteSources.recherche(source, servers.size)
             pushServers(source, servers)
         }
 
@@ -1464,9 +1480,25 @@ object BackupRegistry {
         //   [enDernier] attendent que TOUTES les autres aient fini de chercher avant de partir.
         //   Les 3 s du départ laissent les autres démarrer (vagues, 2ᵉ vague CF à 0,8 s).
         val autresEnCours = java.util.concurrent.atomic.AtomicInteger(0)
+        // 2026-11-01 (user : « le démarrage de l'arrivée des sources, c'est pas celles qu'on a masquées,
+        //   testées en arrière-plan, qui font un frein ? ») — la vérification de Vidnest/Vidy ouvre une
+        //   page cachée : on ne la lance qu'une fois les autres sources terminées (plafond 25 s), pour
+        //   laisser processeur et réseau à celles qui arrivent vite.
+        suspend fun attendreLesAutres(source: String) {
+            val t0 = System.currentTimeMillis()
+            kotlinx.coroutines.delay(3_000L)
+            while (autresEnCours.get() > 0 && System.currentTimeMillis() - t0 < 25_000L) kotlinx.coroutines.delay(500L)
+            Log.i(TAG, "$source → vérification lancée après ${System.currentTimeMillis() - t0} ms (autres sources : ${autresEnCours.get()} en cours)")
+        }
         suspend fun emit(source: String, fetchBrut: suspend () -> List<Video.Server>) {
             // Base d'index : sources aux liens stables → serveurs mémorisés servis sans recherche.
-            val fetch = IndexOnyx.avecMemoire(source, fetchBrut)
+            // 2026-11-01 : FileSearch → les fichiers morts (404 chez leur serveur) sont écartés AVANT
+            //   d'être proposés, qu'ils viennent de la recherche (donc jamais mémorisés) ou de la base.
+            val brut: suspend () -> List<Video.Server> = if (source == "FileSearch")
+                ({ com.streamflixreborn.streamflix.providers.FileSearchProvider.filtrerMorts(fetchBrut()) }) else fetchBrut
+            val memo = IndexOnyx.avecMemoire(source, brut)
+            val fetch: suspend () -> List<Video.Server> = if (source == "FileSearch")
+                ({ com.streamflixreborn.streamflix.providers.FileSearchProvider.filtrerMorts(memo()) }) else memo
             if (source in enDernier) {
                 if (source in exclude || (seulement != null && source !in seulement)) return
                 kotlinx.coroutines.delay(3_000L)
@@ -1794,15 +1826,23 @@ object BackupRegistry {
             // 2026-10-23 (user : « en mode léger, on devrait les désactiver, pour être sûr de ne pas
             //   faire de bêtises ») : page web cachée à la lecture + VO qui compte sur les sous-titres
             //   automatiques / la traduction, coupés en mode léger → source absente en mode léger.
-            if (!UserPreferences.modeLeger && !resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch { emit("Vidnest") {
+            // 2026-11-01 (user : « vérifier d'abord les serveurs venant de TMDB pur pour savoir s'ils
+            //   ont vraiment du contenu avant de les afficher ») — Vidnest n'a aucune API « j'ai / j'ai
+            //   pas » (il essaie une douzaine de sources l'une après l'autre) : on lance son lecteur
+            //   caché AVANT d'afficher le serveur (cf. verifierAvantAffichage). Mode léger : inchangé
+            //   (source absente).
+            if (!UserPreferences.modeLeger && !resolvedTmdbId.isNullOrBlank() && langueOriginale != "fr") launch {
+                if (!sourceVerifiable("Vidnest", exclude, seulement)) return@launch
+                attendreLesAutres("Vidnest")
                 val tmdb = resolvedTmdbId!!
-                listOf(Video.Server(
+                val verifies = verifierAvantAffichage("Vidnest", listOf(Video.Server(
                     id = "vidnest_${if (key.isMovie) "movie_$tmdb" else "tv_${tmdb}_${key.season}_${key.episode}"}",
                     name = "[VOSTFR]",
                     src = (if (key.isMovie) "https://vidnest.fun/movie/$tmdb"
                            else "https://vidnest.fun/tv/$tmdb/${key.season.coerceAtLeast(1)}/${key.episode}") + "#vostfr",
-                ))
-            } }
+                )))
+                emit("Vidnest") { verifies }
+            }
 
             // 2026-10-30 (user : « si ce serveur nous embête à chaque fois et ne compte pas marcher à
             //   chaque fois, on va le désactiver et le supprimer complètement ») : EmbedWave RETIRÉ —
@@ -1812,9 +1852,14 @@ object BackupRegistry {
             // ── VIDY (vidy.st, par TMDB, serveur « Paris » multi-audio) ──────────────────
             // 2026-10-30 (user : « vidy.st — on fait déjà celui-là ») : page cachée à la lecture
             //   → absente en mode léger. VF choisie par le lecteur quand la piste existe.
-            if (!resolvedTmdbId.isNullOrBlank() && !UserPreferences.modeLeger) launch { emit("Vidy") {
-                com.streamflixreborn.streamflix.utils.VidySt.serveurs(resolvedTmdbId!!, key.isMovie, key.season, key.episode)
-            } }
+            // 2026-11-01 : vérifié avant affichage, comme Vidnest (jeton chiffré, pas d'API légère).
+            if (!resolvedTmdbId.isNullOrBlank() && !UserPreferences.modeLeger) launch {
+                if (!sourceVerifiable("Vidy", exclude, seulement)) return@launch
+                attendreLesAutres("Vidy")
+                val verifies = verifierAvantAffichage("Vidy",
+                    com.streamflixreborn.streamflix.utils.VidySt.serveurs(resolvedTmdbId!!, key.isMovie, key.season, key.episode))
+                emit("Vidy") { verifies }
+            }
 
             // ── VIDEM (videm.xyz, par TMDB, serveurs FRANÇAIS seulement) ────────────
             // 2026-10-26 (user : « je suis partant pour que tu ajoutes Videm ») : repris de l'app
@@ -1927,7 +1972,8 @@ object BackupRegistry {
             //   restaurer ce bloc suffit à réactiver la source.
 
             // ── NABISTREAM (par tmdbId) — dramas asiatiques VOSTFR, HLS tanastream + sous-titres FR ──
-            launch {
+            // 2026-11-01 : domaine mort → source plus lancée du tout (cf. NabistreamProvider.SOURCE_FERMEE).
+            if (!com.streamflixreborn.streamflix.providers.NabistreamProvider.SOURCE_FERMEE) launch {
                 emit("Nabistream") {
                     com.streamflixreborn.streamflix.providers.NabistreamProvider
                         .fetchNabistreamBackupServers(resolvedTmdbId, videoType, key.season, key.episode, knownTitles.toList())
@@ -2541,7 +2587,11 @@ object BackupRegistry {
                         //   → Parmi les candidats VALIDES, on préfère désormais celui dont le titre
                         //     porte l'ANNÉE du film demandé (ces sites l'affichent : « … (2026) »).
                         //     À défaut d'année explicite, comportement inchangé (1ᵉʳ valide).
-                        val candidatsValides = searchResults.filter { item ->
+                        // 2026-11-01 (Bleach Mille Ans, FRAnime 43078 « BLEACH: Sennen Kessen-hen ») :
+                        //   une page donnée par la BASE est déjà rattachée au bon TMDB (et à la bonne
+                        //   saison) → elle ne repasse pas la comparaison de titres, qui la rejetait
+                        //   pour « sous-titre différent » de « Bleach ».
+                        val candidatsValides = if (ficheIndex != null) searchResults.filter { typeOk(it) } else searchResults.filter { item ->
                             if (!typeOk(item)) return@filter false
                             val t = (item as? com.streamflixreborn.streamflix.models.Movie)?.title
                                 ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.title
@@ -2601,6 +2651,44 @@ object BackupRegistry {
                                 )
                             }
                             choisi
+                        }
+                        // 2026-11-01 (user : Bleach Mille Ans chez VoirAnime, Vostfree… « il faut que tous
+                        //   les serveurs arrivent ») — ces sites rangent la saison 2 TMDB dans une fiche À
+                        //   PART (« BLEACH: Sennen Kessen-hen », numérotée 1, 2, 3…), introuvable sous
+                        //   « Bleach ». Si la base connaît le titre de cette fiche de saison (FRAnime), on le
+                        //   cherche ici : titre IDENTIQUE (hors « VF » / « VOSTFR ») = même saison. La fiche
+                        //   est alors lue comme fiche de saison (son épisode 1 = notre épisode 1).
+                        if (ficheIndex == null && effectiveAnime && !key.isMovie && (key.season ?: 0) > 1 &&
+                            com.streamflixreborn.streamflix.providers.Provider.getGroup(p) ==
+                                com.streamflixreborn.streamflix.providers.Provider.Companion.ProviderGroup.ANIME) {
+                            fun nettoyer(t: String) = java.text.Normalizer.normalize(t, java.text.Normalizer.Form.NFD)
+                                .replace(Regex("\\p{M}+"), "").lowercase()
+                                .replace(Regex("\\((vf|vostfr|vo)\\)|\\b(vf|vostfr)\\b"), " ")
+                                .replace(Regex("[^a-z0-9]+"), " ").trim()
+                            // ⚠ Relevé sur l'Oppo : la base renvoie aussi « Bleach » marqué saison 2 (page
+                            //   de TOUTE la série signalée pour cette saison). Ce n'est PAS une fiche de
+                            //   saison : un titre identique à celui de la série est écarté, sinon on lirait
+                            //   sa saison 1 à la place de notre saison 2 (faux match).
+                            //   (Le tri est fait dans IndexOnyx.titresDeSaison ; on écarte en plus le titre
+                            //   demandé lui-même. PAS les titres alternatifs TMDB : « Bleach Sennen Kessen
+                            //   Hen » en fait partie et c'est justement le titre de la saison.)
+                            val titresSaison = runCatching {
+                                IndexOnyx.titresDeSaison(resolvedTmdbId, key.season ?: 0, key.episode ?: 0)
+                            }.getOrDefault(emptyList()).filter { nettoyer(it) != nettoyer(key.title) }
+                            for (ts in titresSaison) {
+                                val res = try { p.search(ts, 1) } catch (_: Exception) { emptyList() }
+                                val exacts = res.filter { typeOk(it) && nettoyer(titreDe(it)) == nettoyer(ts) }
+                                Log.i(TAG, "DIAG [${p.name}] titre de saison '$ts' → ${res.size} résultats, ${exacts.size} identiques " +
+                                    exacts.map { "'${titreDe(it)}'" })
+                                // VOSTFR d'abord (souvent complète ; la VF a du retard), la VF sinon.
+                                val choix = exacts.sortedBy { if (Regex("(?i)\\bvf\\b").containsMatchIn(titreDe(it))) 1 else 0 }.firstOrNull()
+                                if (choix != null) {
+                                    IndexOnyx.marquerFicheDeSaison(p.name, idDe(choix).substringBefore("@"))
+                                    Log.i(TAG, "DIAG [${p.name}] MATCH fiche de saison '${titreDe(choix)}' id=${idDe(choix)} (au lieu de '${match?.let { titreDe(it) }}')")
+                                    match = choix
+                                    break
+                                }
+                            }
                         }
                         // 2026-07-08 : essayer TOUS les titres connus (alternatifs TMDB inclus)
                         if (match == null && knownTitles.size > 1) {
@@ -2847,7 +2935,7 @@ object BackupRegistry {
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue
-                result = IAnimeProvider.fetchIAnimeBackup(titleTry, key.episode, videoType)
+                result = IAnimeProvider.fetchIAnimeBackup(titleTry, key.episode, videoType, key.season)
                 if (result.isNotEmpty()) break
             }
             result
@@ -2858,9 +2946,24 @@ object BackupRegistry {
         //   747, pas S15E12) — le provider compare au numéro brut.
         if (key.title.length >= 2 && effectiveAnime) launch { emit("Vostfree") {
             var result = emptyList<Video.Server>()
-            for (titleTry in knownTitles) {
+            // 2026-11-01 (user, Bleach Mille Ans) — numérotation ABSOLUE : pour une saison > 1,
+            //   « Bleach » épisode 47 serait l'épisode 47 de la PREMIÈRE série (faux match). On ne
+            //   cherche alors que la fiche PROPRE à la saison (titre connu de la base, ex.
+            //   « BLEACH: Sennen Kessen-hen »), dont l'épisode N est bien notre épisode N.
+            val saisonV = key.season ?: 0
+            val titresV = if (!key.isMovie && saisonV > 1) {
+                val serie = key.title.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim()
+                runCatching { IndexOnyx.titresDeSaison(resolvedTmdbId, saisonV, key.episode ?: 0) }.getOrDefault(emptyList())
+                    .filter { it.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim() != serie }
+                    .also { Log.i(TAG, "Vostfree saison $saisonV → titres de saison $it (titre de la série écarté)") }
+            } else knownTitles
+            for (titleTry in titresV) {
                 if (titleTry.isBlank()) continue
                 result = VostfreeProvider.fetchVostfreeBackup(titleTry, key.season, key.episode, videoType)
+                // Fiche de saison introuvable par son titre complet → on tape le titre de la SÉRIE
+                //   et on garde seulement la fiche dont le titre est exactement celui de la saison.
+                if (result.isEmpty() && titresV !== knownTitles)
+                    result = VostfreeProvider.fetchVostfreeBackup(titleTry, key.season, key.episode, videoType, requete = key.title)
                 if (result.isNotEmpty()) break
             }
             result
@@ -2932,6 +3035,47 @@ object BackupRegistry {
         awaitClose { }
     }
 
+    // ── 2026-11-01 : VÉRIFICATION AVANT AFFICHAGE des sources « TMDB pur » ───────────────
+    //   (user : « il faut trouver un moyen de vérifier d'abord les serveurs venant de TMDB pur
+    //   pour savoir s'ils ont vraiment du contenu avant de les proposer »). Vidnest et Vidy
+    //   fabriquent leur lien depuis l'identifiant TMDB sans savoir s'ils ont l'œuvre : sur un
+    //   animé (Bleach Mille Ans) ils s'affichaient et devenaient rouges au clic. On lance donc
+    //   leur lecteur caché en arrière-plan, UN À LA FOIS (une box TV ne tient pas plusieurs
+    //   pages cachées), et le serveur n'apparaît que si une vidéo a vraiment été captée. La
+    //   vidéo trouvée est gardée quelques minutes → le clic la lit directement.
+    private val SOURCES_VERIFIEES = setOf("Vidnest", "Vidy")
+    private const val VERIF_TTL_MS = 3 * 60_000L
+    private val verifMutex = kotlinx.coroutines.sync.Mutex()
+    private val videosVerifiees = ConcurrentHashMap<String, Pair<Long, Video>>()
+
+    private fun sourceVerifiable(source: String, exclude: Set<String>, seulement: Set<String>?): Boolean =
+        source !in exclude && (seulement == null || source in seulement) &&
+            com.streamflixreborn.streamflix.utils.UserPreferences.isBackupSourceEnabled(source)
+
+    private suspend fun verifierAvantAffichage(source: String, servers: List<Video.Server>): List<Video.Server> {
+        if (servers.isEmpty()) return servers
+        return verifMutex.withLock {
+            servers.filter { s ->
+                val t0 = System.currentTimeMillis()
+                val video = try {
+                    kotlinx.coroutines.withTimeoutOrNull(35_000L) {
+                        when (source) {
+                            "Vidy" -> com.streamflixreborn.streamflix.utils.VidySt.video(s)
+                            else -> com.streamflixreborn.streamflix.extractors.VidnestExtractor().extract(s.src.substringBefore('#'))
+                        }
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) { throw e
+                } catch (e: Exception) { Log.i(TAG, "$source vérification : ${e.message?.take(120)}"); null }
+                val ms = System.currentTimeMillis() - t0
+                if (video != null) {
+                    videosVerifiees["$source::${s.id}"] = System.currentTimeMillis() to video
+                    Log.i(TAG, "$source vérifié : vidéo trouvée en $ms ms → serveur affiché")
+                } else Log.i(TAG, "$source vérifié : RIEN en $ms ms → serveur masqué")
+                video != null
+            }
+        }
+    }
+
     /**
      * Lecture d'un serveur backup (id `bkreg::<source>::<idOrig>`). Ré-aiguille vers le
      * getVideo de la source d'origine ; fallback = Extractor.extract (embeds hosts).
@@ -2941,6 +3085,12 @@ object BackupRegistry {
         val source = rest.substringBefore("::")
         val origId = rest.substringAfter("::")
         val orig = Video.Server(id = origId, name = server.name, src = server.src, mirrors = server.mirrors)
+        if (source in SOURCES_VERIFIEES) videosVerifiees.remove("$source::$origId")?.let { (quand, video) ->
+            if (System.currentTimeMillis() - quand < VERIF_TTL_MS) {
+                Log.i(TAG, "$source : vidéo déjà trouvée à la vérification → lecture directe")
+                return video
+            }
+        }
         // 2026-07-02 (user "un serveur dédupliqué qui ne marche pas") : peu importe la
         //   SOURCE gardée après dédup, une URL directe sur le CDN Cloudflare drinkoflix
         //   (Webflix/Nakios…) doit se lire avec le cf_clearance → on route TOUJOURS via

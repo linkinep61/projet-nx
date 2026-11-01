@@ -54,7 +54,12 @@ object TamponLeger {
 
     fun loadControl(mini: Boolean, extraBuffering: Boolean, rebufferMs: Int): LoadControl? {
         val leger = UserPreferences.modeLeger
-        val faible = appareilFaible
+        // 2026-11-01 (user : « on aurait dû laisser ça pour les box faibles… ça devait être que pour
+        //   le mode léger ») : « appareilFaible » (≤ 256 Mo par appli) attrapait aussi la TV TCL
+        //   (192 Mo, 2,4 Go de RAM) et les Chromecast → tampon 24 Mo = 25-30 s d'avance en 1080p,
+        //   rien ne se chargeait plus en pause. Désormais : tampon réduit SEULEMENT en mode léger ou
+        //   sur une box TRÈS faible (qui passe d'ailleurs en mode léger d'office).
+        val faible = appareilTresFaible
         if (!leger && !faible) return null
         val mo = when {
             appareilTresFaible -> if (mini) 8 else 12

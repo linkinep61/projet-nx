@@ -49,22 +49,25 @@ object PlexPlutoBackup {
             for (r in PlutoTvResolver.rechercher(t)) {
                 if (!vus.add(r.id)) continue
                 if (isMovie != (r.type == "movie")) continue
-                if (RE_VO.containsMatchIn(r.nom)) continue
+                // 2026-11-01 (user : « tu retires le filtrage de la langue ») : les VO/VOST ne sont
+                //   plus écartées, elles arrivent étiquetées (cf. libelle).
+                val estVo = RE_VO.containsMatchIn(r.nom)
                 // le slug d'un film porte la version et l'année : « titre-fr-2002-1-1 »
                 val anneeSlug = Regex("-(\\d{4})-\\d+-\\d+$").find(r.slug)?.groupValues?.get(1)?.toIntOrNull()
                 val slugTitre = r.slug.substringBefore("-fr-").replace('-', ' ')
                 if (!titreCorrespond(r.nom, titres) && !titreCorrespond(slugTitre, titres)) continue
                 if (isMovie) {
-                    if (!r.slug.contains("-fr-")) continue
                     if (!anneeCorrespond(anneeSlug, annee)) continue
-                    Log.i(TAG, "Pluto film « ${r.nom} » ($anneeSlug) → ${r.id}")
-                    return listOf(Video.Server(id = "pluto-m-${r.id}", name = "VF", src = "plutovod://m/${r.id}"))
+                    // Version française = « -fr- » dans l'identifiant ; sinon VO (gardée, étiquetée).
+                    val libelle = if (estVo) "VOSTFR" else if (r.slug.contains("-fr-")) "VF" else "VO"
+                    Log.i(TAG, "Pluto film « ${r.nom} » ($anneeSlug, $libelle) → ${r.id}")
+                    return listOf(Video.Server(id = "pluto-m-${r.id}", name = libelle, src = "plutovod://m/${r.id}"))
                 }
                 val ep = PlutoTvResolver.getSeasons(r.id)
                     .firstOrNull { it.number == saison }?.episodes?.firstOrNull { it.episode == episode }
                     ?: continue
                 Log.i(TAG, "Pluto série « ${r.nom} » S${saison}E$episode → ${ep.id}")
-                return listOf(Video.Server(id = "pluto-e-${ep.id}", name = "VF", src = "plutovod://e/${ep.id}"))
+                return listOf(Video.Server(id = "pluto-e-${ep.id}", name = if (estVo) "VOSTFR" else "VF", src = "plutovod://e/${ep.id}"))
             }
         }
         return emptyList()
@@ -87,12 +90,11 @@ object PlexPlutoBackup {
                     val s = PlexTvResolver.getSeasons(r.rk).firstOrNull { it.index == saison } ?: continue
                     PlexTvResolver.getEpisodes(s.id, saison).firstOrNull { it.episode == episode }?.id ?: continue
                 }
-                if (PlexTvResolver.audioFrancaisConfirme(rkLecture) != true) {
-                    Log.i(TAG, "Plex « ${r.titre} » trouvé mais SANS VF confirmée → écarté")
-                    continue
-                }
-                Log.i(TAG, "Plex « ${r.titre} » (${r.annee}) → $rkLecture")
-                return listOf(Video.Server(id = "plex-$rkLecture", name = "VF", src = "plexvod://$rkLecture"))
+                // 2026-11-01 (user : « tu retires le filtrage de la langue ») : sans VF confirmée,
+                //   le serveur n'est plus écarté — il arrive étiqueté « VO ».
+                val vf = PlexTvResolver.audioFrancaisConfirme(rkLecture) == true
+                Log.i(TAG, "Plex « ${r.titre} » (${r.annee}, ${if (vf) "VF" else "VO"}) → $rkLecture")
+                return listOf(Video.Server(id = "plex-$rkLecture", name = if (vf) "VF" else "VO", src = "plexvod://$rkLecture"))
             }
         }
         return emptyList()

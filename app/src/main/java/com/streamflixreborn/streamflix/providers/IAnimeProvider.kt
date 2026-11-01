@@ -57,8 +57,15 @@ object IAnimeProvider {
         title: String,
         episode: Int = 0,
         videoType: Video.Type? = null,
+        saison: Int = 1,
     ): List<Video.Server> = withContext(Dispatchers.IO) {
         if (title.isBlank()) return@withContext emptyList()
+        // 2026-11-01 (Bleach S2E47 → l'ép. 47 du Bleach d'origine) : le site numérote une fiche
+        //   par titre, sans saison. Au-delà de la saison 1, l'épisode N ne correspond plus → on s'abstient.
+        if (videoType is Video.Type.Episode && saison > 1) {
+            Log.i(TAG, "'$title' S$saison : saison > 1, iAnime ignoré (pas de saisons sur le site)")
+            return@withContext emptyList()
+        }
 
         val fiches = rechercher(title)
         if (fiches.isEmpty()) return@withContext emptyList()

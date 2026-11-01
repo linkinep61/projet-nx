@@ -153,13 +153,18 @@ object RechercheUnifiee {
     }
 
     /** Providers interrogés pour un mode, dans l'ordre d'affichage de l'accueil. */
-    private fun sources(m: Mode): List<Provider> {
+    private fun sources(m: Mode, surTv: Boolean): List<Provider> {
         val langue = UserPreferences.currentLanguage
         val leger = UserPreferences.modeLeger
         return Provider.providers.entries
             .filter { (p, _) -> langue == null || p.language == langue }
             .filter { (p, _) -> !leger || p.name !in SAUTES_MODE_LEGER }
-            .filter { (_, s) -> !s.mobileOnly }   // 2026-10-20 : Mini Drama jamais mélangé
+            // 2026-10-20 : Mini Drama jamais mélangé.
+            // 2026-11-01 (user : « ne pas passer directement par le provider Mini Drama pour trouver
+            //   la mini-série ») : il a désormais SA rangée dans la loupe (Films / Séries), sur
+            //   téléphone seulement — le provider n'existe pas sur TV. Il reste hors des genres et
+            //   des backups.
+            .filter { (_, s) -> !s.mobileOnly || (!surTv && m != Mode.LIVE) }
             // 2026-10-21 (user : « la recherche ne doit pas franchir le verrouillage ») :
             //   un provider verrouillé (appui long → code parental) n'est pas interrogé.
             .filter { (p, _) -> providerOuvert(p.name) }
@@ -647,7 +652,7 @@ object RechercheUnifiee {
             nouveauScope()
             val permis = kotlinx.coroutines.sync.Semaphore(parallele(ctx))
             val m = mode
-            val provs = sources(m)
+            val provs = sources(m, estTv(ctx))
             val sections = ArrayList<Section>()
             // Mode léger : pas de « Ciné Films » (index VOD OLA +68 Mo, Vegeta +26 Mo chargés en entier).
             if (m != Mode.LIVE && !UserPreferences.modeLeger && providerOuvert(com.streamflixreborn.streamflix.providers.LiveTvHubProvider.name) &&

@@ -474,7 +474,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 .joinToString(",") { it.id }
         } catch (_: Throwable) { "" }
         val dossiersSig = try { com.streamflixreborn.streamflix.utils.DossiersFavorisStore.signature() } catch (_: Throwable) { "" }
-        return "$favSig|$otfGroup|$bannedHash|$catFilter|$replayFavSig|$dossiersSig"
+        val organisationSig = try { com.streamflixreborn.streamflix.utils.TvHubOrganisation.signature() } catch (_: Throwable) { "" }
+        return "$favSig|$otfGroup|$bannedHash|$catFilter|$replayFavSig|$dossiersSig|$organisationSig"
     }
 
     fun clearHomeCache() {
@@ -764,6 +765,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     name = com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE, list = dossiers))
             }
         } catch (_: Throwable) {}
+        // 2026-11-01 (user) : catégories perso « 🏷 <nom> », juste après les favoris et dossiers
+        //   favoris ; leur place se change ensuite par « Réorganiser le TV Hub ».
+        try {
+            val perso = com.streamflixreborn.streamflix.utils.TvHubOrganisation.rangeesPerso()
+            if (perso.isNotEmpty()) {
+                val apres = sections.indexOfLast {
+                    it.name.equals("Favoris", ignoreCase = true) || it.name.equals("Favoris Replay", ignoreCase = true) ||
+                        it.name == com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE
+                }
+                sections.addAll(if (apres >= 0) apres + 1 else 0, perso)
+            }
+        } catch (_: Throwable) {}
 
         // 2026-06-19 v35 (user "ce ne sont pas les bonnes catégories... ça
         //   devrait être tout ce qu'il y a dans le TV Hub en catégorie") :
@@ -779,8 +792,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 val filtered = sections.filter {
                     it.name.equals(currentCode, ignoreCase = true) ||
                     it.name.equals("Favoris Replay", ignoreCase = true) ||
-                    it.name == com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE
-                }
+                    it.name == com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE ||
+                    it.name.startsWith(com.streamflixreborn.streamflix.utils.TvHubOrganisation.PREFIXE_RANGEE)
+                }.let { com.streamflixreborn.streamflix.utils.TvHubOrganisation.appliquerOrdre(it) }
                 // Cache le résultat filtré aussi
                 cachedHome = filtered
                 cachedHomeSignature = sig
@@ -848,7 +862,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
         } else {
             grouped.add(Category(name = "Rutube", list = listOf(rutubeFolderCard())))
         }
-        val foldered = grouped.toList()
+        // 2026-11-01 (user) : ordre des rangées choisi dans « Réorganiser le TV Hub ».
+        val foldered = com.streamflixreborn.streamflix.utils.TvHubOrganisation.appliquerOrdre(grouped.toList())
         // Stocke le résultat dans le cache mémoire pour les 60s suivantes.
         cachedHome = foldered
         cachedHomeSignature = sig
@@ -1269,6 +1284,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             if (name.equals("Favoris", ignoreCase = true)) return true
             if (name.equals("Favoris Replay", ignoreCase = true)) return true
             if (name == com.streamflixreborn.streamflix.utils.DossiersFavorisStore.NOM_RANGEE) return true
+            if (name.startsWith(com.streamflixreborn.streamflix.utils.TvHubOrganisation.PREFIXE_RANGEE)) return true
             if (name.startsWith("Live ")) return true
             if (name.startsWith("✕")) return true
             return false

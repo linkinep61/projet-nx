@@ -4,6 +4,8 @@ import android.util.Log
 import com.google.gson.Gson
 import com.streamflixreborn.streamflix.models.Video
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -53,6 +55,9 @@ object FileSearchProvider {
     /** Au-delà, le débit soutenu devient trop élevé pour un flux d'open-directory.
      *  25 Go ≈ 26 Mbit/s de moyenne sur un film de 2 h — déjà exigeant, mais tenable. */
     private const val PLAFOND_GO = 25.0
+
+    /** Articles et liaisons ignorés pour reconnaître un titre mot par mot. */
+    private val MOTS_VIDES = setOf("the", "le", "la", "les", "l", "de", "du", "des", "a", "of", "and", "et", "un", "une")
 
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
@@ -263,16 +268,53 @@ object FileSearchProvider {
             Regex("(?:s0*${season}e0*${episode}|(?<![0-9])${season}x0*${episode})(?![0-9])", RegexOption.IGNORE_CASE)
         else null
 
-        val out = LinkedHashMap<String, Video.Server>() // dédup par URL
+        // 2026-11-01 (user : « voir si on exploite vraiment ce site comme il faut … moins d'échecs
+        //   et plus de matchs ») — l'ancienne requête (titre seul, page 1, 100 fichiers les plus
+        //   récents) ne voyait presque jamais l'épisode d'une série : « Breaking Bad » = 760
+        //   fichiers sur 8 pages. Le site accepte des requêtes ciblées : « Breaking Bad S02E03 »
+        //   rend directement les 11 bons fichiers, « Alien 1979 » 13 au lieu de 1 395.
+        //   Banc sur 15 titres : 38 → 42 serveurs, séries 1/5 → 4/5, sans perte ailleurs.
+        //   On garde la requête « titre seul » en complément pour les films (fichier sans année
+        //   dans le nom mais rangé dans un dossier « Titre (Année) »).
+        // Mode léger (petites box) : une seule requête ciblée par titre et une seule page.
+        val leger = com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger
+        val requetes = LinkedHashSet<String>()
         for (title in wantTitles.take(3)) {
             val q = sanitizeQuery(title)
             if (q.isBlank()) continue
-            val url = "$BASE/api/files/search?q=${URLEncoder.encode(q, "UTF-8")}" +
-                "&page=1&sort_by=time&order=desc&category=video"
-            val body = get(url) ?: continue
-            val resp = try { gson.fromJson(body, SearchResp::class.java) } catch (e: Exception) { null } ?: continue
-            val files = resp.files ?: continue
+            if (isMovie) {
+                if (year != null && year > 1900) requetes += "$q $year"
+                if (!leger || year == null || year <= 1900) requetes += q
+            } else if (season > 0 && episode > 0) {
+                requetes += "$q S%02dE%02d".format(season, episode)
+                if (!leger) requetes += "$q ${season}x%02d".format(episode)
+            } else requetes += q
+        }
+        // En parallèle (≤ 6 requêtes × 2 pages, ~0,4 s chacune) : ne rallonge pas l'attente.
+        val lots = requetes.map { q ->
+            async {
+                val fichiers = ArrayList<FileItem>()
+                for (page in 1..(if (leger) 1 else 2)) {
+                    val url = "$BASE/api/files/search?q=${URLEncoder.encode(q, "UTF-8")}" +
+                        "&page=$page&sort_by=time&order=desc&category=video"
+                    val body = get(url) ?: break
+                    val resp = try { gson.fromJson(body, SearchResp::class.java) } catch (e: Exception) { null } ?: break
+                    val fs = resp.files ?: break
+                    fichiers += fs
+                    if (fs.size < 100) break
+                }
+                fichiers
+            }
+        }.awaitAll()
 
+        // Titre reconnu par MOTS (ordre libre, articles ignorés) : « The Lord of the Rings The
+        //   Fellowship… » n'était jamais trouvé dans « Lord.of.the.Rings.Fellowship… ». Mots
+        //   EXACTS : « Up » ne matche plus n'importe quel nom contenant « up ».
+        val motsVoulus = wantTitles.map { t -> norm(t).split(" ").filter { it.isNotBlank() && it !in MOTS_VIDES } }
+            .filter { it.isNotEmpty() }
+
+        val out = LinkedHashMap<String, Video.Server>() // dédup par URL
+        for (files in lots) {
             for (f in files) {
                 val path = f.path ?: continue
                 if (path.isBlank() || out.containsKey(path)) continue
@@ -281,13 +323,22 @@ object FileSearchProvider {
                 val rawName = try { URLDecoder.decode(f.name ?: "", "UTF-8") } catch (e: Exception) { f.name ?: "" }
                 val nName = norm(rawName)                 // nom fichier normalisé
                 val nCompact = nName.replace(" ", "")     // pour SxxExx collé
+                // Dossier parent : porte souvent le titre et l'année (« Alien (1979)/Alien.mkv »).
+                val dossier = try {
+                    URLDecoder.decode(path.substringBeforeLast('/').substringAfterLast('/'), "UTF-8")
+                } catch (e: Exception) { "" }
+                val nDossier = norm(dossier)
+                val mots = (nName + " " + nDossier).split(" ").toHashSet()
 
-                // 1) le TITRE doit être présent dans le nom du fichier
-                if (wantNorm.none { it.isNotBlank() && nName.contains(it) }) continue
+                // 1) le TITRE doit être présent (nom du fichier OU dossier)
+                val titreOk = wantNorm.any { it.isNotBlank() && nName.contains(it) } ||
+                    motsVoulus.any { m -> m.all { it in mots } }
+                if (!titreOk) continue
 
                 // 2) film → l'ANNÉE (si connue) doit figurer ; série → le SxxExx doit matcher
                 if (isMovie) {
-                    if (year != null && year > 1900 && !nName.contains(year.toString())) continue
+                    if (year != null && year > 1900 && !nName.contains(year.toString()) &&
+                        !nDossier.contains(year.toString())) continue
                 } else {
                     val re = seRegex ?: continue
                     if (!re.containsMatchIn(nName) && !re.containsMatchIn(nCompact)) continue
@@ -295,7 +346,14 @@ object FileSearchProvider {
 
                 // 3) FILTRE LANGUE : on écarte les fichiers 100 % anglais (aucun marqueur FR audio
                 //    ni sous-titre). Garde MULTI/TRUEFRENCH/FRENCH/VF* et VOSTFR (sous-titres FR).
+                // 2026-11-01 (user : « il n'y a pas de sous-titres et on ne peut pas les traduire,
+                //   on ne met pas ») : filtre CONSERVÉ — une VO anglaise sans sous-titres FR est
+                //   inutilisable. C'est lui qui retire le plus de fichiers (42 gardés / 193 trouvés).
                 if (!oeuvreFrancaise && !isFrenchUsable(rawName)) continue
+                // Œuvre française : « DUBBED » / « ENGLISH » sans marqueur FR = doublage ANGLAIS
+                //   (vu sur Lupin.S01E02.DUBBED…) → on ne le fait pas passer pour du français.
+                if (oeuvreFrancaise && !isFrenchUsable(rawName) &&
+                    Regex("\\b(DUBBED|ENGLISH|ENG)\\b").containsMatchIn(rawName.uppercase().replace('.', ' '))) continue
 
                 // 4) FILTRE DÉBIT : on écarte ce que l'appareil ne pourra pas lire (remux 4K,
                 //    ou fichier au-delà du plafond). Voir estIllisibleEnStreaming.
@@ -406,6 +464,56 @@ object FileSearchProvider {
         }
         Log.i(TAG, "searchAudio '$q' → ${out.size} morceaux")
         out.values.toList()
+    }
+
+    // ── FICHIERS MORTS : vérifiés AVANT d'être proposés ─────────────────────────────
+    /**
+     * 2026-11-01 (user : « regarder pourquoi FileSearch déconne, pour éviter d'avoir des erreurs
+     * inutiles ») — premier contrôle de la base : sur 50 fichiers FileSearch mémorisés, 9 étaient
+     * MORTS (404 confirmé depuis le PC), et l'utilisateur tombait dessus en les choisissant (vu sur
+     * Projet Dernière Chance, 2,75 Go → « Response code: 404 »). FileSearch garde dans son index des
+     * fichiers que leur serveur a supprimés.
+     *
+     * Chaque fichier est donc testé (les 1ers octets seulement, en parallèle, 4 s max) avant
+     * d'être affiché. On n'écarte QUE ce qui répond clairement « n'existe plus » : 404, 410, ou une
+     * page HTML à la place de la vidéo. Délai dépassé, refus, erreur réseau → le fichier RESTE
+     * (mauvaise connexion ≠ fichier mort). Un fichier écarté est signalé à la base (cf. SanteSources),
+     * qui le contrôle elle-même avant de le retirer.
+     * Le téléphone joint aussi les fichiers hébergés sur une adresse IP brute, que le Worker
+     * Cloudflare n'a pas le droit d'appeler (25 % de FileSearch).
+     */
+    private val clientSonde = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS).readTimeout(4, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.SECONDS).followRedirects(true).build()
+    private val verdicts = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>()
+    private val sondes = kotlinx.coroutines.sync.Semaphore(8)
+
+    private fun estMort(url: String): Boolean {
+        verdicts[url]?.let { (quand, mort) -> if (System.currentTimeMillis() - quand < 10 * 60_000L) return mort }
+        val mort = try {
+            clientSonde.newCall(Request.Builder().url(url).header("Range", "bytes=0-0").header("User-Agent", UA).build())
+                .execute().use { r ->
+                    val ct = r.header("Content-Type").orEmpty().lowercase()
+                    r.code == 404 || r.code == 410 || ((r.code == 200 || r.code == 206) && ct.contains("text/html"))
+                }
+        } catch (e: Exception) { false }
+        verdicts[url] = System.currentTimeMillis() to mort
+        return mort
+    }
+
+    suspend fun filtrerMorts(servers: List<Video.Server>): List<Video.Server> = withContext(Dispatchers.IO) {
+        if (servers.isEmpty()) return@withContext servers
+        // Mode léger (petites box) : pas de requêtes en plus. Un fichier mort y échoue tout de suite
+        //   (404) et le lecteur passe au serveur suivant.
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.modeLeger) return@withContext servers
+        val t0 = System.currentTimeMillis()
+        val etats = servers.map { s -> async { sondes.acquire(); try { s to estMort(s.src) } finally { sondes.release() } } }.awaitAll()
+        val morts = etats.filter { it.second }.map { it.first }
+        if (morts.isNotEmpty()) {
+            Log.i(TAG, "FileSearch : ${morts.size} fichier(s) mort(s) écarté(s) sur ${servers.size} (${System.currentTimeMillis() - t0} ms)")
+            morts.forEach { com.streamflixreborn.streamflix.utils.SanteSources.mortVu("FileSearch", it.id, it.src) }
+        }
+        etats.filter { !it.second }.map { it.first }
     }
 
     // ── GETVIDEO (fichier DIRECT → lecture native) ────────────────────────────────

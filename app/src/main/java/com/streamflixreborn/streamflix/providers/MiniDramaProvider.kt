@@ -665,6 +665,11 @@ object MiniDramaProvider : Provider {
         }
         out.add(Video.Server(id = "dex|$slug|$n|web", name = "DramaExpress · lecteur du site", src = DramaExpress.episodeUrl(slug, n)))
         if (DramaExpress.estDouble(DramaExpress.series[slug]?.titre)) out.forEach { it.language = "VF" }
+        // 2026-11-01 (retour d'un membre : « Rejet des cinq compagnes » en anglais ici, en français
+        //   sur ReelShort) : version DOUBLÉE de ReelShort, en tête, sur ses épisodes gratuits.
+        else runCatching { ReelShortVf.serveur(DramaExpress.series[slug]?.titre
+            ?: runCatching { DramaExpress.fetchEpisodes(slug).serie.titre }.getOrNull(), n) }
+            .onFailure { Log.w(TAG, "ReelShort VF : ${it.message}") }.getOrNull()?.let { out.add(0, it) }
         // Épisode suivant préparé pendant qu'on regarde celui-ci.
         DramaExpress.prechauffer(slug, n + 1)
         return out
@@ -997,6 +1002,7 @@ object MiniDramaProvider : Provider {
 
     override suspend fun getVideo(server: Video.Server): Video {
         if (server.id.startsWith("dex|")) return deVideo(server)
+        if (server.id.startsWith(ReelShortVf.PREFIXE)) return ReelShortVf.video(server)
         if (server.id.startsWith("dmv|")) return DailymotionExtractor().extract(server.src)
         if (server.id.startsWith("ytv|")) return ytVideo(server.id.removePrefix("ytv|"))
         val parts = server.id.split("|")

@@ -227,6 +227,13 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
         enVol = viewModelScope.launch(Dispatchers.IO) { rechercherGlobal(query, currentLanguage, group) }
     }
 
+    private fun surTv(): Boolean = runCatching {
+        val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
+        val ui = (ctx.getSystemService(android.content.Context.UI_MODE_SERVICE) as android.app.UiModeManager)
+            .currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        ui || ctx.packageManager.hasSystemFeature("android.software.leanback")
+    }.getOrDefault(false)
+
     private suspend fun rechercherGlobal(query: String, currentLanguage: String, group: Provider.Companion.ProviderGroup?) = kotlinx.coroutines.coroutineScope {
         val permis = kotlinx.coroutines.sync.Semaphore(parallele())
         _state.emit(State.GlobalSearching)
@@ -238,7 +245,11 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
         val targetProviders = Provider.providers.keys
             .filter { it.language == currentLanguage }
             .filter { it.name !in sautesModeLeger }
-            .filter { !Provider.estSepare(it) }   // 2026-10-20 : Mini Drama jamais mélangé
+            // 2026-10-20 : Mini Drama jamais mélangé.
+            // 2026-11-01 (user : « ne pas passer directement par le provider Mini Drama pour trouver
+            //   la mini-série » + « on a une barre de recherche ») : la recherche globale (Films /
+            //   Séries) l'interroge désormais aussi, sur téléphone (il n'existe pas sur TV).
+            .filter { !Provider.estSepare(it) || (!isIptvScope && !surTv() && Provider.providers[it]?.mobileOnly == true) }
             .filter { p ->
                 val pIsIptv = Provider.getGroup(p) == Provider.Companion.ProviderGroup.IPTV
                 if (isIptvScope) pIsIptv else !pIsIptv

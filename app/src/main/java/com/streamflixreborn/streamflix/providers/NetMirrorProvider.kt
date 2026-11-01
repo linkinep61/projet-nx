@@ -3134,6 +3134,26 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             .lowercase()
             .replace(Regex("[^a-z0-9]+"), "")
 
+    /**
+     * 2026-11-01 (user, Bleach S2E47 : « même NetMirror, c'est un faux match ») — repli par NUMÉRO
+     *   seulement si le titre de l'épisode chez eux ne CONTREDIT pas le titre TMDB. Leur « S2E47 »
+     *   de Bleach était un épisode de l'ancienne série (arc des Bounts) : titres sans aucun mot
+     *   commun → c'est un autre épisode. Titre absent ou générique (« Episode 47 ») → accepté.
+     */
+    private fun titreCompatible(titreVo: String?, titreSite: String): Boolean {
+        if (titreVo.isNullOrBlank() || titreSite.isBlank()) return true
+        val vides = setOf("the", "and", "of", "a", "an", "to", "in", "on", "for", "is", "part", "episode", "ep", "chapter")
+        fun mots(t: String) = java.text.Normalizer.normalize(t, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "").lowercase()
+            .split(Regex("[^a-z0-9]+")).filter { it.length >= 3 && it !in vides && it.any { c -> c.isLetter() } }.toSet()
+        val site = mots(titreSite)
+        val tmdb = mots(titreVo)
+        if (site.isEmpty() || tmdb.isEmpty()) return true
+        val ok = site.any { it in tmdb }
+        if (!ok) Log.d(TAG, "resolveEpisodeId : titre chez eux '$titreSite' ≠ TMDB '$titreVo' → mauvais épisode, refusé")
+        return ok
+    }
+
     private suspend fun resolveEpisodeId(
         ottCode: String,
         showId: String,
@@ -3187,6 +3207,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                     val s = ep.optString("s", "").uppercase()
                     val e = ep.optString("ep", "").uppercase()
                     if (s == targetS && e == targetE) {
+                        if (!titreCompatible(titreVo, ep.optString("t", ""))) return@withContext null
                         val id = ep.optString("id").takeIf { it.isNotBlank() }
                         if (id != null) {
                             Log.d(TAG, "resolveEpisodeId via post.php: $targetS$targetE → $id")
@@ -3200,6 +3221,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                     val s = ep.optString("s", "").uppercase().removePrefix("S")
                     val e = ep.optString("ep", "").uppercase().removePrefix("E")
                     if (s == seasonNum.toString() && e == episodeNum.toString()) {
+                        if (!titreCompatible(titreVo, ep.optString("t", ""))) return@withContext null
                         val id = ep.optString("id").takeIf { it.isNotBlank() }
                         if (id != null) {
                             Log.d(TAG, "resolveEpisodeId via post.php (fallback): S${seasonNum}E${episodeNum} → $id")
@@ -3258,7 +3280,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                             for (j in 0 until epArr.length()) {
                                 val ep = epArr.optJSONObject(j) ?: continue
                                 val eNum = ep.optString("ep", "").uppercase().removePrefix("E")
-                                if (eNum == episodeNum.toString()) {
+                                if (eNum == episodeNum.toString() && titreCompatible(titreVo, ep.optString("t", ""))) {
                                     val id = ep.optString("id").takeIf { it.isNotBlank() }
                                     if (id != null && replliParNumero == null) replliParNumero = id
                                 }

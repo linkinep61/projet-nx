@@ -151,7 +151,8 @@ class TvShowViewHolder(
         //   favoris REPLAY (= films/séries replay stockés dans
         //   ReplayFavoritesStore, id `livehub::replay::*`). On les détecte
         //   AVANT le menu IPTV channels et on propose un retrait direct.
-        if (tvShow.id.startsWith("livehub::replay::")) {
+        if (tvShow.id.startsWith("livehub::replay::") ||
+            com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
             val isFav = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
                 .isFavorite(tvShow.id)
             // 2026-07-04 (user "peux-tu ajouter le contrôle parental sur les
@@ -173,11 +174,12 @@ class TvShowViewHolder(
                 isFolderLocked -> "🔓 Retirer le contrôle parental"
                 else -> "🔒 Contrôle parental (verrouiller)"
             }
-            val options = listOfNotNull(favOption, lockOption).toTypedArray()
+            val options = (listOfNotNull(favOption, lockOption) + optionsOrganisation()).toTypedArray()
             androidx.appcompat.app.AlertDialog.Builder(com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.ctxVivant(context))
                 .setTitle(tvShow.title)
                 .setItems(options) { _, which ->
                     val label = options[which]
+                    if (traiterOptionOrganisation(label)) return@setItems
                     if (label.startsWith("★")) {
                         // 2026-06-20 (user "le film Titanic est traité comme une
                         //   série et ouvre une page synopsis") : préserver isMovie
@@ -258,12 +260,13 @@ class TvShowViewHolder(
             //   fait disparaître ; elle revient par Paramètres › Chaînes masquées.
             if (isGenericFolder) null else if (isBanned) "👁 Réafficher cette chaîne" else "🙈 Masquer cette chaîne",
             folderLockOption,
-        ).toTypedArray()
+        ).plus(optionsOrganisation()).toTypedArray()
 
         androidx.appcompat.app.AlertDialog.Builder(com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.ctxVivant(context))
             .setTitle(tvShow.title)
             .setItems(options) { _, which ->
                 val label = options[which]
+                if (traiterOptionOrganisation(label)) return@setItems
                 when {
                     label.startsWith("📁") -> {
                         val ajoute = com.streamflixreborn.streamflix.utils.DossiersFavorisStore.basculer(tvShow)
@@ -339,6 +342,31 @@ class TvShowViewHolder(
      *  - Sur succès → toggleLock, message de confirmation, invalidation du cache
      *    home pour que l'icône 🔒 apparaisse/disparaisse immédiatement.
      */
+    /** 2026-11-01 (user) : options du TV Hub ajoutées à l'appui long — « Ajouter à une
+     *  catégorie… » (catégories perso) et « Déplacer la rangée » (rangée qui contient la carte). */
+    private fun optionsOrganisation(): List<String> {
+        val rangee = com.streamflixreborn.streamflix.utils.TvHubOrganisation.rangeeDe(tvShow.id)
+        return listOfNotNull(
+            "🏷 Ajouter à une catégorie…",
+            rangee?.let { "↕ Déplacer la rangée « $it »" },
+        )
+    }
+
+    private fun traiterOptionOrganisation(label: String): Boolean {
+        val ctx = com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.ctxVivant(context)
+        return when {
+            label.startsWith("🏷") -> { com.streamflixreborn.streamflix.utils.TvHubOrganisation.ouvrirAjouterA(ctx, tvShow); true }
+            label.startsWith("↕") -> {
+                com.streamflixreborn.streamflix.utils.TvHubOrganisation.rangeeDe(tvShow.id)?.let {
+                    com.streamflixreborn.streamflix.utils.TvHubOrganisation.ouvrirDeplacerRangee(ctx, it)
+                }
+                true
+            }
+            else -> false
+        }
+    }
+
+    /** (voir le commentaire du 2026-07-04 plus haut : verrou parental d'un dossier.) */
     private fun handleFolderLockToggle(folderKey: String, wasLocked: Boolean) {
         val prettyLabel = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
             .folderLabel(folderKey)
@@ -1106,6 +1134,10 @@ class TvShowViewHolder(
             //   replay/fast (TV Hub) affiché AILLEURS que les Cœurs (home, dossier)
             //   a son id RÉEL → l'appui long propose de le retirer (toggle off).
             //   Dans les Cœurs l'id est synthétique (replayfav::) → isFavorite=false.
+            // 2026-11-01 (user) : dans le TV Hub, menu complet (retrait, catégorie, rangée).
+            if (isIptvProvider() && (tvShow.id.startsWith("livehub::replay::") || com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) && handleIptvFavoriteLongPress()) {
+                return@setOnLongClickListener true
+            }
             if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
                 showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
                     com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
@@ -1312,7 +1344,10 @@ class TvShowViewHolder(
             setOnLongClickListener {
                 val cf = context.toActivity()?.getCurrentFragment()
                 // 2026-06-27 : favori replay/fast affiché hors Cœurs → retrait par appui long.
-                if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
+                // 2026-11-01 (user) : dans le TV Hub, un replay passe par le menu complet (catégorie, rangée).
+                if (isIptvProvider() && (tvShow.id.startsWith("livehub::replay::") || com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) && handleIptvFavoriteLongPress()) {
+                    // menu affiché
+                } else if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
                     com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
                         tvShow.id, tvShow.title, tvShow.poster, tvShow.banner, tvShow.isMovie)
                     android.widget.Toast.makeText(context, "Retiré des favoris", android.widget.Toast.LENGTH_SHORT).show()
@@ -1558,7 +1593,10 @@ class TvShowViewHolder(
         binding.root.setOnLongClickListener {
             val cf = context.toActivity()?.getCurrentFragment()
             // 2026-06-27 : favori replay/fast affiché hors Cœurs → retrait par appui long.
-            if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
+            // 2026-11-01 (user) : dans le TV Hub, un replay passe par le menu complet (catégorie, rangée).
+            if (isIptvProvider() && (tvShow.id.startsWith("livehub::replay::") || com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) && handleIptvFavoriteLongPress()) {
+                return@setOnLongClickListener true
+            } else if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
                 showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
                     com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
                         tvShow.id, tvShow.title, tvShow.poster, tvShow.banner, tvShow.isMovie)
@@ -1745,7 +1783,10 @@ class TvShowViewHolder(
             setOnLongClickListener {
                 val cf = context.toActivity()?.getCurrentFragment()
                 // 2026-06-27 : favori replay/fast affiché hors Cœurs → retrait par appui long.
-                if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
+                // 2026-11-01 (user) : dans le TV Hub, un replay passe par le menu complet (catégorie, rangée).
+                if (isIptvProvider() && (tvShow.id.startsWith("livehub::replay::") || com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) && handleIptvFavoriteLongPress()) {
+                    // menu affiché
+                } else if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
                     com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
                         tvShow.id, tvShow.title, tvShow.poster, tvShow.banner, tvShow.isMovie)
                     android.widget.Toast.makeText(context, "Retiré des favoris", android.widget.Toast.LENGTH_SHORT).show()

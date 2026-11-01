@@ -189,6 +189,23 @@ object XonaflixProvider {
         return out.distinctBy { it.link }
     }
 
+    /** Page Vidzy : false = Vidzy dit lui-même qu'il n'a pas la vidéo (404 / « Non disponible ») ;
+     *  pas de réponse nette (réseau) → true, on garde le serveur comme avant. */
+    private fun vidzyDisponible(lien: String): Boolean = try {
+        val req = Request.Builder().url(lien)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+            .header("Referer", "${base}/").build()
+        client.newCall(req).execute().use { r ->
+            val corps = r.body?.string().orEmpty()
+            val absent = r.code == 404 || corps.contains("Non disponible", ignoreCase = true) ||
+                corps.contains("pas disponible sur Vidzy", ignoreCase = true)
+            Log.d(TAG, "Vidzy ${lien.substringAfter("://").substringBefore('?')} → HTTP ${r.code}, ${if (absent) "absent" else "présent"}")
+            !absent
+        }
+    } catch (e: Exception) {
+        Log.d(TAG, "Vidzy : pas de réponse (${e.message}) → serveur gardé"); true
+    }
+
     /** Fiche → serveurs du registre. Id = chemin de la page (pour régénérer le lien à la lecture). */
     private fun emitServers(pageHtml: String, pagePath: String): List<Video.Server> {
         val out = ArrayList<Video.Server>()
@@ -196,6 +213,14 @@ object XonaflixProvider {
         for (s in parseServeurs(pageHtml)) {
             if (s.moviez) continue  // « VF 2 » : résolution côté serveur inconnue → plus tard.
             if (!s.link.startsWith("http") || !seen.add(s.link)) continue
+            // 2026-11-01 (user, Bleach S2E47 : « ce serveur là n'a jamais marché » / « la vidéo est
+            //   juste morte ») — le lecteur VOSTFR de Xonaflix n'est qu'un lien Vidzy fabriqué depuis
+            //   l'id TMDB (vidzy.org/serie/30984/2/47/vostfr) ; Vidzy y répond « Non disponible ».
+            //   Une requête légère sur cette page suffit à le savoir → pas de serveur mort affiché.
+            if (s.link.contains("vidzy.", ignoreCase = true) && !vidzyDisponible(s.link)) {
+                Log.i(TAG, "lecteur ${s.label} : Vidzy n'a pas cette vidéo (${s.link.substringAfter("://").substringBefore('?')}) → masqué")
+                continue
+            }
             out.add(Video.Server(
                 id = "xflx::" + URLEncoder.encode(pagePath, "UTF-8") + "::" + URLEncoder.encode(s.label, "UTF-8"),
                 name = "Xona ${s.label}",

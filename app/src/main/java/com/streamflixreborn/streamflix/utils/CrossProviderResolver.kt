@@ -73,7 +73,7 @@ object CrossProviderResolver {
             //   parser le HTML + prober 6-12 dossiers episodes.js. À 10s, le timeout tuait
             //   les probes AVANT qu'elles démarrent → 0 saisons → anime non trouvé en backup.
             //   25s est safe : le plafond global BackupRegistry (60s/source) protège toujours.
-            var full: TvShow = withTimeoutOrNull(25_000) { provider.getTvShow(tvShowId) }
+            var full: TvShow = ficheMemo(provider, tvShowId, 45_000)
                 ?: run {
                     android.util.Log.w(TAG, "[${provider.name}] getTvShow($tvShowId) TIMEOUT/null")
                     return null
@@ -89,14 +89,15 @@ object CrossProviderResolver {
             //   break QUE si la langue choisie a la SAISON CIBLE. Sinon on essaie l'autre langue.
             //   Ex: Mushoku Tensei S3 n'existe qu'en VOSTFR → VF n'a que S1/S2 → on passait en VF
             //   → S3 introuvable. Maintenant : VF essayé → S3 absente → on continue → VOSTFR → S3 trouvée.
-            if (full.seasons.any { s -> s.id.contains("/@") }) {
+            val avaitWrappers = full.seasons.any { s -> s.id.contains("/@") }
+            if (avaitWrappers) {
                 val baseSlug = tvShowId.substringBefore("@")
                 android.util.Log.d(TAG, "[${provider.name}] detected lang wrappers for $tvShowId " +
                     "(seasons=${full.seasons.map { "'${it.title}'" }}) → retrying with forced lang (target S$effectiveSeason)")
                 var bestFallback: TvShow? = null
                 for (lang in listOf("vf", "vostfr")) {
                     val unwrapped = try {
-                        withTimeoutOrNull(20_000) { provider.getTvShow("$baseSlug@$lang") }
+                        ficheMemo(provider, "$baseSlug@$lang", 30_000)
                     } catch (_: Exception) { null }
                     if (unwrapped != null && unwrapped.seasons.isNotEmpty() &&
                         unwrapped.seasons.none { s -> s.id.contains("/@") }) {
@@ -124,7 +125,16 @@ object CrossProviderResolver {
             //   providers), on renvoie null → 0 serveurs pour CE provider. Avant, le
             //   code prenait full.seasons.firstOrNull() (= saison au hasard = mauvais
             //   contenu, ex: Bleach S1 → reçoit S5 ou S10).
-            var targetSeason = full.seasons.firstOrNull { it.number == effectiveSeason }
+            // 2026-11-01 (Oppo, FRAnime 43078) : fiche PROPRE à cette saison → sa numérotation interne
+            //   (« Saison 1, 2… » = les parties) ne correspond PAS à la nôtre : on part de sa 1ʳᵉ saison.
+            val ficheDeSaison = effectiveSeason > 1 &&
+                com.streamflixreborn.streamflix.utils.IndexOnyx.estFicheDeSaison(provider.name, tvShowId.substringBefore("@"))
+            var targetSeason = if (ficheDeSaison) {
+                (full.seasons.filter { it.number >= 1 }.minByOrNull { it.number } ?: full.seasons.singleOrNull()).also {
+                    android.util.Log.i(TAG, "[${provider.name}] fiche propre à S$effectiveSeason → on lit sa saison '${it?.title}' " +
+                        "(saisons : ${full.seasons.map { s -> "S${s.number}='${s.title}'" }})")
+                }
+            } else full.seasons.firstOrNull { it.number == effectiveSeason }
             // 2026-07-09 : fallback S0 → S1. Certains providers (FrenchManga…) regroupent
             //   tout en une seule "Intégrale" numérotée S0. Si on cherche S1 et que le
             //   provider n'a QU'UNE saison S0, c'est probablement la bonne (= tout l'anime).
@@ -146,18 +156,42 @@ object CrossProviderResolver {
                     android.util.Log.i(TAG, "[${provider.name}] S$effectiveSeason found by TITLE match: '${targetSeason.title}' (number=${targetSeason.number})")
                 }
             }
+            // 2026-11-01 (user, Bleach Mille Ans) — la base a donné une fiche PROPRE à cette saison
+            //   (FRAnime « Bleach: Sennen Kessen-hen » = TMDB saison 2) : sa 1ʳᵉ saison est la nôtre,
+            //   les suivantes éventuelles en sont la continuation (cours).
             if (targetSeason == null) {
                 android.util.Log.w(TAG, "[${provider.name}] no season S$effectiveSeason for $tvShowId " +
                     "(available: ${full.seasons.map { "S${it.number}='${it.title}'" }}) → SKIP (pas de fallback)")
                 return null
             }
-            val episodes = withTimeoutOrNull(20_000) { provider.getEpisodesBySeason(targetSeason.id) } ?: emptyList()
+            val episodes = episodesMemo(provider, targetSeason.id) ?: emptyList()
             if (episodes.isEmpty()) {
                 android.util.Log.w(TAG, "[${provider.name}] no episodes in season ${targetSeason.id}")
                 return null
             }
             // Idem : pas de fallback sur le 1er épisode si le numéro ne matche pas.
-            val ep = episodes.firstOrNull { it.number == originalEpisode }
+            var ep = episodes.firstOrNull { it.number == originalEpisode }
+            // 2026-11-01 (user, Bleach S2E47 : « animesama a déjà la série complète ») — saison TMDB
+            //   découpée en PARTIES sur le site : TMDB S2 = 52 épisodes d'affilée, AnimeSama =
+            //   « Thousand-Year Blood War Partie 1 » (13) puis « … Partie 2/3/4 » en saisons séparées.
+            //   Si l'épisode dépasse la partie trouvée, on continue dans les parties SUIVANTES du même
+            //   nom (base identique, seul le numéro de partie change) en décomptant les épisodes.
+            //   Strict : uniquement des saisons qui se suivent et portent le même nom de base.
+            if (ep == null && originalEpisode > (episodes.maxOfOrNull { it.number } ?: 0)) {
+                ep = episodeDansPartiesSuivantes(provider, full, targetSeason, episodes, originalEpisode, tousLesSuivants = ficheDeSaison)
+                // La VF s'arrête souvent avant la fin (doublage en retard) : on retente en VOSTFR.
+                if (ep == null && avaitWrappers && !full.id.lowercase().endsWith("@vostfr")) {
+                    val baseSlug = tvShowId.substringBefore("@")
+                    val vostfr = try { ficheMemo(provider, "$baseSlug@vostfr", 30_000) } catch (_: Exception) { null }
+                    val saisonVo = vostfr?.seasons?.firstOrNull { it.number == targetSeason.number && basePartie(it.title).first == basePartie(targetSeason.title).first }
+                    if (vostfr != null && saisonVo != null) {
+                        val epsVo = episodesMemo(provider, saisonVo.id) ?: emptyList()
+                        android.util.Log.i(TAG, "[${provider.name}] VF trop courte → essai VOSTFR ('${saisonVo.title}', ${epsVo.size} ép.)")
+                        ep = epsVo.firstOrNull { it.number == originalEpisode }
+                            ?: if (epsVo.isNotEmpty()) episodeDansPartiesSuivantes(provider, vostfr, saisonVo, epsVo, originalEpisode) else null
+                    }
+                }
+            }
             if (ep == null) {
                 android.util.Log.w(TAG, "[${provider.name}] no episode E$originalEpisode in season ${targetSeason.id} " +
                     "(available: ${episodes.map { "E${it.number}" }.take(10)}) → SKIP")
@@ -200,6 +234,93 @@ object CrossProviderResolver {
             android.util.Log.w(TAG, "[${provider.name}] resolve failed: ${e.message}")
             null
         }
+    }
+
+    // 2026-11-01 (user, Bleach : « tous ceux où j'ai vraiment des serveurs ne vont même pas
+    //   arriver ») — AnimeSama met > 25 s à monter une fiche (12 episodes.js) quand 40 sources
+    //   tournent en même temps sur la télé, et on la remontait À CHAQUE ÉPISODE. Mémoire de
+    //   15 min par source + id : l'épisode suivant se résout sans refaire le réseau.
+    private const val MEMO_MS = 15 * 60_000L
+    private val memoFiches = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, TvShow>>()
+    private val memoEpisodes = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<com.streamflixreborn.streamflix.models.Episode>>>()
+
+    private suspend fun ficheMemo(provider: Provider, id: String, delaiMs: Long): TvShow? {
+        val cle = provider.name + "|" + id
+        memoFiches[cle]?.let { (t, f) -> if (System.currentTimeMillis() - t < MEMO_MS) {
+            android.util.Log.d(TAG, "[${provider.name}] fiche $id en mémoire"); return f } }
+        val debut = System.currentTimeMillis()
+        val f = withTimeoutOrNull(delaiMs) { provider.getTvShow(id) }
+        android.util.Log.d(TAG, "[${provider.name}] fiche $id chargée en ${System.currentTimeMillis() - debut} ms" +
+            if (f == null) " (échec)" else "")
+        if (f != null && f.seasons.isNotEmpty()) memoFiches[cle] = System.currentTimeMillis() to f
+        return f
+    }
+
+    private suspend fun episodesMemo(provider: Provider, saisonId: String): List<com.streamflixreborn.streamflix.models.Episode>? {
+        val cle = provider.name + "|" + saisonId
+        memoEpisodes[cle]?.let { (t, e) -> if (System.currentTimeMillis() - t < MEMO_MS) return e }
+        val e = withTimeoutOrNull(20_000) { provider.getEpisodesBySeason(saisonId) }
+        if (!e.isNullOrEmpty()) memoEpisodes[cle] = System.currentTimeMillis() to e
+        return e
+    }
+
+    private val MARQUEUR_PARTIE = Regex("""(?i)\s*[-–:(]*\s*\b(?:partie|part|cour)\s*(\d+)\)?\s*$""")
+
+    /** « Thousand-Year Blood War Partie 2 » → ("thousand year blood war", 2) ; sans marqueur → (nom, null). */
+    private fun basePartie(titre: String?): Pair<String, Int?> {
+        val t = titre.orEmpty()
+        val m = MARQUEUR_PARTIE.find(t)
+        val base = (if (m != null) t.substring(0, m.range.first) else t)
+            .lowercase().replace(Regex("[^a-z0-9]+"), " ").trim()
+        return base to m?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    private suspend fun episodeDansPartiesSuivantes(
+        provider: Provider,
+        full: TvShow,
+        cible: com.streamflixreborn.streamflix.models.Season,
+        episodesCible: List<com.streamflixreborn.streamflix.models.Episode>,
+        numero: Int,
+        /** Fiche propre à une saison TMDB : TOUTES ses saisons suivantes la continuent, quel que soit leur nom. */
+        tousLesSuivants: Boolean = false,
+    ): com.streamflixreborn.streamflix.models.Episode? {
+        val (base, partieCible) = basePartie(cible.title)
+        if (base.isBlank()) return null
+        val idx = full.seasons.indexOfFirst { it.id == cible.id }
+        if (idx < 0) return null
+        // Saisons qui suivent immédiatement et portent le même nom de base avec un numéro de partie.
+        val suivantes = if (tousLesSuivants) full.seasons.drop(idx + 1).filter { it.number >= 1 }
+        else full.seasons.drop(idx + 1).takeWhile { s ->
+            val (b, p) = basePartie(s.title)
+            b == base && p != null
+        }
+        if (suivantes.isEmpty()) {
+            android.util.Log.d(TAG, "[${provider.name}] E$numero > partie '${cible.title}', aucune partie suivante du même nom")
+            return null
+        }
+        android.util.Log.i(TAG, "[${provider.name}] E$numero hors de '${cible.title}' (partie ${partieCible ?: 1}) → " +
+            "parties suivantes : ${suivantes.map { "'${it.title}'" }}")
+        var reste = numero - episodesCible.size
+        for (s in suivantes) {
+            val eps = episodesMemo(provider, s.id) ?: emptyList()
+            android.util.Log.d(TAG, "[${provider.name}]   '${s.title}' (${s.id}) : ${eps.size} épisode(s) " +
+                "${eps.map { it.number }.take(3)}…, reste à placer=$reste")
+            if (eps.isEmpty()) return null
+            // Numérotation continue sur le site (14, 15…) ou qui repart à 1 : on accepte les deux.
+            if ((eps.minOfOrNull { it.number } ?: 1) > 1) eps.firstOrNull { it.number == numero }?.let {
+                android.util.Log.i(TAG, "[${provider.name}] E$numero trouvé tel quel dans '${s.title}'")
+                return it
+            }
+            if (reste <= eps.size) {
+                val e = eps.firstOrNull { it.number == reste } ?: eps.getOrNull(reste - 1)
+                android.util.Log.i(TAG, "[${provider.name}] E$numero → '${s.title}' épisode $reste " +
+                    "(${e?.let { "id=${it.id}" } ?: "introuvable"})")
+                return e
+            }
+            reste -= eps.size
+        }
+        android.util.Log.w(TAG, "[${provider.name}] E$numero au-delà de toutes les parties (${suivantes.size + 1})")
+        return null
     }
 
     /**

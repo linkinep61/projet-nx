@@ -2256,6 +2256,68 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
     //   resourceDetectors + politique FR-only + unification multi-qualité). Extrait
     //   de getServers pour être émis comme un étage du flux progressif. Résout son
     //   propre subjectId. NE contient PLUS les backups Nakios/Movix (helpers séparés).
+    private val saisonSepareeCache = ConcurrentHashMap<String, Pair<String, List<Pair<Int, Int>>>>()
+
+    /** 2026-11-01 (user, Bleach Mille Ans : « Cloudstream, Movix ») — saison TMDB rangée par
+     *  MovieBox dans une AUTRE fiche. Si la fiche trouvée n'a pas la saison [se], on cherche la
+     *  fiche nommée « <série>: <nom TMDB de la saison> » et on y compte les épisodes saison par
+     *  saison (ses saisons = les parties). Garde-fous :
+     *   · titre EXACT (hors mention de langue « [Hindi] » et du suffixe « S1-S4 ») ;
+     *   · série (type 2) uniquement ;
+     *   · total d'épisodes ≤ celui de la saison TMDB (+2) → c'est bien la même saison ;
+     *   · version sans mention de langue préférée (le passage en VF se fait après, comme avant).
+     *  Retour : (sid, saison, épisode) dans cette fiche, ou null → comportement d'avant. */
+    private suspend fun saisonSeparee(sid: String, tmdbId: String, titreSerie: String, se: Int, ep: Int): Triple<String, Int, Int>? {
+        suspend fun saisons(s: String): List<Pair<Int, Int>> {
+            val arr = apiGet(SEASON_INFO_PATH, mapOf("subjectId" to s))?.optJSONObject("data")?.optJSONArray("seasons")
+            return (0 until (arr?.length() ?: 0)).mapNotNull { i ->
+                val o = arr!!.optJSONObject(i) ?: return@mapNotNull null
+                o.optInt("se") to o.optInt("maxEp", o.optInt("epNum", 0))
+            }.filter { it.first >= 1 && it.second > 0 }.sortedBy { it.first }
+        }
+        val dansFiche = saisons(sid)
+        if (dansFiche.any { it.first == se && it.second >= ep }) return null   // la fiche a déjà la saison
+        val tid = tmdbId.toIntOrNull() ?: return null
+        val cle = "$tid|$se"
+        val (sid2, parties) = saisonSepareeCache[cle] ?: run {
+            val saisonTmdb = runCatching { TMDb3.TvSeasons.details(seriesId = tid, seasonNumber = se, language = "en-US") }.getOrNull() ?: return null
+            val nomEn = saisonTmdb.name.orEmpty().trim()
+            val nbTmdb = saisonTmdb.episodes?.size ?: 0
+            if (nomEn.isBlank() || nbTmdb == 0 || Regex("""(?i)^(season|saison)\s*\d+$""").matches(nomEn)) {
+                Log.d(TAG, "saison séparée : S$se TMDB sans nom propre ('$nomEn') → rien à chercher"); return null
+            }
+            val voulu = normalizeForMatch("$titreSerie $nomEn")
+            val resp = apiPost(SEARCH_PATH, JSONObject().apply { put("keyword", "$titreSerie: $nomEn"); put("page", 1); put("perPage", 20) }) ?: return null
+            val results = resp.optJSONObject("data")?.optJSONArray("results") ?: return null
+            data class C(val sid: String, val brut: String, val avecLangue: Boolean)
+            val cands = mutableListOf<C>()
+            for (r in 0 until results.length()) {
+                val subjects = results.optJSONObject(r)?.optJSONArray("subjects") ?: continue
+                for (k in 0 until subjects.length()) {
+                    val o = subjects.optJSONObject(k) ?: continue
+                    if (o.optInt("subjectType", 0) != TYPE_SERIE) continue
+                    val brut = o.optString("title").trim()
+                    val propre = brut.replace(LANG_SUFFIX_REGEX, "").replace(Regex("""(?i)\s+S\d+\s*-\s*S\d+\s*$"""), "").trim()
+                    if (normalizeForMatch(propre) != voulu) continue
+                    cands += C(o.optString("subjectId"), brut, propre.length != brut.replace(Regex("""(?i)\s+S\d+\s*-\s*S\d+\s*$"""), "").trim().length)
+                }
+            }
+            Log.i(TAG, "saison séparée : '$titreSerie: $nomEn' (TMDB $nbTmdb ép.) → candidats ${cands.map { it.brut }}")
+            val choisi = cands.sortedBy { if (it.avecLangue) 1 else 0 }.firstOrNull { c ->
+                val total = saisons(c.sid).sumOf { it.second }
+                (total in 1..(nbTmdb + 2)).also { if (!it) Log.i(TAG, "saison séparée : '${c.brut}' écarté ($total ép. ≠ TMDB $nbTmdb)") }
+            } ?: return null
+            (choisi.sid to saisons(choisi.sid)).also { saisonSepareeCache[cle] = it }
+        }
+        var reste = ep
+        for ((numero, n) in parties) {
+            if (reste <= n) return Triple(sid2, numero, reste)
+            reste -= n
+        }
+        Log.i(TAG, "saison séparée : E$ep au-delà des ${parties.sumOf { it.second }} ép. de la fiche $sid2")
+        return null
+    }
+
     private suspend fun fetchNativeCloudstreamServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
         // Cas 1 : id Cloudstream (cs::m::sid, cs::s::sid, cs::ep::sid::se::ep)
         // → on a déjà le subjectId, pas besoin de search
@@ -2352,6 +2414,20 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     Log.d(TAG, "getServers : titre vide pour $id")
                 }
             }
+        }
+
+        // 2026-11-01 — DIAGNOSTIC (journal seulement) : saison TMDB absente de la fiche MovieBox
+        //   (Bleach S2 = Mille Ans → fiche « Bleach » à 1 saison de 366 ép.). On relève comment
+        //   MovieBox range cette saison (fiches séparées ? par partie ? type ?) avant de coder.
+        //   Relevé : MovieBox range Mille Ans dans « Bleach: Thousand-Year Blood War S1-S4 » (2022),
+        //   4 saisons de 13/13/14/10 ép. = les 50 ép. de la saison 2 TMDB. → on y redirige.
+        if (videoType is Video.Type.Episode && !subjectId.isNullOrBlank() && se > 1 && ep > 0 && !tmdbId.isNullOrBlank()) {
+            runCatching { saisonSeparee(subjectId!!, tmdbId!!, videoType.tvShow.title, se, ep) }
+                .onFailure { Log.w(TAG, "saison séparée : ${it.message}") }
+                .getOrNull()?.let { (sid2, se2, ep2) ->
+                    Log.i(TAG, "saison séparée : S${se}E$ep → fiche sid=$sid2 S${se2}E$ep2")
+                    subjectId = sid2; se = se2; ep = ep2
+                }
         }
 
         // ⚠ 2026-08-20 (user « et sur le mauvais épisode ? » → « LES 2 ») —

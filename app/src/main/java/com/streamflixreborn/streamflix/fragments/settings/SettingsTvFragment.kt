@@ -1235,6 +1235,8 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         findPreference<PreferenceCategory>("pc_provider_empty_state")?.isVisible = false
         // 2026-10-28 (user) : « Chaînes masquées » pour faire revenir les chaînes masquées.
         com.streamflixreborn.streamflix.utils.ChainesMasquees.ajouter(requireContext(), cat)
+        // 2026-11-01 (user) : « Réorganiser le TV Hub » et « Mes catégories ».
+        com.streamflixreborn.streamflix.utils.TvHubOrganisation.ajouterReglages(requireContext(), cat)
         // 2026-09-20 : entrée « Compte Bowd » RETIRÉE avec le reste de Bowd (user : « pas
         //   vraiment stable »). Elle avait été ajoutée ici le 2026-09-11 parce que relire
         //   ses identifiants évitait de les retaper à la télécommande.

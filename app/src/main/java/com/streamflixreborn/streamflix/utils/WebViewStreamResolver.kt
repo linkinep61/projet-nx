@@ -146,9 +146,16 @@ object WebViewStreamResolver {
         // 2026-10-30 (voirdrama.ink) : script exécuté UNE fois dans la page principale après son
         //   chargement (ex. choisir un lecteur dans une liste). null par défaut → aucun changement.
         jsAuChargement: String? = null,
+        // 2026-11-01 (Vidnest) : requêtes de la page auxquelles on répond TOUT DE SUITE « 502 »
+        //   (sous-sources déjà connues vides) au lieu de laisser la page attendre 18 à 30 s.
+        //   null par défaut → aucun changement pour les autres sources.
+        repondreVide: ((String) -> Boolean)? = null,
+        // 2026-11-01 (Vidy) : abandon dès que N réponses aux requêtes RÉÉCRITES sont des erreurs
+        //   serveur (≥ 500) = le site sait déjà qu'il n'a rien. 0 par défaut → aucun changement.
+        abandonApresEchecsReecrits: Int = 0,
     ): Resolved? = withContext(Dispatchers.Main) {
         withTimeoutOrNull(timeoutMs) {
-            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs, hotesIgnores, motifsUrlFlux, seulementMotifs, reecrireRequete, jsAuChargement)
+            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques, lireJsApresCapture, toucherCentre, motifsFlux, abandonSiTitre, delaiAbandonMs, hotesIgnores, motifsUrlFlux, seulementMotifs, reecrireRequete, jsAuChargement, repondreVide, abandonApresEchecsReecrits)
         }
     }
 
@@ -211,6 +218,8 @@ object WebViewStreamResolver {
         seulementMotifs: Boolean = false,
         reecrireRequete: ((String) -> String?)? = null,
         jsAuChargement: String? = null,
+        repondreVide: ((String) -> Boolean)? = null,
+        abandonApresEchecsReecrits: Int = 0,
     ): Resolved? = suspendCancellableCoroutine { cont ->
         val context = StreamFlixApp.instance.applicationContext
         var resolved = false
@@ -218,6 +227,7 @@ object WebViewStreamResolver {
         //   être demandées par la page — on ne relance pas une 2e lecture pour elles.
         val captureEnCours = java.util.concurrent.atomic.AtomicBoolean(false)
         var toucherLance = false
+        val echecsReecrits = java.util.concurrent.atomic.AtomicInteger(0)
         var jsLance = false
         var attachedParent: android.view.ViewGroup? = null
 
@@ -331,7 +341,21 @@ object WebViewStreamResolver {
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
                 val reqUrl = request?.url?.toString() ?: return null
-                reecrireRequete?.invoke(reqUrl)?.let { nouvelle -> return requeteReecrite(request, nouvelle) }
+                if (repondreVide?.invoke(reqUrl) == true) {
+                    android.util.Log.d("WebViewStreamResolver", "réponse vide immédiate : ${reqUrl.substringBefore('?').takeLast(60)}")
+                    val origine = request.requestHeaders?.entries?.firstOrNull { it.key.equals("Origin", true) }?.value ?: "*"
+                    return WebResourceResponse("text/plain", "utf-8", 502, "Bad Gateway",
+                        mapOf("Access-Control-Allow-Origin" to origine), java.io.ByteArrayInputStream("error code: 502".toByteArray()))
+                }
+                reecrireRequete?.invoke(reqUrl)?.let { nouvelle ->
+                    val rep = requeteReecrite(request, nouvelle)
+                    if (abandonApresEchecsReecrits > 0 && (rep?.statusCode ?: 0) >= 500 &&
+                        echecsReecrits.incrementAndGet() >= abandonApresEchecsReecrits) {
+                        android.util.Log.i("WebViewStreamResolver", "${echecsReecrits.get()} réponses en erreur (HTTP ${rep?.statusCode}) → le site n'a rien, abandon")
+                        resolve(null)
+                    }
+                    return rep
+                }
                 val host = request.url?.host ?: ""
 
                 // 1. Cible trouvée ? On matche l'extension dans le CHEMIN uniquement (pas les query

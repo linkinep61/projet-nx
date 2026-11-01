@@ -41,6 +41,11 @@ object VidySt {
         var reecrites = 0
         val r = WebViewStreamResolver.resolve(
             entryUrl = server.src, referer = "$BASE/", timeoutMs = 25_000L, attach = true, clickPlay = true,
+            // 2026-11-01 (relevé dans Chrome, Bleach S2E47) : sans l'épisode, `/<ville>/sources`
+            //   répond HTTP 500 en 0,1 s (la page réessaie 1 fois puis passe à la ville suivante,
+            //   18 villes ≈ 36 s) ; avec l'épisode, 200 dès le 1er appel. Tout est réécrit vers
+            //   Paris → 2 réponses 500 = Paris n'a rien → abandon en ≈ 2,5 s au lieu de 25 s.
+            abandonApresEchecsReecrits = 2,
             reecrireRequete = { u ->
                 val m = VILLE_SOURCES.find(u)
                 if (m != null && m.groupValues[2] != "paris") { reecrites++; u.replaceFirst(VILLE_SOURCES, "$1paris$3") } else null

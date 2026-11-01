@@ -31,7 +31,13 @@ object Videm {
     //   Referer ou avec son PROPRE domaine (ce que faisait l'app amont → elle ne marche pas chez
     //   nous), et 200 avec un site intégrateur. Spider-Man : Un jour nouveau (969681) → serveur
     //   « SWM1-French » → api.php → master m3u8 200. Inception / Big Bang : aucun serveur French.
-    private const val REFERER = "https://www.themoviedb.org/"
+    // 2026-11-01 (bilan des sources : « Videm : 0 serveur sur 55 recherches, 31 appareils ») — Videm
+    //   refuse désormais PRÉCISÉMENT le Referer themoviedb.org (403), alors que google.com,
+    //   vidsrc.to ou example.com passent (200, mesuré depuis le PC du user). Liste de repli : sur
+    //   un 403, on essaie le suivant et on retient celui qui marche.
+    private val REFERERS = listOf("https://www.google.com/", "https://vidsrc.to/", "https://www.themoviedb.org/")
+    @Volatile private var iReferer = 0
+    private val REFERER get() = REFERERS[iReferer % REFERERS.size]
 
     private val client: OkHttpClient by lazy {
         com.streamflixreborn.streamflix.extractors.Extractor.sharedClient.newBuilder()
@@ -44,14 +50,19 @@ object Videm {
         if (estUnFilm) "$BASE/embed/movie/$tmdb" else "$BASE/embed/tv/$tmdb/${saison.coerceAtLeast(1)}/$episode"
 
     private fun get(url: String): String? {
-        val req = Request.Builder().url(url)
-            .header("User-Agent", UA)
-            .header("Referer", REFERER)
-            .build()
-        return client.newCall(req).execute().use { r ->
-            if (!r.isSuccessful) { Log.i(TAG, "GET ${url.substringAfter(BASE)} → HTTP ${r.code}"); null }
-            else r.body?.string()
+        repeat(REFERERS.size) {
+            val ref = REFERER
+            val req = Request.Builder().url(url)
+                .header("User-Agent", UA)
+                .header("Referer", ref)
+                .build()
+            val (code, corps) = client.newCall(req).execute().use { r -> r.code to (if (r.isSuccessful) r.body?.string() else null) }
+            if (corps != null) return corps
+            Log.i(TAG, "GET ${url.substringAfter(BASE)} → HTTP $code (Referer $ref)")
+            if (code != 403) return null
+            iReferer++ // origine refusée : on passe à la suivante et on la retient
         }
+        return null
     }
 
     /** Lit `var Q = {…}` de la page embed. */

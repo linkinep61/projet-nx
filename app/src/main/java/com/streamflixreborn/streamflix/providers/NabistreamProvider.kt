@@ -31,6 +31,8 @@ import java.util.concurrent.TimeUnit
 object NabistreamProvider {
     private const val TAG = "NabistreamProvider"
     private const val BASE = "https://nabistream.mom"
+    /** 2026-11-01 : domaine mort, source coupée (cf. fetchNabistreamBackupServers). */
+    const val SOURCE_FERMEE = true
     private const val SRC_PREFIX = "nabistream::"
 
     private val gson = Gson()
@@ -79,6 +81,12 @@ object NabistreamProvider {
         episode: Int = 0,
         titles: List<String> = emptyList(),
     ): List<Video.Server> = withContext(Dispatchers.IO) {
+        // 2026-11-01 (bilan des sources : « Nabistream : 0 serveur sur 67 recherches, 36 appareils ») —
+        //   le domaine nabistream.mom n'existe plus (« Unable to resolve host ») et aucune nouvelle
+        //   adresse n'a été trouvée (Google, Bing, extensions voisines : nabistream.ws = parking).
+        //   Source DÉSACTIVÉE : plus aucune requête vers un domaine mort. Pour la rebrancher,
+        //   mettre la nouvelle adresse dans BASE et retirer ce retour.
+        if (SOURCE_FERMEE) return@withContext emptyList()
         // Titres de recherche : le titre du videoType + les knownTitles fournis.
         val titleCandidates = LinkedHashSet<String>()
         when (videoType) {

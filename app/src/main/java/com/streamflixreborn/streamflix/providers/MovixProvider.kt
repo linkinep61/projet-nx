@@ -4512,10 +4512,12 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
      * les extracteurs (`Video.fileName`) qui les démasque à la lecture. Les deux se complètent :
      * ici on retire les VOSTFR déclarés, là on corrige les VOSTFR déguisés.
      */
-    private fun estVostfrAEcarter(lang: String?): Boolean {
-        val l = lang?.trim()?.uppercase() ?: return false
-        return l == "VOSTFR" || l == "VO" || l == "SUBFRENCH"
-    }
+    // 2026-11-01 (user : « tu retires le filtrage de la langue » ; « on doit recevoir tout ce qu'il
+    //   y a, peu importe la langue ») : plus rien n'est écarté — les liens VOSTFR / VO de Movix
+    //   arrivent, étiquetés, et le classement les range après les VF. Remettre l'ancien corps
+    //   (VOSTFR / VO / SUBFRENCH → true) pour revenir en arrière.
+    @Suppress("UNUSED_PARAMETER")
+    private fun estVostfrAEcarter(lang: String?): Boolean = false
 
     private fun movixLinkUrl(el: com.google.gson.JsonElement?): String? {
         if (el == null || el.isJsonNull) return null

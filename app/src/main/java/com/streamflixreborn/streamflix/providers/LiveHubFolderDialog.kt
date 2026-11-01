@@ -3611,7 +3611,13 @@ private fun normSearch(s: String): String =
                 val optionFav = if (favStore.estFavori(ch.id)) "📁 Retirer des dossiers favoris" else "📁 Ajouter aux dossiers favoris"
                 androidx.appcompat.app.AlertDialog.Builder(ctxVivant(ctx))
                     .setTitle(ch.title)
-                    .setItems(arrayOf(optionFav, if (verrouille) "🔓 Retirer le contrôle parental" else "🔒 Contrôle parental (verrouiller)")) { _, choix ->
+                    .setItems(arrayOf(optionFav, if (verrouille) "🔓 Retirer le contrôle parental" else "🔒 Contrôle parental (verrouiller)",
+                        "🏷 Ajouter à une catégorie…")) { _, choix ->
+                        // 2026-11-01 (user : « les sous-dossiers ne sont pas pris par l'ajout à une catégorie »).
+                        if (choix == 2) {
+                            com.streamflixreborn.streamflix.utils.TvHubOrganisation.ouvrirAjouterA(ctxVivant(ctx), ch)
+                            return@setItems
+                        }
                         if (choix == 0) {
                             val ajoute = favStore.basculer(ch)
                             android.widget.Toast.makeText(ctxVivant(ctx),
@@ -3756,9 +3762,14 @@ private fun normSearch(s: String): String =
             if (ch.id.startsWith("livehub::folder::")) return@OnItemLongClickListener basculerFavori(pos)
             androidx.appcompat.app.AlertDialog.Builder(ctxVivant(ctx))
                 .setTitle(ch.title)
-                .setItems(arrayOf("★ Favori (ajouter / retirer)", "🙈 Masquer cette chaîne")) { _, choix ->
+                .setItems(arrayOf("★ Favori (ajouter / retirer)", "🙈 Masquer cette chaîne", "🏷 Ajouter à une catégorie…")) { _, choix ->
                     if (choix == 0) {
                         basculerFavori(pos)
+                        return@setItems
+                    }
+                    // 2026-11-01 (user) : aussi depuis l'intérieur des dossiers.
+                    if (choix == 2) {
+                        com.streamflixreborn.streamflix.utils.TvHubOrganisation.ouvrirAjouterA(ctxVivant(ctx), ch)
                         return@setItems
                     }
                     com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels

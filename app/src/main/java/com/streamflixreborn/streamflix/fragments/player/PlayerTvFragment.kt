@@ -2078,6 +2078,7 @@ class PlayerTvFragment : Fragment() {
     }
 
         override fun onDestroyView() {
+        com.streamflixreborn.streamflix.utils.SanteSources.envoyer()
             super.onDestroyView()
             // 2026-10-27 (photo mémoire sur la télé) : le lecteur fermé restait en mémoire avec son
             //   écran, retenu par ces rappels globaux (« Recaler maintenant », sous-titre suivant).
@@ -6043,9 +6044,19 @@ class PlayerTvFragment : Fragment() {
                                             0L
                                         } else 6_000L
                                     }
+                                    // 2026-11-01 (user, Oppo : Vidara « passe en rouge direct, sans rien faire, même en pause ») —
+                                    //   ce contrôle recréait le lecteur au bout de 6 s de chargement, puis déclarait le serveur MORT
+                                    //   (rouge + changement de serveur) 15 s plus tard, sans regarder si l'on était en pause ni si
+                                    //   le flux avançait encore. Un serveur LENT mais vivant (Vidara un soir chargé) y passait.
+                                    //   Désormais : rien pendant une pause, et rien si l'avance chargée a progressé d'au moins 2 s.
+                                    val avanceAvant = player.bufferedPosition
                                     kotlinx.coroutines.delay(delaiCoupure)
+                                    val fluxVivant = player.bufferedPosition - avanceAvant >= 2_000L
+                                    if (fluxVivant && player.playbackState == Player.STATE_BUFFERING)
+                                        Log.i("PlayerNetwork", "chargement lent mais le flux avance (+${(player.bufferedPosition - avanceAvant) / 1000} s) → ni relance ni changement de serveur")
                                     if (player.playbackState == Player.STATE_BUFFERING &&
-                                        player.currentPosition == initialPosition) {
+                                        player.currentPosition == initialPosition &&
+                                        player.playWhenReady && !fluxVivant) {
                                         if (!currentExtraBuffering) {
                                             // 1ʳᵉ tentative : activer ExtraBuffering + re-init
                                             val server = currentServer
@@ -6587,6 +6598,7 @@ class PlayerTvFragment : Fragment() {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     // 2026-10-04 : mode léger → la recherche de serveurs se met en pause pendant la lecture.
                     if (isPlaying) com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(true)
+                if (isPlaying) com.streamflixreborn.streamflix.utils.SanteSources.demarre(currentServer)
                     // 2026-05-20 : respecter keepScreenOnWhenPaused (parité mobile)
                     binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
 
@@ -6743,6 +6755,7 @@ class PlayerTvFragment : Fragment() {
                     super.onPlayerError(error)
                     // 2026-10-04 : la vidéo a planté → la recherche de serveurs reprend (mode léger).
                     com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(false)
+                com.streamflixreborn.streamflix.utils.SanteSources.echecLecture(currentServer, error)
                     // 2026-05-21 : ce serveur a ÉCHOUÉ pour CE titre → DEAD (rouge) uniquement
                     //   pour ce titre (args.id). Pas de bave sur les autres épisodes.
                     // 2026-08-08 (user : « il doit pas passer rouge à tort, ça c'est pas
@@ -7627,6 +7640,16 @@ class PlayerTvFragment : Fragment() {
                 .ExternalSubtitleOverlay(requireContext(), binding.pvPlayer, player).also { externalSubOverlay = it }
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+            // 2026-11-01 (user : « dans aucun cas ça doit retraduire en anglais ») : si une traduction
+            //   française de cette piste existe déjà, c'est ELLE qu'on bascule sur le calque.
+            val outilTrad = com.streamflixreborn.streamflix.utils.TraductionSousTitres
+            val dejaTrad = outilTrad.codeDepuisLibelle(st.label)?.let { outilTrad.dejaTraduit(st.file, it) }
+                ?: outilTrad.dejaTraduit(st.file, "en")
+            if (dejaTrad != null) {
+                calque.startLocal(android.net.Uri.fromFile(dejaTrad).toString())
+                Log.d("SyncSousTitres", "« ${st.label} » → français traduit existant basculé sur le calque")
+                return true
+            }
             val fichier = st.file.substringBefore('#')
             if (fichier.startsWith("http")) calque.start(fichier, currentVideo?.headers?.get("Referer") ?: "https://vidzy.live/")
             else calque.startLocal(fichier)

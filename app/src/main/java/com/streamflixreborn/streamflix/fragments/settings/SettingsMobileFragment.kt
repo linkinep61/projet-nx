@@ -1258,6 +1258,8 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         findPreference<PreferenceCategory>("pc_provider_empty_state")?.isVisible = false
         // 2026-10-28 (user) : « Chaînes masquées » pour faire revenir les chaînes masquées.
         com.streamflixreborn.streamflix.utils.ChainesMasquees.ajouter(requireContext(), cat)
+        // 2026-11-01 (user) : « Réorganiser le TV Hub » et « Mes catégories ».
+        com.streamflixreborn.streamflix.utils.TvHubOrganisation.ajouterReglages(requireContext(), cat)
         // TF1+
         val tf1Key = "tvhub_account_tf1"
         if (findPreference<Preference>(tf1Key) == null) {

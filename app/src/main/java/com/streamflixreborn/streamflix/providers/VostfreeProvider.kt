@@ -90,10 +90,15 @@ object VostfreeProvider {
         season: Int = 0,
         episode: Int = 0,
         videoType: Video.Type? = null,
+        // 2026-11-01 (Bleach Mille Ans) : texte TAPÉ dans la recherche du site, si différent du titre
+        //   attendu. Le moteur DLE ne trouve rien pour « BLEACH: Sennen Kessen-hen » mais liste
+        //   « Bleach : Sennen Kessen-hen VOSTFR » quand on tape « bleach » ; la correspondance reste
+        //   STRICTE sur [title].
+        requete: String = title,
     ): List<Video.Server> = withContext(Dispatchers.IO) {
         if (title.isBlank()) return@withContext emptyList()
 
-        val fiche = rechercher(title) ?: return@withContext emptyList()
+        val fiche = rechercher(title, requete) ?: return@withContext emptyList()
         val html = get(fiche) ?: return@withContext emptyList()
         val doc = Jsoup.parse(html)
 
@@ -151,11 +156,11 @@ object VostfreeProvider {
     }
 
     /** POST DLE, puis choix de la fiche dont le titre correspond vraiment. */
-    private fun rechercher(title: String): String? {
+    private fun rechercher(title: String, requete: String = title): String? {
         val corps = FormBody.Builder()
             .add("do", "search").add("subaction", "search")
             .add("search_start", "0").add("full_search", "0").add("result_from", "1")
-            .add("story", title)
+            .add("story", requete)
             .build()
         val html = post("$hoteActif/index.php?do=search", corps) ?: return null
         val doc = Jsoup.parse(html)

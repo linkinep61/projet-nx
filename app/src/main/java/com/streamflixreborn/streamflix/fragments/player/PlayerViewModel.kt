@@ -1858,11 +1858,23 @@ class PlayerViewModel(
                                 //   on s'arrête dès qu'un VF arrive (avant : 8 s d'un bloc, même si le VF
                                 //   arrivait au bout d'une seconde). Plafond inchangé.
                                 var resteGrace = FR_GRACE_MS - STABILIZE_MS
-                                while (resteGrace > 0 && allKnownServers.none { isVf(it) }) {
+                                // 2026-11-01 (user) : on s'arrête aussi dès que TOUTES les sources ont
+                                //   répondu (collecte terminée) : plus aucun VF ne peut arriver.
+                                // 2026-11-01 (mesuré sur l'Oppo, Bleach S2E47 : départ à +22 s alors que
+                                //   rien de neuf n'arrivait depuis longtemps) : on s'arrête aussi quand la
+                                //   liste n'a plus bougé depuis 3 s — les sources restantes sont lentes ou
+                                //   pendues, attendre un VF hypothétique ne fait que retarder la lecture.
+                                var tailleGrace = allKnownServers.size
+                                var calmeDepuis = 0L
+                                while (resteGrace > 0 && allKnownServers.none { isVf(it) } && progressiveStillCollecting && calmeDepuis < 3_000L) {
                                     val tranche = minOf(400L, resteGrace)
                                     kotlinx.coroutines.delay(tranche)
                                     resteGrace -= tranche
+                                    val t = allKnownServers.size
+                                    calmeDepuis = if (t == tailleGrace) calmeDepuis + tranche else 0L
+                                    tailleGrace = t
                                 }
+                                if (calmeDepuis >= 3_000L) Log.i("ServDiag", "PROG grâce VF écourtée : plus rien de neuf depuis 3 s, aucun VF")
                             }
                             if (!autoPlayEmitted) {
                                 autoPlayEmitted = true
@@ -2144,7 +2156,17 @@ class PlayerViewModel(
         //   l'épisode EST VOSTFR — les VF arrivent via backups. Déduire curLang=vostfr
         //   masquait les VF. La déduction ne sert QUE pour les providers anime où un
         //   épisode est SOIT VF SOIT VOSTFR (AnimeSama, FrenchAnime, FrenchManga…).
-        if (curLang == null) {
+        // 2026-11-01 (user, Bleach Mille Ans sur DessinAnime : « on n'a pas du tout de VOSTFR qui
+        //   arrive ») — relevé : « curLang déduit des serveurs natifs : vf → 22 → 12 serveurs (masqué
+        //   10) ». DessinAnime est rangé dans le groupe ANIME mais identifie ses épisodes par TMDB
+        //   (« tv::tmdb::30984::s2::e2 ») : un épisode TMDB existe en VF ET en VOSTFR, la langue de
+        //   ses serveurs natifs ne dit RIEN de l'épisode. Pas de déduction → pas de masquage ; le tri
+        //   garde VF devant VOSTFR.
+        val episodeTmdb = lastId?.let { it.startsWith("tv::tmdb::") || it.startsWith("movie::tmdb::") } == true
+        if (curLang == null && episodeTmdb) {
+            Log.d("LangSort", "épisode identifié par TMDB ($lastId) → pas de déduction de langue, rien de masqué")
+        }
+        if (curLang == null && !episodeTmdb) {
             val currentProv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
             val isAnimeGroup = currentProv != null &&
                 com.streamflixreborn.streamflix.providers.Provider.getGroup(currentProv) ==
@@ -2295,13 +2317,13 @@ class PlayerViewModel(
         //   le masquage tuait TOUS les VF/VOSTFR (AnimeSama, FrenchManga…).
         //   Le masquage ne sert QUE pour VF↔VOSTFR (épisode VF → cacher VOSTFR
         //   et vice versa). VO = pas de masquage, tri par défaut suffit.
+        // 2026-11-01 (user : « à la base, on doit recevoir tout ce qu'il y a, peu importe la
+        //   langue ») — MASQUAGE SUPPRIMÉ pour tous les providers. La langue de l'épisode ne sert
+        //   plus qu'à TRIER (sa langue en tête, l'autre derrière, la VO en dernier) : plus aucun
+        //   serveur retiré de la liste. Avant : « curLang=vf : 22 → 12 serveurs (masqué 10) ».
         if (curLang != null && curLang != "vo") {
-            val kept = sorted.filter { bucket(it) <= 1 }
-            if (kept.isNotEmpty()) {
-                Log.d("LangSort", "curLang=$curLang : ${sorted.size} → ${kept.size} serveurs (masqué ${sorted.size - kept.size} opposé/VO)")
-                return kept
-            }
-            Log.d("LangSort", "curLang=$curLang : masquage aurait vidé la liste → on garde tout")
+            val opposes = sorted.count { bucket(it) > 1 }
+            if (opposes > 0) Log.d("LangSort", "curLang=$curLang : $opposes serveur(s) d'une autre langue gardés en fin de liste (plus de masquage)")
         }
 
         return sorted
@@ -2525,6 +2547,7 @@ class PlayerViewModel(
         val job = viewModelScope.launch(Dispatchers.IO) {
         Log.d("PlayerViewModel", "Inizio estrazione video dal server: ${server.name}")
         com.streamflixreborn.streamflix.utils.BackupRegistry.signalerDemarrage()
+        com.streamflixreborn.streamflix.utils.SanteSources.essai(server)
         _state.emit(State.LoadingVideo(server))
         try {
             // 2026-05-16 : timeout global 60s sur l'extraction. Sans ça,
@@ -2624,6 +2647,7 @@ class PlayerViewModel(
             sessionFailCount++
             val errorType = com.streamflixreborn.streamflix.extractors.Extractor.classifyError(e)
             if (errorType == "dead-content") sessionDeadContentCount++
+            com.streamflixreborn.streamflix.utils.SanteSources.echecExtraction(server, e, errorType)
             _state.emit(State.FailedLoadingVideo(e, server))
         }
         }
