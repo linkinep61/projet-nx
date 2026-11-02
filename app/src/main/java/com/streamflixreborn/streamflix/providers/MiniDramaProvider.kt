@@ -686,6 +686,54 @@ object MiniDramaProvider : Provider {
             ?: throw Exception("DramaExpress : flux refusé")
     }
 
+    // ───────────────────────── Net Drama (netdramaizle.com/fr) ─────────────────────────
+    // 2026-11-03 : sous-source, voir NetDrama.kt. Ids « minidrama-nd-<slug> », épisodes « …:<n> ».
+
+    private fun ndTvShow(s: NetDrama.Serie) = TvShow(id = NetDrama.PREFIX + s.slug, title = s.titre, poster = s.cover)
+
+    private fun ndSlug(id: String) = id.removePrefix(NetDrama.PREFIX).substringBefore(":")
+
+    private suspend fun ndGetTvShow(id: String): TvShow {
+        val slug = ndSlug(id)
+        val f = NetDrama.fetchEpisodes(slug)
+        val n = f.episodes.size
+        val recos: List<Show> = NetDrama.series.values.filter { it.slug != slug }.shuffled().take(16).map { ndTvShow(it) }
+        return TvShow(
+            id = NetDrama.PREFIX + slug,
+            title = f.serie.titre,
+            overview = f.resume,
+            quality = "720p",
+            poster = f.serie.cover,
+            banner = f.serie.cover,
+            seasons = listOf(Season(id = NetDrama.PREFIX + slug, number = 1, title = if (n > 0) "$n épisodes" else "Épisodes", poster = f.serie.cover)),
+            recommendations = recos,
+        )
+    }
+
+    private suspend fun ndEpisodes(seasonId: String): List<Episode> {
+        val slug = ndSlug(seasonId)
+        val f = runCatching { NetDrama.fetchEpisodes(slug) }.onFailure { Log.w(TAG, "Net Drama épisodes : ${it.message}") }.getOrNull()
+            ?: return emptyList()
+        return f.episodes.map { n -> Episode(id = "${NetDrama.PREFIX}$slug:$n", number = n, title = "Épisode $n", poster = f.serie.cover) }
+    }
+
+    private fun ndServers(id: String, videoType: Video.Type): List<Video.Server> {
+        val slug = ndSlug(id)
+        val n = id.substringAfterLast(":", "").toIntOrNull() ?: (videoType as? Video.Type.Episode)?.number ?: return emptyList()
+        val vf = NetDrama.series[slug]?.vf == true
+        // Épisode suivant préparé pendant qu'on regarde celui-ci.
+        NetDrama.prechauffer(slug, n + 1)
+        return listOf(Video.Server(id = "nd|$slug|$n", name = "Net Drama · 720p [${if (vf) "VF" else "VOSTFR"}]", src = NetDrama.episodeUrl(slug, n))
+            .also { it.quality = "720p"; it.language = if (vf) "VF" else "VOSTFR" })
+    }
+
+    private suspend fun ndVideo(server: Video.Server): Video {
+        val p = server.id.split("|")
+        val slug = p.getOrNull(1).orEmpty(); val n = p.getOrNull(2)?.toIntOrNull() ?: 1
+        val url = runCatching { NetDrama.fetchStream(slug, n) }.getOrElse { NetDrama.fetchStream(slug, n, force = true) }
+        return NetDrama.video(url)
+    }
+
     // ───────────────────────── Provider ─────────────────────────
 
     override suspend fun getHome(): List<Category> {
@@ -695,9 +743,12 @@ object MiniDramaProvider : Provider {
         runCatching { ensureFullCatalog() }.onFailure { Log.w(TAG, "catalogue complet : ${it.message}") }
         if (shows.isEmpty()) ensureHome()
         var deRangees: List<Pair<String, List<String>>> = emptyList()
+        var ndRangees: List<Pair<String, List<String>>> = emptyList()
         coroutineScope {
             listOf(
                 async { runCatching { deRangees = DramaExpress.rangeesAccueil() }.onFailure { Log.w(TAG, "DramaExpress : ${it.message}") } },
+                // 2026-11-03 : Net Drama = UNE page lue (son accueil), mise en cache 1 h.
+                async { runCatching { ndRangees = NetDrama.rangeesAccueil() }.onFailure { Log.w(TAG, "Net Drama : ${it.message}") } },
                 async { runCatching { ensureDm() }.onFailure { Log.w(TAG, "Dailymotion : ${it.message}") } },
                 async { runCatching { ensureYt() }.onFailure { Log.w(TAG, "YouTube : ${it.message}") } },
             ).awaitAll()
@@ -725,6 +776,11 @@ object MiniDramaProvider : Provider {
         for ((nom, slugs) in deRangees) {
             val l = slugs.mapNotNull { DramaExpress.series[it] }.take(30)
             if (l.size >= 4) out.add(Category("$nom · DramaExpress", l.map { deTvShow(it) }))
+        }
+        // 2026-11-03 : rangées Net Drama (épisodes complets gratuits, sous-titres FR incrustés).
+        for ((nom, slugs) in ndRangees) {
+            val l = slugs.mapNotNull { NetDrama.series[it] }.take(30)
+            if (l.size >= 3) out.add(Category("$nom · Net Drama", l.map { ndTvShow(it) }))
         }
 
         // 2) Dailymotion : les grandes rangées VF en tête (le plus gros du catalogue).
@@ -768,6 +824,32 @@ object MiniDramaProvider : Provider {
             .entries.sortedByDescending { it.value.size }
             .take(16)
             .forEach { (catId, l) -> rangee(categoryNames[catId] ?: return@forEach, l.sortedByDescending { it.collectCount ?: 0 }, 30) }
+        return sansRepetitions(out)
+    }
+
+    /**
+     * 2026-11-03 (user : « des répétitions comme Nouveau cette semaine, Toutes les séries… c'est exactement
+     *   la même chose. Il faut éviter les répétitions avec le contenu qu'on a ») — journal du jour : 78
+     *   rangées ; « Mondaine » 11/11 séries déjà vues plus haut, « Femmes Indépendantes » 8/8, « Identité
+     *   Cachée » 17/18, « Nouveau cette semaine · DramaExpress » 5/5, « Mariage · Net Drama » 11/12…
+     *   (minutedrama n'a que ~80 séries : ses rangées par thème puisent toutes dans le même lot).
+     * Règle : chaque série n'apparaît qu'UNE fois sur l'accueil (titre comparé sans accents ni casse,
+     *   toutes sources confondues), là où elle se présente en premier ; une rangée qui garde moins de
+     *   4 séries nouvelles est retirée. Le carrousel du haut n'est pas concerné.
+     */
+    private fun sansRepetitions(rangees: List<Category>): List<Category> {
+        fun titre(s: AppAdapter.Item) = ((s as? TvShow)?.title ?: (s as? Movie)?.title)?.let { normalize(it) }?.takeIf { it.isNotBlank() }
+        val vus = HashSet<String>()
+        var retirees = 0
+        val out = rangees.mapNotNull { c ->
+            if (c.name == Category.FEATURED) return@mapNotNull c
+            val dejaDansRangee = HashSet<String>()
+            val nouvelles = c.list.filter { s -> val t = titre(s); t == null || (t !in vus && dejaDansRangee.add(t)) }
+            if (nouvelles.size < 4) { retirees++; return@mapNotNull null }
+            nouvelles.mapNotNull { titre(it) }.forEach { vus.add(it) }
+            if (nouvelles.size == c.list.size) c else c.copy(list = nouvelles)
+        }
+        Log.i(TAG, "accueil : ${out.size} rangées gardées, $retirees retirées (séries déjà présentes plus haut)")
         return out
     }
 
@@ -797,6 +879,8 @@ object MiniDramaProvider : Provider {
         val ytItems = (ytLocal + ytEnLigne).distinctBy { it.vid }.map { it.toMovie() }
         val deItems = runCatching { DramaExpress.search(query) }.onFailure { Log.w(TAG, "DramaExpress recherche : ${it.message}") }
             .getOrDefault(emptyList()).map { deTvShow(it) }
+        val ndItems = runCatching { NetDrama.search(query) }.onFailure { Log.w(TAG, "Net Drama recherche : ${it.message}") }
+            .getOrDefault(emptyList()).map { ndTvShow(it) }
         val q = normalize(query)
         val words = q.split(" ").filter { it.length > 1 }
         val scored = shows.values.mapNotNull { tv ->
@@ -813,7 +897,7 @@ object MiniDramaProvider : Provider {
             }
             if (score > 0) score to tv else null
         }
-        return scored.sortedByDescending { it.first }.map { it.second.toTvShow() } + deItems + ytItems + dmItems
+        return scored.sortedByDescending { it.first }.map { it.second.toTvShow() } + deItems + ndItems + ytItems + dmItems
     }
 
     /** Onglet Films = séries complètes VF de Dailymotion, des plus récentes aux plus anciennes. */
@@ -850,13 +934,16 @@ object MiniDramaProvider : Provider {
         val de = runCatching { DramaExpress.fetchCatalog(page) }
             .onFailure { Log.w(TAG, "DramaExpress liste p$page : ${it.message}") }
             .getOrDefault(emptyList()).map { deTvShow(it) }
+        val nd = runCatching { NetDrama.fetchCatalog(page) }
+            .onFailure { Log.w(TAG, "Net Drama liste p$page : ${it.message}") }
+            .getOrDefault(emptyList()).map { ndTvShow(it) }
         val md = runCatching {
             ensureFullCatalog()
             val pageSize = 30
             val all = shows.values.sortedByDescending { it.id ?: 0 }
             all.drop((page - 1) * pageSize).take(pageSize).map { it.toTvShow() }
         }.getOrDefault(emptyList())
-        return de + md
+        return de + nd + md
     }
 
     override suspend fun getMovie(id: String): Movie =
@@ -866,6 +953,7 @@ object MiniDramaProvider : Provider {
 
     override suspend fun getTvShow(id: String): TvShow {
         if (id.startsWith(DramaExpress.PREFIX)) return deGetTvShow(id)
+        if (id.startsWith(NetDrama.PREFIX)) return ndGetTvShow(id)
         val tvId = idOf(id) ?: return TvShow(id = id)
         val tv = showOf(tvId) ?: return TvShow(id = id)
 
@@ -937,6 +1025,7 @@ object MiniDramaProvider : Provider {
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         if (seasonId.startsWith(DramaExpress.PREFIX)) return deEpisodes(seasonId)
+        if (seasonId.startsWith(NetDrama.PREFIX)) return ndEpisodes(seasonId)
         val tvId = idOf(seasonId) ?: return emptyList()
         val tv = showOf(tvId)
         val banner = tv?.coverHoriUrl ?: tv?.coverUrl
@@ -974,6 +1063,7 @@ object MiniDramaProvider : Provider {
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         if (id.startsWith(DramaExpress.PREFIX)) return deServers(id, videoType)
+        if (id.startsWith(NetDrama.PREFIX)) return ndServers(id, videoType)
         if (id.startsWith(DM_PREFIX)) return dmServers(id)
         if (id.startsWith(YT_PREFIX)) {
             val vid = id.removePrefix(YT_PREFIX)
@@ -1002,6 +1092,7 @@ object MiniDramaProvider : Provider {
 
     override suspend fun getVideo(server: Video.Server): Video {
         if (server.id.startsWith("dex|")) return deVideo(server)
+        if (server.id.startsWith("nd|")) return ndVideo(server)
         if (server.id.startsWith(ReelShortVf.PREFIXE)) return ReelShortVf.video(server)
         if (server.id.startsWith("dmv|")) return DailymotionExtractor().extract(server.src)
         if (server.id.startsWith("ytv|")) return ytVideo(server.id.removePrefix("ytv|"))

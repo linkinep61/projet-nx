@@ -249,6 +249,23 @@ class LuluVdoExtractor : Extractor() {
         //   Le code de `tryNativeExtract` est conservé, inutilisé, au cas où ce CDN
         //   s'assouplirait — mais il ne doit PAS être rebranché sans preuve hors navigateur.
 
+        // 2026-11-02 (banc Monte-Cristo, Wiflix « LuLuTV » / « Lustream » sur luluvido.com, vérifié
+        //   depuis le PC) : page de 926 octets « File is no longer available as it expired or has
+        //   been deleted », mais la WebView n'y reconnaissait rien et tournait 25 s pour finir en
+        //   « timed out ». Lecture rapide de la page D'ABORD (6 s max, sans rien en tirer d'autre) :
+        //   vidéo supprimée → verdict immédiat ; sinon, chemin WebView habituel inchangé.
+        val pageSupprimee = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                sharedClient.newBuilder().callTimeout(6, java.util.concurrent.TimeUnit.SECONDS).build()
+                    .newCall(okhttp3.Request.Builder().url(link).header("User-Agent", DEFAULT_USER_AGENT).build())
+                    .execute().use { r ->
+                        val corps = r.body?.string().orEmpty()
+                        corps.length < 5000 && Regex("""(?i)no longer available|has been deleted|file was deleted|file not found""").containsMatchIn(corps)
+                    }
+            }.getOrDefault(false)
+        }
+        if (pageSupprimee) throw Exception("LuluVdo: video not found — file removed or expired (page lue directement)")
+
         lastWasDeadContent = false
         val result = resolveViaWebView(linkHost, fileCode)
             ?: if (lastWasDeadContent) {

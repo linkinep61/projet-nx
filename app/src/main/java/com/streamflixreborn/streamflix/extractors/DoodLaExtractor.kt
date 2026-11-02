@@ -52,6 +52,10 @@ open class DoodLaExtractor : Extractor() {
         //   Or il redirige vers playmogo.com, déjà dans cette liste — l'ID est portable,
         //   il suffisait donc de nommer le domaine d'entrée.
         "https://dood.wf",
+        // 2026-11-02 (banc Jujutsu Kaisen, FrenchAnime « Vvide0 », vérifié depuis le PC) :
+        //   vvide0.com redirige vers playmogo.com (page « … - DoodStream ») ; il était rangé
+        //   dans les alias VOE → « no encoded JSON ». Même moteur, ID portable.
+        "https://vvide0.com",
         // 2026-06-02 : kokoflix.lol RETIRÉ — c'est un proxy multi-host de FS
         //   qui route selon le suffix /<XXX>_go.php : osaka_go.php = VOE (pas
         //   Dood !), grandline_go.php = autre host.
@@ -94,6 +98,14 @@ open class DoodLaExtractor : Extractor() {
                 val htmlSnippet = document.toString().take(500)
                 android.util.Log.w("DoodExtractor",
                     "No pass_md5 in embed page from $finalUrl. First 500 chars: $htmlSnippet")
+                // 2026-11-02 (banc de test, Frembed · DoodStream) : vérifié dans le navigateur, la
+                //   page disait « Vidéo introuvable | DoodStream » - fichier supprimé, pas un
+                //   extracteur cassé. On le signale comme tel pour passer tout de suite au suivant.
+                val titre = document.title().orEmpty()
+                if (titre.contains("introuvable", true) || titre.contains("not found", true) ||
+                    document.text().contains("introuvable", true) || document.text().contains("File not found", true)) {
+                    throw Exception("DoodStream: video not found - file removed (page « $titre »)")
+                }
                 throw Exception("Could not find md5 path on $finalUrl")
             }
         android.util.Log.d("DoodExtractor", "md5Path=$md5Path")

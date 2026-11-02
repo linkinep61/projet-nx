@@ -61,6 +61,23 @@ object BackupRegistry {
     private const val TAG = "BackupRegistry"
     const val PREFIX = "bkreg::"
 
+    /** 2026-11-02 : hébergeurs fermés définitivement - leurs liens ne sont plus jamais proposés. */
+    //   2026-11-02 (banc Breaking Bad, vérifié depuis le PC) : uptostream.link = « This domain is
+    //   for sale », uptobox.link = plus d'adresse DNS (Uptobox a fermé en 2023).
+    //   upvid.co = page « Redirecting… » vers router.parklogic.com (domaine parqué, régie pub).
+    //   streamtales.cc (« ★ Video » de Frembed, leur propre stockage) : domaine disparu du registre
+    //   (NXDOMAIN chez Google DNS, 443/8443 fermés) — le bilan montrait Frembed à 10 % de lectures.
+    //   tipfly.xyz (ancien miroir OneUpload) : domaine à vendre (script « forsale » Above Domains).
+    //   tromcloud.com (« Tromcloud » chez Movix) : vérifié dans un vrai navigateur, l'iframe renvoie
+    //   vers un routeur publicitaire puis un domaine parqué (payedsurveys.com) — plus d'hébergeur.
+    //   listeamed.net (« Listeamed » chez Coflix Boston) : vérifié dans un vrai navigateur, la page
+    //   finit sur une régie publicitaire (click-v4.…) — plus de lecteur.
+    private val HEBERGEURS_FERMES = listOf("darkibox.com", "hydracker.com", "uptostream.link", "uptobox.link", "upvid.co", "streamtales.cc", "tipfly.xyz", "tromcloud.com", "listeamed.net")
+    private fun hebergeurFerme(src: String): Boolean {
+        val hote = runCatching { java.net.URI(src).host.orEmpty().lowercase() }.getOrDefault("")
+        return HEBERGEURS_FERMES.any { hote == it || hote.endsWith(".$it") }
+    }
+
     // 2026-07-04 (user "désactiver un par un tous les backups de chaque provider") : kill-switch
     //   GLOBAL des backups INLINE éparpillés. true = chaque provider n'émet QUE ses serveurs
     //   NATIFS ; TOUS les backups passent par le registre central (fetchAll, mergé dans le
@@ -1289,7 +1306,19 @@ object BackupRegistry {
                 return
             }
             noterSucces(source)
-            val fresh = servers.filter { it.src.isNotBlank() && seen.add(langBucket(it.name) + "|" + normSrc(it.src)) }
+            // 2026-11-02 (user, banc de test : « fermeture définitive… c'est une source qu'on peut
+            //   retirer carrément ») - hébergeurs FERMÉS : jamais proposés, quelle que soit la source.
+            //   darkibox.com → hydracker.com affiche « Fermeture définitive » (vérifié au navigateur) ;
+            //   son extracteur était déjà désactivé (2026-08-16) mais Coflix Boston listait encore ses
+            //   liens, affichés en rouge « No extractors found ».
+            // 2026-11-02 (user : « sur un film à 140 sources dont 90 HS, qu'on ne s'amuse pas à
+            //   chercher ») - liens confirmés morts par la base (vidéo supprimée chez l'hébergeur,
+            //   revérifiée par le Worker) : plus jamais proposés. Cf. LiensMorts.
+            val morts = servers.count { LiensMorts.estMort(it.src) }
+            if (morts > 0) Log.i(TAG, "$source → $morts lien(s) mort(s) écarté(s) (liste de la base)")
+            val fresh = servers.filter { s ->
+                !hebergeurFerme(s.src) && !LiensMorts.estMort(s.src) && s.src.isNotBlank() && seen.add(langBucket(s.name) + "|" + normSrc(s.src))
+            }
             Log.i(TAG, "$source → ${fresh.size} neufs / ${servers.size} bruts")
             if (fresh.isNotEmpty()) {
                 sourcesAvecServeurs.add(source)

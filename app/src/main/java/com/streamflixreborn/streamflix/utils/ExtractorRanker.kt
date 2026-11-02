@@ -156,7 +156,6 @@ object ExtractorRanker {
         "vidplay" to 10,
         "mycloud" to 10,
         "vidplayonline" to 10,
-        "darkibox" to 10,
         "streamhub" to 10,
         "vidzy" to 10,
         "savefiles" to 10,
@@ -468,7 +467,8 @@ object ExtractorRanker {
         //   contaminer le VOSTFR quand on heart le VF.
         if (favorites.isNotEmpty()) {
             val fk = favKeyFor(server)
-            if (fk in favorites) return ExtractorToggleStore.FAVORITE_BONUS + computeQualityBonus(qualityStr)
+            if (fk in favorites || estFavoriHebergeur(server, favorites))
+                return ExtractorToggleStore.FAVORITE_BONUS + computeQualityBonus(qualityStr)
         }
 
         // Papadustream natif (captcha Cloudflare Turnstile) → dernier recours (check de nom, gratuit).
@@ -543,8 +543,26 @@ object ExtractorRanker {
         val p = UserPreferences.currentProvider?.name
         if (p.isNullOrEmpty()) return@runCatching false
         val favoris = ExtractorToggleStore.getFavorites(p)
-        favoris.isNotEmpty() && favKeyFor(server) in favoris
+        favoris.isNotEmpty() && (favKeyFor(server) in favoris || estFavoriHebergeur(server, favoris))
     }.getOrDefault(false)
+
+    /**
+     * 2026-11-03 (retour d'un utilisateur : les cœurs de « Gérer les sources » ne servaient à rien) :
+     *   cet écran enregistre le NOM de l'hébergeur seul (« anonmp4 », sans « : »), alors que le tri
+     *   ne reconnaissait plus que la clé du lecteur « site·hébergeur:langue » (2026-07-11/16).
+     *   Un cœur posé là fait donc remonter TOUS les serveurs de cet hébergeur, VF comme VOSTFR.
+     */
+    /** Vrai si le serveur porte un cœur dans [favoris] : clé du lecteur OU hébergeur coché dans « Gérer les sources ». */
+    fun correspondFavori(server: Video.Server, favoris: Set<String>): Boolean =
+        favoris.isNotEmpty() && (favKeyFor(server) in favoris || estFavoriHebergeur(server, favoris))
+
+    private fun estFavoriHebergeur(server: Video.Server, favoris: Set<String>): Boolean {
+        if (favoris.none { ':' !in it }) return false
+        val parUrl = if (server.src.isNotBlank()) runCatching { Extractor.identifyServiceName(server.src) }.getOrNull() else null
+        if (parUrl != null && parUrl.lowercase() in favoris) return true
+        val parNom = runCatching { resolveExtractorName(server) }.getOrNull()
+        return parNom != null && parNom.lowercase() in favoris
+    }
 
     /** Construit la clé favori langue-aware depuis un nom de serveur. */
     // 2026-10-22 (user : « on voit si on peut continuer à optimiser ») — la clé ne dépend QUE

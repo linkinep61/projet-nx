@@ -18,11 +18,21 @@ class KakaflixExtractor : Extractor() {
     override val mainUrl = "https://kokoflix.lol"
 
     override val aliasUrls = listOf(
-        "https://kakaflix.lol"
+        "https://kakaflix.lol",
+        // 2026-11-02 : nouveaux noms du même relais.
+        "https://flixeo.xyz",
+        "https://trakx.lol",
     )
 
+    /** Domaines du relais (on continue de suivre tant qu'on y est). */
+    private val RELAIS = listOf("kokoflix.lol", "kakaflix.lol", "flixeo.xyz", "trakx.lol")
+
     override val rotatingDomain: List<Regex> = listOf(
-        Regex("""newPlayer\.php""")
+        // 2026-11-02 (banc de test : ~20 serveurs CoflixWiki / LoiFlix / FrenchStream « No extractors
+        //   found » sur flixeo.xyz/…/newPlayer.php et trakx.lol) - l'adresse comparée est mise en
+        //   MINUSCULES par Extractor.extract : « newPlayer » avec un P majuscule ne pouvait plus jamais
+        //   correspondre. Insensible à la casse désormais.
+        Regex("""newplayer\.php""", RegexOption.IGNORE_CASE)
     )
 
     override suspend fun extract(link: String): Video {
@@ -51,7 +61,64 @@ class KakaflixExtractor : Extractor() {
             .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
-        val resolvedUrl = withContext(Dispatchers.IO) {
+        // 2026-11-02 (banc Superman : 9 serveurs CoflixWiki/LoiFlix « renvoie vers une publicité »,
+        //   PC en 429 « Too many requests ») : flixeo.xyz limite/monétise, alors que trakx.lol sert
+        //   le MÊME identifiant proprement (303 direct vers l'hébergeur, vérifié depuis le PC sur
+        //   tokyo/ et moon2/). On interroge donc d'abord trakx.lol, puis l'hôte d'origine, puis les
+        //   autres noms du relais ; le premier qui sort vers un vrai hébergeur gagne.
+        val hoteOrigine = link.toHttpUrlOrNull()?.host?.lowercase()
+        //   (kakaflix.lol n'a plus d'adresse DNS et kokoflix.lol répond 404 — vérifié au banc et au
+        //   PC le 2026-11-02 — on ne les interroge plus.)
+        val candidats = (listOf("trakx.lol", hoteOrigine, "flixeo.xyz"))
+            .filterNotNull().distinct()
+            .map { h -> if (h == hoteOrigine) link else link.replace(Regex("""^(https?://)[^/]+"""), "$1$h") }
+
+        var resolvedUrl = link
+        var derniereErreur: String? = null
+        var delais = 0
+        val videoIntrouvable = java.util.concurrent.atomic.AtomicBoolean(false)
+        for (depart in candidats) {
+            val r = try {
+                resoudre(client, depart, videoIntrouvable)
+            } catch (e: java.io.IOException) {
+                // Relais injoignable / qui ne répond pas (ex. trakx.lol/viper/ pend indéfiniment,
+                //   mesuré au curl le 2026-11-02). On passe au nom suivant, mais pas plus de deux
+                //   fois : au-delà, c'est le relais entier qui est en panne, inutile d'attendre.
+                derniereErreur = "pas de sortie ($depart : ${e.javaClass.simpleName} ${e.message})"
+                Log.d("RedirectProxy", "relais $depart : $derniereErreur")
+                if (++delais >= 2) break
+                continue
+            }
+            val pub = Regex("""(?i)//click-v\d+\.|clck\.com""").containsMatchIn(r)
+            val encoreRelais = r == depart || RELAIS.any { r.contains(it, ignoreCase = true) }
+            if (!pub && !encoreRelais) { resolvedUrl = r; derniereErreur = null; break }
+            derniereErreur = if (pub) "publicité ($r)" else "pas de sortie ($r)"
+            Log.d("RedirectProxy", "relais $depart : $derniereErreur")
+        }
+
+        Log.d("RedirectProxy", "Resolved: $link -> $resolvedUrl")
+
+        if (derniereErreur != null) {
+            if (videoIntrouvable.get()) {
+                // Message calé sur Extractor.classifyError (« video not found ») → lien mort signalé.
+                throw Exception("Redirect proxy: video not found - le relais ne connaît plus cette vidéo ($link)")
+            }
+            if (derniereErreur.startsWith("publicité")) {
+                throw Exception("Redirect proxy : renvoie vers une publicité au lieu de la vidéo ${derniereErreur.removePrefix("publicité ")}")
+            }
+            throw Exception("Redirect proxy failed: $link -> ${derniereErreur.removePrefix("pas de sortie (").removeSuffix(")")}")
+        }
+
+        return Extractor.extract(resolvedUrl)
+    }
+
+    /** Suit le relais depuis `link` (quelques sauts) et renvoie l'adresse de sortie, ou `link`. */
+    private suspend fun resoudre(
+        client: OkHttpClient,
+        link: String,
+        videoIntrouvable: java.util.concurrent.atomic.AtomicBoolean,
+    ): String {
+        return withContext(Dispatchers.IO) {
             var courant = link
             var url = link
             // Quelques sauts suffisent largement pour sortir du relais ; on s'arrête dès
@@ -61,7 +128,9 @@ class KakaflixExtractor : Extractor() {
                     .url(courant)
                     .header(
                         "User-Agent",
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                        // 2026-11-02 : avec un navigateur d'ORDINATEUR, flixeo renvoie vers une pub ;
+                        //   un Chrome de téléphone n'y a pas eu droit (mesuré au curl).
+                        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
                     )
                     .header("Referer", "https://www.frenchstream.re/")
                     .build()
@@ -70,26 +139,29 @@ class KakaflixExtractor : Extractor() {
                     reponse.header("Location")?.let { entete ->
                         // `Location` peut être relatif : on le résout sur l'URL courante.
                         courant.toHttpUrlOrNull()?.resolve(entete)?.toString() ?: entete
+                    } ?: run {
+                        // 2026-11-02 : flixeo.xyz répond 200 avec une page « Loading… » qui redirige
+                        //   en JavaScript (window.location.replace('…?ch=1&id=…&js=<jeton>')).
+                        val corps = reponse.body?.string().orEmpty().take(4000)
+                        // Diagnostic (2026-11-02) : ce que répond le relais quand il ne redirige pas.
+                        Log.d("RedirectProxy", "pas de Location : HTTP ${reponse.code}, ${corps.length} car. « ${corps.replace(Regex("\\s+"), " ").take(220)} »")
+                        // 2026-11-02 (banc Inception) : « No video found with that id » = le relais
+                        //   ne connaît plus cette vidéo → lien mort, pas une panne.
+                        //   (variante française vue le même jour : « Aucune vidéo avec cet ID ».)
+                        if (Regex("""(?i)no video found|aucune vid[ée]o avec""").containsMatchIn(corps)) videoIntrouvable.set(true)
+                        Regex("""location\.replace\(\s*['"]([^'"]+)['"]""").find(corps)?.groupValues?.get(1)
+                            ?.let { courant.toHttpUrlOrNull()?.resolve(it)?.toString() ?: it }
                     }
-                } ?: return@repeat
+                // 2026-11-02 : sans redirection ni script, inutile de redemander 4 fois la même
+                //   page (on l'a vu sur un HTTP 500 du relais) : on rend la main tout de suite.
+                } ?: return@withContext url
 
                 url = suivant
                 courant = suivant
-                val horsRelais = !suivant.contains("kokoflix.lol", true) &&
-                    !suivant.contains("kakaflix.lol", true)
+                val horsRelais = RELAIS.none { suivant.contains(it, true) }
                 if (horsRelais) return@withContext suivant
             }
             url
         }
-
-        Log.d("RedirectProxy", "Resolved: $link -> $resolvedUrl")
-
-        if (resolvedUrl == link ||
-            resolvedUrl.contains("kokoflix.lol", ignoreCase = true) ||
-            resolvedUrl.contains("kakaflix.lol", ignoreCase = true)) {
-            throw Exception("Redirect proxy failed: $link -> $resolvedUrl")
-        }
-
-        return Extractor.extract(resolvedUrl)
     }
 }

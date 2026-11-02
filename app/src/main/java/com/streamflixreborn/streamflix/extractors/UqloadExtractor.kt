@@ -68,7 +68,13 @@ class UqloadExtractor : Extractor() {
         }
     }
 
-    override suspend fun extract(link: String): Video = withContext(Dispatchers.IO) {
+    override suspend fun extract(lienBrut: String): Video = withContext(Dispatchers.IO) {
+        // 2026-11-02 (banc Monte-Cristo, Wiflix « uqload » sur uqload.to, vérifié depuis le PC) :
+        //   uqload.to n'a plus d'adresse DNS, mais le MÊME identifiant est servi par uqload.vc
+        //   (page complète avec le lecteur). Les identifiants Uqload sont portables : on réécrit
+        //   les domaines morts vers le domaine actuel au lieu d'échouer sur « embed fetch failed ».
+        val link = lienBrut.replace(Regex("""(?i)^https?://(?:www\.)?uqload\.to/"""), "https://uqload.vc/")
+        if (link != lienBrut) Log.d(TAG, "domaine mort réécrit : $lienBrut → $link")
         Log.d(TAG, "extract() link=$link")
         val embedResult = fetchEmbedViaCronet(link)
             ?: fetchEmbedViaOkHttpDoH(link)
@@ -132,6 +138,12 @@ class UqloadExtractor : Extractor() {
             //   le 931 est un vrai lien supprime (identique tel + Chromecast),
             //   pas un blocage device. Le fallback multi-miroirs gere le reste.
             Log.w(TAG, "Uqload embed sans source (${fullHtml.length}b) -> miroir mort, skip rapide")
+            // 2026-11-02 (banc Inception, vérifié depuis le PC) : la page dit « File is no longer
+            //   available as it expired or has been deleted » → c'est un lien MORT (classé
+            //   dead-content par Extractor.classifyError → signalé à la base), pas un échec d'analyse.
+            if (Regex("""(?i)no longer available|has been deleted|file not found|file was deleted|locked by administrator""").containsMatchIn(fullHtml)) {
+                throw Exception("Uqload: video not found - file removed (expired or deleted)")
+            }
             throw Exception("Uqload: could not extract source URL from embed page")
         }
         val isHls = sourceUrl.contains(".m3u8", ignoreCase = true)
@@ -239,11 +251,18 @@ class UqloadExtractor : Extractor() {
                 .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
                 .build()
             client.newCall(req).execute().use { resp ->
+                // 2026-11-02 : même règle que côté Cronet — embed redirigé vers l'accueil = vidéo supprimée.
+                val adresseFinale = resp.request.url.toString()
+                if (resp.isSuccessful && !adresseFinale.contains("embed-", ignoreCase = true)) {
+                    throw VideoSupprimeeUqload("Uqload: video not found - embed redirigé vers l'accueil ($adresseFinale)")
+                }
                 val setCookies = resp.headers("Set-Cookie").joinToString("; ") { it.substringBefore(";").trim() }
                 val body = resp.body?.string()
                 Log.d(TAG, "Embed via OkHttp+DoH: code=${resp.code} bytes=${body?.length ?: 0}")
                 if (!resp.isSuccessful || body == null) null else Pair(body, setCookies)
             }
+        } catch (e: VideoSupprimeeUqload) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "OkHttp+DoH embed fetch failed: ${e.message}")
             null
@@ -294,6 +313,13 @@ class UqloadExtractor : Extractor() {
                 Log.e(TAG, "Cronet embed HTTP $code body=$errBody")
                 return null
             }
+            // 2026-11-02 (banc Jujutsu Kaisen, uqload.bz/embed-… vérifié depuis le PC) : la page
+            //   d'embed d'une vidéo supprimée REDIRIGE vers l'accueil (uqload.vc/?utm_source=mirror_bz)
+            //   → plus de « embed- » dans l'adresse finale = vidéo supprimée (dead-content).
+            val adresseFinale = conn.url?.toString().orEmpty()
+            if (adresseFinale.isNotBlank() && !adresseFinale.contains("embed-", ignoreCase = true)) {
+                throw VideoSupprimeeUqload("Uqload: video not found - embed redirigé vers l'accueil ($adresseFinale)")
+            }
             val cookieParts = mutableListOf<String>()
             for (i in 0 until 50) {
                 val key = conn.getHeaderFieldKey(i) ?: continue
@@ -307,6 +333,8 @@ class UqloadExtractor : Extractor() {
             val cookies = cookieParts.joinToString("; ")
             val html = conn.inputStream.bufferedReader().use { it.readText() }
             return Pair(html, cookies)
+        } catch (e: VideoSupprimeeUqload) {
+            throw e
         } catch (e: Exception) {
             // Timeout / reset pendant la lecture : on renvoie null pour que
             //   extract() bascule sur le fallback OkHttp+DoH au lieu de crasher.
@@ -316,4 +344,7 @@ class UqloadExtractor : Extractor() {
             try { conn.disconnect() } catch (_: Exception) {}
         }
     }
+
+    /** 2026-11-02 : vidéo supprimée reconnue AVANT la lecture du corps (redirection vers l'accueil). */
+    class VideoSupprimeeUqload(message: String) : Exception(message)
 }

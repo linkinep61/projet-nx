@@ -1698,7 +1698,8 @@ class PlayerViewModel(
                 if (!lectureDemarree && !coeurDejaLance) {
                     val favoris = favorisDuProvider()
                     val coeur = if (favoris.isEmpty()) null else fresh.firstOrNull {
-                        com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(it) in favoris
+                        // 2026-11-03 : + cœurs « hébergeur » de « Gérer les sources ».
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.correspondFavori(it, favoris)
                     }
                     if (coeur != null) {
                         // Lot tardif (un serveur a déjà été choisi) → il faut un jeton pour
@@ -2198,8 +2199,8 @@ class PlayerViewModel(
         fun isFav(s: Video.Server): Boolean {
             if (favorites.isEmpty()) return false
             // 2026-07-11 : clé LANGUE-AWARE ("vidmoly:vf" ≠ "vidmoly:vostfr")
-            val fk = com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(s)
-            return fk in favorites
+            // 2026-11-03 : + cœurs « hébergeur » posés dans « Gérer les sources ».
+            return com.streamflixreborn.streamflix.utils.ExtractorRanker.correspondFavori(s, favorites)
         }
 
         fun bucket(s: Video.Server): Int {

@@ -44,11 +44,6 @@ class MixDropExtractor : Extractor() {
         Regex("^md[3bfyz][a-z0-9]*\\.[a-z0-9]+", RegexOption.IGNORE_CASE)
     )
 
-    companion object {
-        private const val DEFAULT_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    }
-
     override suspend fun extract(link: String): Video {
         val service = Extractor.createJsoupService<Service>(mainUrl)
 
@@ -71,7 +66,14 @@ class MixDropExtractor : Extractor() {
 
         val srcRegex = Regex("""wurl.*?=.*?"(.*?)";""")
         val sourceUrl = srcRegex.find(script)?.groupValues?.get(1)
-            ?: throw Exception("Source not found")
+            ?: run {
+                // 2026-11-02 (banc Dune 2, mxdrop.click vérifié depuis le PC) : « WE ARE SORRY -
+                //   We can't find the video you are looking for » → lien MORT, pas un raté d'analyse.
+                if (Regex("""(?i)can't find the video|we are sorry|file not found|has been removed""").containsMatchIn(html)) {
+                    throw Exception("MixDrop: video not found - file removed (we can't find the video)")
+                }
+                throw Exception("Source not found")
+            }
 
         val finalUrl = when {
             sourceUrl.startsWith("//") -> "https:$sourceUrl"
@@ -79,10 +81,14 @@ class MixDropExtractor : Extractor() {
             else -> "https://$sourceUrl"
         }
 
+        // 2026-11-02 : le jeton (s=…&e=…) du CDN mxcontent est lié au User-Agent qui a chargé la
+        //   page embed. Or sharedClient écrase l'UA des @Headers (Chrome 124) par
+        //   Extractor.DEFAULT_USER_AGENT (Chrome 131) → le lecteur doit renvoyer CE même UA,
+        //   sinon 403 systématique (vérifié depuis le PC : jeton 131 + UA 124 = 403, + UA 131 = 206).
         return Video(
             source = finalUrl,
             headers = mapOf(
-                "User-Agent" to DEFAULT_USER_AGENT
+                "User-Agent" to Extractor.DEFAULT_USER_AGENT
             ),
             extraBuffering = true
         )

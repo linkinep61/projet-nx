@@ -86,6 +86,12 @@ class VidHideExtractor: Extractor() {
 
         if (packedJS == null) {
             Log.e(TAG, "Packed JS not found! HTML preview: ${source.toString().take(500)}")
+            // 2026-11-02 (banc Breaking Bad, minochinos.com → callistanise.com, vérifié depuis le
+            //   PC) : « File is no longer available as it expired or has been deleted » → lien MORT
+            //   (dead-content → signalé à la base), pas un script introuvable.
+            if (Regex("""(?i)no longer available|has been deleted|file not found|file was deleted""").containsMatchIn(source.toString())) {
+                throw Exception("VidHide: video not found - file removed (expired or deleted)")
+            }
             throw Exception("Packed JS not found")
         }
         Log.d(TAG, "Packed JS found, length=${packedJS.length}")

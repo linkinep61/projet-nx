@@ -46,7 +46,17 @@ class VidPlyExtractor : Extractor() {
 
         // Extract the pass_md5 endpoint
         val passMd5Endpoint = PASS_MD5_REGEX.find(docString)?.groupValues?.get(1)
-            ?: throw Exception("Could not find pass_md5 endpoint")
+            ?: run {
+                // 2026-11-03 (banc Lupin S3E1, Coflix Boston · Vidply) : vérifié dans le navigateur,
+                //   vidply.com renvoie vers playmogo.com « Vidéo introuvable | DoodStream » = fichier
+                //   supprimé, pas un extracteur cassé (même contrôle que DoodLaExtractor).
+                val titre = document.title().orEmpty()
+                if (titre.contains("introuvable", true) || titre.contains("not found", true) ||
+                    document.text().contains("introuvable", true) || document.text().contains("File not found", true)) {
+                    throw Exception("VidPly: video not found - file removed (page « $titre »)")
+                }
+                throw Exception("Could not find pass_md5 endpoint")
+            }
 
         // Extract the token from makePlay function
         val token = TOKEN_REGEX.find(docString)?.groupValues?.get(1)

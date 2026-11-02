@@ -16,9 +16,21 @@ class DroploadExtractor : Extractor() {
         var sharedWebView: android.webkit.WebView? = null
             private set
 
+        @Volatile
+        private var origineWebView: String? = null
+
+        // 2026-11-03 (serveur rouge « Movix · Dropload », 403 sur ds2.dropcdn.io) : dans Chrome le
+        //   flux est demandé DEPUIS la page du lecteur (Origin/Referer https://dr0pstream.com) et
+        //   passe ; notre WebView était sur file:///android_asset/blank.html (origine « null ») →
+        //   403. Elle est désormais posée sur l'adresse du lecteur (page vide, rien de chargé du site).
         @android.annotation.SuppressLint("SetJavaScriptEnabled")
-        suspend fun preparerWebViewPartagee(ua: String) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-            if (sharedWebView != null) return@withContext
+        suspend fun preparerWebViewPartagee(ua: String, origine: String? = null) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            if (sharedWebView != null && origineWebView == origine) return@withContext
+            if (sharedWebView != null) {
+                val ancienne = sharedWebView
+                sharedWebView = null
+                try { ancienne?.stopLoading(); ancienne?.destroy() } catch (_: Exception) {}
+            }
             kotlinx.coroutines.withTimeoutOrNull(5_000L) {
                 kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
                     val wv = android.webkit.WebView(com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext)
@@ -35,10 +47,15 @@ class DroploadExtractor : Extractor() {
                         }
                     }
                     sharedWebView = wv
-                    wv.loadUrl("file:///android_asset/blank.html")
+                    origineWebView = origine
+                    if (origine != null) {
+                        wv.loadDataWithBaseURL("$origine/", "<html><body></body></html>", "text/html", "utf-8", null)
+                    } else {
+                        wv.loadUrl("file:///android_asset/blank.html")
+                    }
                 }
             }
-            android.util.Log.d("DroploadExtractor", "WebView de lecture prête")
+            android.util.Log.d("DroploadExtractor", "WebView de lecture prête (origine ${origine ?: "file://"})")
         }
 
         fun releaseSharedWebView() {
@@ -47,6 +64,7 @@ class DroploadExtractor : Extractor() {
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 try { wv.stopLoading(); wv.destroy() } catch (_: Exception) {}
             }
+            origineWebView = null
         }
     }
     override val name = "Dropload"
@@ -118,7 +136,7 @@ class DroploadExtractor : Extractor() {
                     //   le lecteur passe toutes ses requêtes par cette WebView (même mécanisme que
                     //   LuluVdo / Netu, voir needsWebViewDs dans les fragments du lecteur).
                     preparerWebViewPartagee(android.webkit.WebSettings.getDefaultUserAgent(
-                        com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext))
+                        com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext), referer)
                     android.util.Log.d("DroploadExtractor", "vérification passée dans le navigateur intégré → flux du lecteur")
                     // En-têtes ESSENTIELS seulement : la WebView annonce « Android WebView 155 »
                     //   dans sec-ch-ua mais « Chrome/131 » dans User-Agent — incohérence qu'un vrai

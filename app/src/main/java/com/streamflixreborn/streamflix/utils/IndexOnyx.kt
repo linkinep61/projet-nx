@@ -253,7 +253,11 @@ object IndexOnyx {
      *  fichiers nouveaux chaque jour → 2 jours ; les autres changent peu → 7 jours (= l'ancien délai). */
     private fun ageMaxHeures(source: String): Int = if (source.equals("FileSearch", true)) 48 else 168
 
-    private fun memoriser(site: String, tmdb: String, film: Boolean, s: Int, e: Int, serveurs: List<Video.Server>) {
+    private fun memoriser(site: String, tmdb: String, film: Boolean, s: Int, e: Int, serveursBruts: List<Video.Server>) {
+        // 2026-11-02 (user : « comment empêcher l'application et la base de se contredire ») - un lien
+        //   déjà confirmé mort par la base n'est jamais renvoyé à la mémoire des serveurs.
+        val serveurs = serveursBruts.filterNot { LiensMorts.estMort(it.src) }
+        if (serveurs.isEmpty()) return
         portee.launch {
             runCatching {
                 val arr = JSONArray()

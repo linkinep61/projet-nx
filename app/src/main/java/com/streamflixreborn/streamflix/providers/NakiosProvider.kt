@@ -1434,6 +1434,12 @@ object NakiosProvider : Provider, ProviderConfigUrl {
             try {
                 com.streamflixreborn.streamflix.extractors.Extractor.extract(src)
             } catch (e: Exception) {
+                // 2026-11-02 (banc Superman) : quand l'extracteur a une VRAIE réponse (vidéo
+                //   supprimée chez l'hébergeur, relais en 429…), lire la page d'embed « en direct »
+                //   ne donne qu'un « HTTP 429 » ou un « format illisible » 25 s plus tard, et masque
+                //   le vrai verdict (donc jamais de signalement de lien mort). On ne tente la
+                //   lecture directe que si AUCUN extracteur ne connaît cet hébergeur.
+                if (e.message?.contains("No extractors found", true) != true) throw e
                 Log.w(TAG, "Extractor failed for $src, fallback to direct play: ${e.message}")
                 Video(
                     source = src,

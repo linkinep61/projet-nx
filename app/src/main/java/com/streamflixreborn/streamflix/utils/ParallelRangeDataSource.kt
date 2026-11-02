@@ -95,8 +95,14 @@ class ParallelRangeDataSource(
                 entetesReponse = r.headers.toMultimap()
             }
             if (gen != generation) throw IOException("ParallelRange : morceau d'un segment abandonné")
-            var corps = if (ouvert && r.body != null) {
-                // Plage ouverte : on ne lit que le début voulu, puis on coupe.
+            // 2026-11-02 (user : « Vidara commence directement à la fin du film ») - CAUSE : sur une
+            //   plage ouverte (« bytes=0- »), le serveur répond parfois 200 (plage ignorée). On ne lisait
+            //   que 64 Ko, puis la règle « 200 = fichier entier » posait fin = 64 Ko : la LISTE DE LECTURE
+            //   (200 Ko, 1 436 lignes) arrivait tronquée, sans marque de fin → le lecteur la prenait pour un
+            //   direct et démarrait « en bout de flux », à 1 h 03 d'un film de 1 h 59 (durée vue : 3 867 s).
+            //   Un 200 à une plage ouverte = le serveur ignore les plages : on lit alors le fichier ENTIER.
+            var corps = if (ouvert && r.code == 206 && r.body != null) {
+                // Plage ouverte honorée : on ne lit que le début voulu, puis on coupe.
                 val src = r.body!!.source()
                 src.request(taille)
                 src.readByteArray(minOf(taille, src.buffer.size))
@@ -110,7 +116,22 @@ class ParallelRangeDataSource(
             //   · 200 (Range ignoré) alors qu'on visait un morceau → on découpe la bonne tranche ;
             //   · 206 qui ne commence pas où on l'attendait → erreur (le lecteur réessaie) ;
             //   · 206 plus court que demandé (et pas la fin du fichier) → on complète le reste.
-            if (r.code == 200 && (debut > 0 || corps.size > taille)) {
+            // 2026-11-02 (user : « le serveur Vidara saute en début de lecture, devient rouge ») - relevé
+            //   au banc de test : le serveur du SON (m696yefd.s1q2105.com, fichiers passés en .woff2)
+            //   répond à « bytes=65536-131071 » par « 206 bytes 0-149459/149460 » = le fichier ENTIER
+            //   étiqueté comme une plage. On le traitait en « morceau mal placé » puis « segment
+            //   empoisonné » (410) → serveur abandonné. C'est en réalité le même cas qu'un 200 : on
+            //   découpe la bonne tranche.
+            val entier206 = r.code == 206 && r.header("Content-Range")?.let { cr ->
+                Regex("""bytes\s+0-(\d+)/(\d+)""").find(cr)?.groupValues?.let { g ->
+                    g[1].toLongOrNull()?.plus(1) == g[2].toLongOrNull() } } == true &&
+                corps.size.toLong() >= debut + 1
+            if (entier206 && debut > 0) {
+                Log.w(TAG, "fichier entier renvoyé en 206 (${corps.size} o)  tranche $debut+$taille découpée")
+                if (ecrit && fin == C.LENGTH_UNSET.toLong()) fin = corps.size.toLong()
+                val a = debut.coerceAtMost(corps.size.toLong()).toInt()
+                corps = corps.copyOfRange(a, (debut + taille).coerceAtMost(corps.size.toLong()).toInt())
+            } else if (r.code == 200 && (debut > 0 || corps.size > taille)) {
                 Log.w(TAG, "Range ignoré (HTTP 200, ${corps.size} o) → tranche $debut+$taille découpée")
                 val a = debut.coerceAtMost(corps.size.toLong()).toInt()
                 corps = corps.copyOfRange(a, (debut + taille).coerceAtMost(corps.size.toLong()).toInt())
@@ -203,7 +224,7 @@ class ParallelRangeDataSource(
     private fun amorcerSuivants(courante: String) {
         // Segments HLS seulement (« seg_…_255.woff », « segment_108.woff ») — pas les playlists ni
         //   les fichiers vidéo entiers (un MP4 « …/12345.mp4 » n'a pas de « suivant »).
-        if (!Regex("""(?i)/seg[^/]*\d+\.(woff|ts|m4s|jpg|png|html|js|css)(\?|$)""").containsMatchIn(courante)) return
+        if (!Regex("""(?i)/seg[^/]*\d+\.(woff2?|ts|m4s|jpg|png|html|js|css)(\?|$)""").containsMatchIn(courante)) return
         val m = Regex("""^(.*[_/-])(\d+)(\.[A-Za-z0-9]+)(\?.*)?$""").find(courante) ?: return
         val n = m.groupValues[2].toLongOrNull() ?: return
         val largeur = m.groupValues[2].length

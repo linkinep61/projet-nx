@@ -32,9 +32,11 @@ object CoflixMirrorDiscovery {
     private const val DISCOVERY_URL = "https://coflix.domains/"
     private const val DISCOVERY_TTL_MS = 6 * 60 * 60 * 1000L // 6h
 
-    /** Dernier domaine actif connu-bon (au 17/07/2026). Sert de défaut si la
-     *  découverte échoue (registre injoignable, HTML sans redirect_url…). */
-    const val DEFAULT_MIRROR = "https://coflix.cloud"
+    /** Dernier domaine actif connu-bon. Sert de défaut si la
+     *  découverte échoue (registre injoignable, HTML sans redirect_url…).
+     *  2026-11-03 : coflix.cloud → coflix.ac (registre : .ac actif depuis le 17/09,
+     *  .cloud « bloqué par les FAI »). */
+    const val DEFAULT_MIRROR = "https://coflix.ac"
 
     /** Registres à exclure de l'heuristique de repli (ce ne sont PAS des
      *  miroirs de contenu). */

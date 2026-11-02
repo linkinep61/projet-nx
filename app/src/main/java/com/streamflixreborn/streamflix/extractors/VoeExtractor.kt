@@ -36,13 +36,14 @@ class VoeExtractor : Extractor() {
         "https://charlestoughrace.com", "https://timmaybealready.com",
         // 2026-06-02 : domaines Voe rotating supplémentaires découverts via FS proxy
         "https://maryspecialwatch.com", "https://rebeccacostthousand.com",
-        "https://bryantenunder.com",
         // 2026-07-06 : domaines VOE courts (< 12 chars) non captés par rotatingDomain regex
         // 2026-07-12 (user « le VOE de Frembed échoue alors qu'il marche sur leur site ») :
         //   RETIRÉ "playmogo.com" — c'est en réalité du DoodStream (page = titre « DoodStream »,
         //   CDN doodcdn.io/doimg.net), déjà géré par DoodLaExtractor. Il était dans LES DEUX
         //   extracteurs → routé à tort vers VOE → « no encoded JSON ». Laisse DoodLa le prendre.
-        "https://vvide0.com"
+        // 2026-11-02 (banc Jujutsu Kaisen, vérifié depuis le PC) : même histoire pour vvide0.com,
+        //   qui redirige désormais vers playmogo.com (DoodStream) → déplacé dans DoodLaExtractor.
+        "https://bryantenunder.com"
         // PAS d'alias "kokoflix.lol" — c'est un proxy multi-host (osaka_go.php
         //   = Voe, grandline_go.php = Netu, etc.). Géré par KakaflixExtractor
         //   (proxy générique) qui résout le redirect, puis l'URL VOE réelle
@@ -129,6 +130,14 @@ class VoeExtractor : Extractor() {
         val rawEncoded = encodedString ?: encodedStringInScriptTag
         if (rawEncoded.isBlank()) {
             Log.e("VOE_EXTRACT", "No encoded data found. HTML preview: ${source.html().take(500)}")
+            // 2026-11-02 (banc de test, Frembed · VOE sur Resident Evil) : la page reçue était
+            //   « <title>404 - Not found</title> » - vidéo supprimée chez VOE, pas un extracteur
+            //   cassé. On le dit clairement (« introuvable ») pour passer tout de suite au suivant.
+            val titrePage = source.title().orEmpty()
+            if (titrePage.contains("404") || titrePage.contains("not found", ignoreCase = true) ||
+                source.text().contains("File not found", ignoreCase = true)) {
+                throw Exception("VOE: video not found - file removed (page « $titrePage »)")
+            }
             throw Exception("VOE: no encoded JSON in page (HTML changed or CF block?)")
         }
         val unwrappedEncoded = try {
@@ -191,7 +200,13 @@ class VoeExtractor : Extractor() {
         val scriptData = doc.select("script").joinToString("\n") { it.data() }
         // Match window.location.href = '...' or "..."
         val regex = Regex("""window\.location\.href\s*=\s*['"]([^'"]+)['"]""")
-        val matches = regex.findAll(scriptData).map { it.groupValues[1] }.toList()
+        // 2026-11-02 (banc Moi, moche et méchant 4, CoflixWiki « Sandratableother ») : certains
+        //   miroirs VOE renvoient d'abord une page de vérification qui saute en
+        //   `window.location.replace('…/e/<id>?ch=1&js=<jeton>')` — forme non reconnue jusque-là,
+        //   d'où « no encoded JSON » sur une vidéo pourtant vivante. On accepte les deux formes.
+        val regexReplace = Regex("""location\.replace\(\s*['"]([^'"]+)['"]""")
+        val matches = (regex.findAll(scriptData) + regexReplace.findAll(scriptData))
+            .map { it.groupValues[1] }.toList()
         // Prefer the fallback URL (the one without permanentToken logic)
         // Usually the last one or the one that's a plain URL
         return matches.lastOrNull { it.startsWith("http") }
@@ -230,12 +245,15 @@ class VoeExtractor : Extractor() {
         //     voe.sx : sans ce garde-fou on réécrirait le miroir vivant… vers voe.sx, qui
         //     nous renverrait vers le miroir — un aller-retour sans fin.
         val canonique = if (autoriserCanonique) versDomaineCanonique(url) else null
+        // 2026-11-02 : voe.sx (porte d'entrée officielle) a répondu 404 pour cet identifiant.
+        var canonique404 = false
         if (canonique != null) {
             val viaCanonique = try {
                 Extractor.createJsoupService<VoeExtractorService>("https://voe.sx", canonique)
                     .getSource(canonique)
             } catch (e: Exception) {
                 Log.w("VOE_EXTRACT", "voe.sx KO (${e.message}) → on retente l'URL d'origine")
+                if ((e as? retrofit2.HttpException)?.code() == 404) canonique404 = true
                 null
             }
             // ⚠ NE PAS exiger une page « assez grosse » ici (erreur commise le 2026-08-06,
@@ -269,6 +287,26 @@ class VoeExtractor : Extractor() {
         //   2026-10-04 : passée EN PREMIER. La requête directe sans cookies tombait presque
         //   toujours dans la boucle de 21 redirections avant d'arriver ici (2 à 6 s perdues).
         val avecCookies = chargerAvecCookies(url)
+        // 2026-11-02 (banc Moi, moche et méchant 4, sandratableother.com) : page « Loading… » qui
+        //   saute en `location.replace('…?ch=1&js=<jeton>&sid=…')`. Rejouée hors navigateur (OkHttp,
+        //   puis curl avec tous les en-têtes Chrome depuis le PC), le saut est refusé (401) ou
+        //   reboucle sur une nouvelle page « Loading… » : le jeton n'est validé que pour un vrai
+        //   moteur de navigateur. → on passe directement par le navigateur intégré, en attendant
+        //   que la vraie page (script `application/json` chiffré de VOE) soit là.
+        if (avecCookies != null && estChallengeJoken(avecCookies.html())) {
+            // Vérifié dans un vrai navigateur le 2026-11-02 : sandratableother.com n'est plus un
+            //   miroir VOE mais un domaine PARQUÉ (page « Related Searches ») ; la page « Loading… »
+            //   n'aboutit jamais. Si voe.sx a dit 404 pour cet identifiant, la vidéo est morte.
+            if (canonique404) {
+                throw Exception("VOE: video not found - voe.sx 404 et miroir abandonné (page « Loading… » sans fin)")
+            }
+            Log.d("VOE_EXTRACT", "page « Loading… » anti-robot → navigateur intégré sur $url")
+            val html = com.streamflixreborn.streamflix.utils.WebViewResolver(
+                com.streamflixreborn.streamflix.StreamFlixApp.instance
+            ).get(url, silent = true, contentMarker = "application/json", markerTimeoutMs = 14_000L)
+            Log.d("VOE_EXTRACT", "navigateur intégré : len=${html.length}")
+            return org.jsoup.Jsoup.parse(html, url)
+        }
         if (avecCookies != null && !isCloudflareWall(avecCookies.html())) return avecCookies
 
         // Requête directe gardée en SECOURS seulement (miroirs qui ne posent pas de cookie).
@@ -350,6 +388,10 @@ class VoeExtractor : Extractor() {
                 null
             }
         }
+
+    /** 2026-11-02 : page « Loading… » de vérification (jeton JWT « Joken » en `?ch=1&js=`). */
+    private fun estChallengeJoken(html: String): Boolean =
+        html.length < 3000 && html.contains("location.replace", true) && html.contains("ch=1&js=", true)
 
     /** Page de challenge / blocage Cloudflare (pas le vrai contenu VOE). */
     private fun isCloudflareWall(html: String): Boolean =

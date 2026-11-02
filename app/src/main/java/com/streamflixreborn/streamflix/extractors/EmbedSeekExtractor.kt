@@ -105,6 +105,12 @@ class EmbedSeekExtractor : Extractor() {
                 fileName = OnlyFlixResolver.dernierTitre,
             )
         }
+        // 2026-11-03 (user) : serveur muet (la page n'a même pas commencé à se charger) → la page
+        //   « avec clic » ne chargerait pas non plus : on abandonne et l'appli passe au serveur
+        //   suivant. Message SANS « not found » : ce n'est pas une vidéo supprimée.
+        if (OnlyFlixResolver.dernierSansReponse) {
+            throw Exception("EmbedSeek: serveur injoignable (aucune réponse en 30 s)")
+        }
         Log.d(TAG, "headless resolve failed → WebView overlay fallback")
         return@withContext Video(
             source = link,

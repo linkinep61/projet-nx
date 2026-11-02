@@ -51,9 +51,14 @@ class SendvidExtractor : Extractor() {
 
         val html = try {
             fastClient.newCall(request).execute().use { resp ->
+                // 2026-11-02 (banc Solo Leveling) : 404 sur la page embed = vidéo supprimée, pas
+                //   un serveur injoignable → classé dead-content (signalé à la base).
+                if (resp.code == 404 || resp.code == 410) throw VideoAbsenteSendvid("SendVid: video not found - embed HTTP ${resp.code}")
                 if (!resp.isSuccessful) throw Exception("SendVid: HTTP ${resp.code}")
                 resp.body?.string().orEmpty()
             }
+        } catch (e: VideoAbsenteSendvid) {
+            throw e
         } catch (e: Exception) {
             // Timeout/refus = origine injoignable. Message court, l'auto-switch enchaîne.
             Log.d("SendvidExtractor", "injoignable: ${e.message}")
@@ -93,7 +98,9 @@ class SendvidExtractor : Extractor() {
         }
         if (taille != null && taille in 1 until TAILLE_MIN_OCTETS) {
             Log.d("SendvidExtractor", "MP4 bouche-trou ($taille octets) → serveur HS")
-            throw Exception("SendVid: vidéo indisponible (fichier de remplacement)")
+            // 2026-11-02 : « video not found » → classé dead-content et signalé à la base (SendVid
+            //   remplace les vidéos retirées par un MP4 bouche-trou : la vidéo n'existe plus).
+            throw Exception("SendVid: video not found - vidéo indisponible (fichier de remplacement)")
         }
 
         Video(
@@ -105,4 +112,7 @@ class SendvidExtractor : Extractor() {
             ),
         )
     }
+
+    /** 2026-11-02 : vidéo absente (404/410) — à ne pas confondre avec un serveur injoignable. */
+    private class VideoAbsenteSendvid(message: String) : Exception(message)
 }

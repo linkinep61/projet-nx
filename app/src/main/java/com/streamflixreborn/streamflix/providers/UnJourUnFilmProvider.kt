@@ -143,7 +143,10 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     }
 
     fun ignoreSource(source: String, href: String): Boolean {
-        if (arrayOf("youtube.").any {
+        // 2026-11-03 (banc Mercredi S2E1) : « frembed.uno/embed/… » = le lecteur Frembed complet
+        //   (vérifié vivant dans le navigateur), déjà couvert par la source Frembed de l'appli
+        //   (4 serveurs verts sur le même épisode). Aucun extracteur ne l'ouvre → rouge en double.
+        if (arrayOf("youtube.", "frembed.").any {
                 href.contains(
                     it,
                     true

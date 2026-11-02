@@ -49,7 +49,13 @@ object CoflixSourceProvider {
      *  coflix.domains (redirect_url) — l'app suit les migrations sans release.
      *  2026-07-30 : coflix.domains redirige désormais vers **coflix.esq** (vérifié :
      *  vraie page Coflix). coflix.boston est MORT → retiré ; coflix.esq mis en tête. */
+    //  2026-11-03 (user) : le registre coflix.domains annonce **coflix.ac** (actif depuis le
+    //  17/09) ; coflix.esq y est marqué « redirige vers coflix.ac, bloqué par Cloudflare après
+    //  des DMCA » et coflix.cloud « bloqué par les FAI ». coflix.ac passe donc en tête de la
+    //  liste de secours (utilisée si le registre est injoignable) ; esq gardé derrière car il
+    //  répond encore.
     private val MIRRORS = listOf(
+        "https://coflix.ac",
         "https://coflix.esq",
         "https://coflix.cloud",
     )
@@ -595,7 +601,6 @@ object CoflixSourceProvider {
             host.contains("lulustream") -> "Lulustream"
             host.contains("voe.") || host.contains("voe-") -> "VOE"
             host.contains("vidoza") -> "Vidoza"
-            host.contains("darkibox") -> "Darkibox"
             host.contains("veev.") -> "Veev"
             host.contains("goodstream") -> "Goodstream"
             host.contains("minochinos") -> "Minochinos"

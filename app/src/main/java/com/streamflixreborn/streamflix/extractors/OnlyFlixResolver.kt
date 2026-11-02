@@ -279,6 +279,14 @@ object OnlyFlixResolver {
     @Volatile
     private var dernierRenduTue = false
 
+    /** 2026-11-03 (user : « fais-le ») — vrai si, lors de la dernière tentative, la page n'a
+     *  JAMAIS commencé à se charger (aucune réponse du serveur, constaté sur embedseek : rien
+     *  en 30 s sur l'Oppo, rien en 120 s depuis le PC). L'extracteur abandonne alors au lieu de
+     *  proposer la page « avec clic », qui ne chargerait pas davantage. Une page simplement
+     *  LENTE (commencée mais sans flux) garde le repli « clic » comme avant. */
+    @Volatile var dernierSansReponse = false
+        private set
+
     /**
      * Hôtes déjà éprouvés : `true` = répond, `false` = mort, absent = pas encore vérifié.
      *   Alimenté en arrière-plan, consultable sans bloquer depuis le fil principal.
@@ -312,10 +320,14 @@ object OnlyFlixResolver {
                     val context = StreamFlixApp.instance.applicationContext
                     dernierTitre = null   // ⚠ sinon on hériterait du nom de la vidéo précédente
                     dernierRenduTue = false
+                    dernierSansReponse = false
+                    var pageCommencee = false
                     var resolved = false
                     // Vrai dès que la page a réclamé sa configuration : elle est vivante, on
                     //   lui accorde alors le délai long (cf. la note sur le délai adaptatif).
                     var pageVivante = false
+                    // 2026-11-03 DIAGNOSTIC : instant de lancement, pour dater chaque étape.
+                    val t0Diag = System.currentTimeMillis()
                     var destroyHook: (() -> Unit)? = null
                     var attachedRoot: android.view.ViewGroup? = null
                     fun resolve(value: String?) {
@@ -439,6 +451,10 @@ object OnlyFlixResolver {
                             //   sur un autre film, Rpmvid extrait en 504 ms par la voie native.)
                             if (low.contains("/api/v1/") || low.contains("m3u8") || low.contains("/tt/") || low.contains(".txt")) {
                                 Log.d(TAG, "REQ: ${reqUrl.take(100)}")
+                            } else if (host.contains("embedseek") || host.contains("seekplayer")) {
+                                // 2026-11-03 DIAGNOSTIC (user : « savoir si ça fonctionne toujours ») —
+                                //   toutes les requêtes vers le lecteur, avec l'instant depuis le lancement.
+                                Log.d("OnlyFlixDiag", "t+${(System.currentTimeMillis() - t0Diag) / 1000}s REQ ${reqUrl.take(100)}")
                             }
                             // Signe de vie : la page a demandé sa configuration ou son leurre.
                             if (low.contains("/api/v1/") || low.contains("preload")) pageVivante = true
@@ -485,7 +501,20 @@ object OnlyFlixResolver {
                             return null
                         }
 
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            pageCommencee = true
+                            Log.d("OnlyFlixDiag", "t+${(System.currentTimeMillis() - t0Diag) / 1000}s page commencée ${url?.take(80)}")
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?
+                        ) {
+                            Log.d("OnlyFlixDiag", "t+${(System.currentTimeMillis() - t0Diag) / 1000}s HTTP ${errorResponse?.statusCode} " +
+                                "${if (request?.isForMainFrame == true) "[PAGE]" else ""} ${request?.url?.toString()?.take(90)}")
+                        }
+
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                            Log.d("OnlyFlixDiag", "t+${(System.currentTimeMillis() - t0Diag) / 1000}s page chargée ${finishedUrl?.take(80)} (vivante=$pageVivante)")
                             if (resolved || view == null) return
                             // Force le player à démarrer (→ hls.js fetch le master.m3u8 qu'on intercepte)
                             //   + poll multi-stratégie (src du media-player / video / regex DOM).
@@ -592,7 +621,13 @@ object OnlyFlixResolver {
                         override fun onReceivedError(
                             view: WebView?, request: WebResourceRequest?,
                             error: android.webkit.WebResourceError?
-                        ) { /* ignore */ }
+                        ) {
+                            // 2026-11-03 DIAGNOSTIC : erreurs réseau (délai, DNS…), page principale surtout.
+                            if (request?.isForMainFrame == true || request?.url?.host?.contains("embedseek") == true) {
+                                Log.d("OnlyFlixDiag", "t+${(System.currentTimeMillis() - t0Diag) / 1000}s ERREUR ${error?.errorCode} " +
+                                    "${error?.description} ${if (request.isForMainFrame) "[PAGE]" else ""} ${request.url?.toString()?.take(90)}")
+                            }
+                        }
 
                         /**
                          * Le moteur de rendu Chromium a été tué (mémoire, ou trop de WebViews
@@ -625,6 +660,8 @@ object OnlyFlixResolver {
                         }
                     }
                     cont.invokeOnCancellation {
+                        Log.d("OnlyFlixDiag", "t+${(System.currentTimeMillis() - t0Diag) / 1000}s ABANDON (délai) — page commencée=$pageCommencee vivante=$pageVivante")
+                        if (!pageCommencee && !resolved) dernierSansReponse = true
                         resolved = true
                         destroyHook?.invoke()
                         destroyHook = null

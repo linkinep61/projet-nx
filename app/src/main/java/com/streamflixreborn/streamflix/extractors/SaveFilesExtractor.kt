@@ -48,6 +48,13 @@ class SaveFilesExtractor : Extractor() {
         val baseUrl = URL(link).protocol + "://" + URL(link).host
         val referer = "$baseUrl/"
 
+        // 2026-11-03 (banc « Une bataille après l'autre », Wiflix · Savefiles) : la page /e/<code>
+        //   n'est plus qu'un bouton « lecture » (formulaire op=embed vers /dl). Pour un fichier
+        //   effacé, /dl répond « File is no longer available as it expired or has been deleted. »
+        //   (vérifié). Ce texte n'était pas lu → 15 s de WebView puis « Could not find stream URL ».
+        var fichierSupprime = false
+        val marqueurSupprime = Regex("""(?i)no longer available|has been deleted|file was deleted|file not found""")
+
         // Strategy 1: Quick OkHttp fetch + parse (10s max)
         val okHttpResult = withTimeoutOrNull(10_000) {
             try {
@@ -96,6 +103,10 @@ class SaveFilesExtractor : Extractor() {
                             referer = ""
                         )
                         val dlHtml = dlDoc.toString()
+                        if (dlHtml.length < 5000 && marqueurSupprime.containsMatchIn(dlDoc.text())) {
+                            fichierSupprime = true
+                            return@withTimeoutOrNull null
+                        }
                         val m3u8 = findM3u8InHtml(dlHtml)
                         if (m3u8 != null) {
                             Log.d(TAG, "M3U8 from /dl API: $m3u8")
@@ -116,6 +127,9 @@ class SaveFilesExtractor : Extractor() {
 
         if (okHttpResult != null) {
             return buildVideo(okHttpResult, referer)
+        }
+        if (fichierSupprime) {
+            throw Exception("SaveFiles: video not found - file removed (expired or deleted)")
         }
 
         // Strategy 2: WebView interception (handles JS-rendered content)

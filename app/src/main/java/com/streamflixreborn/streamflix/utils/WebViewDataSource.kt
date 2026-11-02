@@ -82,7 +82,10 @@ class WebViewDataSource(
                             var tid = setTimeout(function() { ctrl.abort(); }, ${FETCH_TIMEOUT_MS});
                             fetch('$escapedUrl', {
                                 method: 'GET',
-                                credentials: 'include',
+                                // 2026-11-03 : page posée sur l'adresse d'un lecteur (Dropload) →
+                                //   requête inter-sites comme le lecteur de Chrome, SANS cookies
+                                //   (avec cookies, le CDN refuse : « Failed to fetch »).
+                                credentials: location.protocol === 'file:' ? 'include' : 'omit',
                                 referrer: location.origin + '/',
                                 referrerPolicy: 'no-referrer-when-downgrade',
                                 signal: ctrl.signal

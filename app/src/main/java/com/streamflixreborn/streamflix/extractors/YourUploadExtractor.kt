@@ -13,7 +13,14 @@ class YourUploadExtractor : Extractor() {
 
     override suspend fun extract(link: String): Video {
         val service = Extractor.createJsoupService<YourUploadExtractorService>(mainUrl)
-        val doc = service.getSource(link.replace(mainUrl, ""))
+        val doc = try {
+            service.getSource(link.replace(mainUrl, ""))
+        } catch (e: retrofit2.HttpException) {
+            // 2026-11-02 (banc Jujutsu Kaisen, vérifié depuis le PC) : 404 « Content Restricted »
+            //   = vidéo retirée → dead-content (signalé à la base), pas une erreur HTTP banale.
+            if (e.code() == 404 || e.code() == 410) throw Exception("YourUpload: video not found - content restricted (HTTP ${e.code()})")
+            throw e
+        }
 
         // Extract JWPlayer config script
         val scriptContent = doc.select("script:containsData(jwplayerOptions)").html()

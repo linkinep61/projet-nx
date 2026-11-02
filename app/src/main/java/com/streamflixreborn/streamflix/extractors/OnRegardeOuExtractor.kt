@@ -85,6 +85,10 @@ class OnRegardeOuExtractor : Extractor() {
 
     suspend fun expand(link: String, referer: String = mainUrl, suffix: String = ""): List<Video.Server> {
         if (link.isBlank()) return emptyList()
+        // 2026-11-03 : site appelant mémorisé pour rejouer une page refusée (403) avec son Referer.
+        if (referer.startsWith("http") && !referer.startsWith(mainUrl)) {
+            refererSiteAppelant = referer.trimEnd('/') + "/"
+        }
         // ── 2026-08-05 — LE LIEN D'ENTRÉE PEUT DÉJÀ ÊTRE UN MIROIR ───────────────────────
         //   1Jour1Film livre maintenant les miroirs EN DIRECT (`bysezoxexe.com`,
         //   `dismoiceline.uns.bio`) au lieu de la page `onregardeou.site`. Dans ce cas
@@ -187,17 +191,41 @@ class OnRegardeOuExtractor : Extractor() {
         return challenge.none { h.contains(it) }
     }
 
-    /** GET de la page onregardeou (sans Referer). (code, html) ; (-1, null) = erreur réseau. */
+    // 2026-11-03 (banc Stranger Things S5E1) : sur cetaitmieuxavant.website, la page d'épisode répond
+    //   403 « Erreur 403 » SANS Referer et 200 avec le Referer de 1Jour1Film (vérifié depuis le PC,
+    //   tous jeux d'en-têtes). L'inverse de la règle du 05/09 (onregardeou.site refusait les Referer
+    //   étrangers). On garde donc l'essai sans Referer en premier et, sur un 403, on rejoue UNE fois
+    //   avec le site appelant (mémorisé par `expand`, dans le companion), avant toute mise à
+    //   l'écart de l'hôte.
+
+    /** GET de la page onregardeou (sans Referer, puis avec celui du site appelant sur un 403).
+     *  (code, html) ; (-1, null) = erreur réseau. */
     private suspend fun lirePageOnregardeou(url: String): Pair<Int, String?> = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder().url(url)
+            fun requete(referer: String?) = Request.Builder().url(url)
                 .header("User-Agent", ANDROID_CHROME_UA)
                 .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
                 .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                .apply { if (referer != null) header("Referer", referer) }
                 .build()
-            NetworkClient.default.newCall(req).execute().use { rep ->
+            val appelant = refererSiteAppelant
+            var rep = NetworkClient.default.newCall(requete(null)).execute()
+            if (rep.code == 403 && appelant != null) {
+                rep.close()
+                android.util.Log.d("OnRegardeOu", "page 403 sans Referer → nouvel essai avec $appelant")
+                rep = NetworkClient.default.newCall(requete(appelant)).execute()
+            }
+            rep.use { rep ->
                 val code = rep.code
                 val html = rep.body?.string()
+                // 2026-11-03 DIAGNOSTIC (banc : 403 sur l'Oppo, 200 depuis le PC avec les mêmes en-têtes) :
+                //   nature du refus — défi Cloudflare (cf-mitigated) ou page « Accès refusé » du site.
+                if (code != 200) {
+                    val titre = Regex("(?is)<title>(.*?)</title>").find(html ?: "")?.groupValues?.get(1)?.trim()
+                    android.util.Log.w("OnRegardeOuDiag", "page $code : cf-mitigated=${rep.header("cf-mitigated")} " +
+                        "server=${rep.header("server")} titre=« $titre » taille=${html?.length} proto=${rep.protocol} " +
+                        "ua=${rep.request.header("User-Agent")} dest=${rep.request.header("Sec-Fetch-Dest")}")
+                }
                 if (estRefusFranc(code, html)) {
                     hotesRefuses[hoteDe(url)] = System.currentTimeMillis() + REFUS_MS
                     android.util.Log.w("OnRegardeOu", "page refusée (HTTP $code) → hôte écarté 30 min : ${hoteDe(url)}")
@@ -1192,6 +1220,10 @@ class OnRegardeOuExtractor : Extractor() {
         }
 
     companion object {
+        // 2026-11-03 : partagé entre les exemplaires de l'extracteur (le provider en crée un pour
+        //   `expand`, la lecture passe par celui du registre) — voir `lirePageOnregardeou`.
+        @Volatile private var refererSiteAppelant: String? = null
+
         // UNIQUEMENT des régies pub / trackers. NE PAS mettre les hôtes vidéo
         //   (bysezoxexe, chuckle-tube, uns.bio, upbolt…) : ce sont les serveurs réels.
         private val BLOCKED_HOSTS = listOf(

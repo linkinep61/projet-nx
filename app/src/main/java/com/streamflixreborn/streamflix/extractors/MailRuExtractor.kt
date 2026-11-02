@@ -33,6 +33,8 @@ class MailRuExtractor : Extractor() {
         val responseBody = withContext(Dispatchers.IO) {
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
+                // 2026-11-02 (banc Jujutsu Kaisen) : 404 sur les métadonnées = vidéo supprimée → dead-content.
+                if (response.code == 404 || response.code == 410) throw Exception("mail.ru: video not found - metadata HTTP ${response.code}")
                 throw Exception("Failed to fetch video metadata (${response.code})")
             }
             response.body?.string()

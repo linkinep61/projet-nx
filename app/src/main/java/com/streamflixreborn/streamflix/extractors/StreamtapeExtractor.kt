@@ -41,7 +41,13 @@ class StreamtapeExtractor : Extractor() {
         val linkJustParameter = link.replace(mainUrl, "")
 
         val service = Extractor.createJsoupService<StreamtapeExtractorService>(mainUrl)
-        val source = service.getSource(linkJustParameter)
+        // 2026-11-02 (banc de test, VoirAnime · Stape) : Streamtape répond HTTP 404 avec une page
+        //   « Video not found! Maybe it got deleted by the creator! » (vérifié depuis le PC du user).
+        //   C'est une vidéo supprimée, pas un extracteur cassé : on le dit clairement.
+        val source = try { service.getSource(linkJustParameter) } catch (e: retrofit2.HttpException) {
+            if (e.code() == 404) throw Exception("Streamtape: video not found - deleted by the creator (HTTP 404)")
+            throw e
+        }
 
         // Streamtape uses rotating element IDs: 'botlink', 'norobotlink', 'ideoolink', etc.
         // Try multiple regex patterns for different Streamtape page versions

@@ -123,7 +123,11 @@ open class StreamWishExtractor : Extractor() {
     protected var referer = ""
     val context = StreamFlixApp.instance.applicationContext
 
-    override suspend fun extract(link: String): Video {
+    override suspend fun extract(lienBrut: String): Video {
+        // 2026-11-02 (banc Inception, wishonly.site/d/<id>) : « /d/ » est la page de
+        //   TÉLÉCHARGEMENT (pas de script jwplayer → « Can't retrieve script ») ; le lecteur est
+        //   sur « /e/<id> » (ou « /f/ » pour la fiche). On normalise avant de charger.
+        val link = lienBrut.replace(Regex("""(?i)^(https?://[^/]+)/(?:d|f)/"""), "$1/e/")
         if (referer.isEmpty()) {
             val uri = Uri.parse(link)
             if (uri.scheme != null && uri.host != null) {
@@ -141,7 +145,22 @@ open class StreamWishExtractor : Extractor() {
         ).findAll(document.toString())
             .mapNotNull { it.groupValues[1].let { js -> JsUnpacker(js).unpack() } }
             .firstOrNull { it.contains("m3u8") }
-            ?: throw Exception("Can't retrieve script")
+            ?: run {
+                // 2026-11-02 (banc Inception, wishonly.site vérifié depuis le PC) : « File is no
+                //   longer available as it expired or has been deleted » → lien MORT (dead-content,
+                //   signalé à la base), pas un script introuvable.
+                val page = document.toString()
+                if (Regex("""(?i)no longer available|has been deleted|file not found|file was deleted""").containsMatchIn(page)) {
+                    throw Exception("StreamWish: video not found - file removed (expired or deleted)")
+                }
+                // 2026-11-02 (banc Breaking Bad, wishonly.site/e/… vérifié depuis le PC, quel que
+                //   soit le Referer) : « Video embed restricted for this domain » = l'hébergeur
+                //   refuse l'intégration hors du site d'origine. Injouable, on le dit clairement.
+                if (page.contains("embed restricted", true)) {
+                    throw Exception("StreamWish: embed restricted for this domain (refusé par l'hébergeur)")
+                }
+                throw Exception("Can't retrieve script")
+            }
 
         val source = Regex("""(?:["']?hls(\d*)["']?|["']?file["']?)\s*[:=]\s*["']((?:https?://|/)[^"']+\.m3u8[^"']*)["']""")
             .findAll(script)

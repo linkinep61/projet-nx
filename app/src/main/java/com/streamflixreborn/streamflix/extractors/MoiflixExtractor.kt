@@ -80,8 +80,24 @@ open class MoiflixExtractor : Extractor() {
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     override suspend fun extract(link: String): Video {
+        // 2026-11-03 (user : « on peut le faire échouer tout de suite… vérifier s'il y a au moins une
+        //   vidéo fonctionnelle ») — XTREMESTREAM : ÉCHEC IMMÉDIAT.
+        //   · Leur lecteur ne lit pas les morceaux de la playlist (adresses leurres) : ftk_engine.js
+        //     demande un jeton par morceau, télécharge une version chiffrée (…/720_enc/…) et la
+        //     déchiffre dans le navigateur (WebCrypto). Notre lecteur ne peut pas faire ça.
+        //   · Vérifié dans le navigateur, SUR LE SITE Coflix : Superman, Mission: Impossible (lecteur1)
+        //     et The Last of Us 1x1 (lecteur2, 4K) restent figés, tous les morceaux en 503.
+        //   On n'attend donc plus 45-60 s de WebView pour rien. Message volontairement SANS
+        //   « not found » : ce n'est pas une vidéo supprimée (rien ne part en liste noire).
+        //   À revoir si un jour le lecteur fonctionne de nouveau sur leur site.
+        if (link.contains("xtremestream.", ignoreCase = true)) {
+            throw Exception("Xtremestream: lecteur protégé (morceaux chiffrés), non pris en charge")
+        }
         val rawUrl = extractByIntercepting(link)
             ?: throw Exception("Moiflix: Could not find video source in $link")
+        if (rawUrl.contains("xtremestream.", ignoreCase = true)) {
+            throw Exception("Xtremestream: lecteur protégé (morceaux chiffrés), non pris en charge")
+        }
 
         // MP4 direct (emmmmbed → Rumble CDN) : préfixe "mp4::"
         if (rawUrl.startsWith("mp4::")) {
@@ -280,7 +296,16 @@ open class MoiflixExtractor : Extractor() {
                         }
                     }
 
-                    webView.loadUrl(url, mapOf("Referer" to "https://moiflix.com/"))
+                    // 2026-11-02 (banc : « Moiflix - Vidéo HD et 1080p » chez Movix et « MP4 Direct » chez
+                    //   Coflix Boston en « extraction > 45 s » sur presque chaque titre). Vérifié depuis le
+                    //   PC : l'index.php de xtremestream répond « You can't access the video directly »
+                    //   avec un Referer moiflix.com, movix.zip ou google.com, et sert le lecteur avec un
+                    //   Referer coflix.boston, lecteurvideo.com ou son PROPRE domaine. Lien xtremestream
+                    //   ouvert directement → on se présente comme venant de l'hébergeur lui-même.
+                    val referer = if (url.contains("xtremestream.", ignoreCase = true))
+                        Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1)?.plus("/") ?: "https://moiflix.com/"
+                    else "https://moiflix.com/"
+                    webView.loadUrl(url, mapOf("Referer" to referer))
 
                     cont.invokeOnCancellation {
                         resolved = true

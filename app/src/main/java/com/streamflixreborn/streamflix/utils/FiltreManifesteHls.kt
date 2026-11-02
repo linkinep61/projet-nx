@@ -80,7 +80,7 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
         } else {
             texte
         }
-        val octets = filtre.toByteArray(Charsets.UTF_8)
+        val octets = ivExplicites(filtre, dataSpec.uri).toByteArray(Charsets.UTF_8)
         donnees = octets
         position = 0
         return octets.size.toLong()
@@ -123,6 +123,52 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
         if (uri.path?.endsWith(".ts", ignoreCase = true) != true) return dataSpec
         if (runCatching { uri.getQueryParameter("gk") }.getOrNull() != null) return dataSpec
         return dataSpec.withUri(uri.buildUpon().appendQueryParameter("gk", cle).build())
+    }
+
+    /**
+     * 2026-11-03 (banc : Livavid / Nakios « Premium 1 » — le début joue, le saut à 90 % reste
+     *   bloqué, 56 s en mémoire mais aucune image) — IV DES MORCEAUX CHIFFRÉS.
+     *
+     * Mesuré sur le flux tnmr.org (famille Lulustream) : une seule clé AES-128 SANS IV, morceaux
+     * nommés `seg-N-…`, mais la liste a des TROUS (seg-49, 653, 732, 756 absents). L'hébergeur
+     * chiffre chaque morceau avec IV = N (son numéro), alors que la norme HLS — que suit
+     * ExoPlayer — prend IV = numéro de séquence (= position dans la liste). Les deux divergent
+     * après le premier trou. Preuve sur seg-699 (position 697) : seul l'IV 699 donne une table
+     * PAT valide (CRC bon) ; 696, 697 et 698 non.
+     * En lecture continue ça passe (l'extracteur garde la PAT du 1er morceau) ; après un saut,
+     * il relit la PAT du morceau, mal déchiffrée → plus aucun échantillon.
+     * On écrit donc l'IV de chaque morceau explicitement, UNIQUEMENT dans ce cas précis
+     * (1 clé AES-128 sans IV, tous les morceaux `seg-N`, numérotation alignée au départ puis
+     * décalée). Toute autre liste ressort intacte.
+     */
+    private fun ivExplicites(texte: String, uri: Uri): String {
+        if (!texte.contains("#EXT-X-KEY")) return texte
+        val lignes = texte.lines()
+        val cles = lignes.filter { it.startsWith("#EXT-X-KEY") }
+        if (cles.size != 1) return texte
+        val cle = cles[0].trimEnd()
+        if (!cle.contains("METHOD=AES-128") || cle.contains("IV=", ignoreCase = true)) return texte
+        val seq = lignes.firstOrNull { it.startsWith("#EXT-X-MEDIA-SEQUENCE:") }
+            ?.substringAfter(':')?.trim()?.toLongOrNull() ?: 0L
+        val numero = Regex("""^seg-(\d+)-""")
+        val nums = lignes.filter { it.isNotBlank() && !it.startsWith("#") }.map { l ->
+            numero.find(l.substringBefore('?').substringAfterLast('/'))?.groupValues?.get(1)?.toLongOrNull()
+                ?: return texte
+        }
+        if (nums.isEmpty() || nums.first() != seq) return texte
+        if (nums.withIndex().all { (i, n) -> n == seq + i }) return texte
+        val sortie = StringBuilder(texte.length + nums.size * (cle.length + 40))
+        var i = 0
+        for (l in lignes) {
+            if (l.startsWith("#EXT-X-KEY")) continue
+            if (l.isNotBlank() && !l.startsWith("#")) {
+                sortie.append(cle).append(",IV=0x").append("%032x".format(nums[i])).append('\n')
+                i++
+            }
+            sortie.append(l).append('\n')
+        }
+        Log.d(TAG, "IV explicites : ${nums.size} morceaux, numérotation à trous (${nums.last()} pour ${nums.size}) — ${uri.host}")
+        return sortie.toString()
     }
 
     /** Enveloppe une fabrique existante sans rien changer à sa configuration. */

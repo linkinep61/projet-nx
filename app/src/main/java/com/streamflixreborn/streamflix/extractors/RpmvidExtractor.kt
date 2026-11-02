@@ -39,6 +39,10 @@ class RpmvidExtractor : Extractor() {
     override val aliasUrls = listOf("https://cubeembed.rpmvid.com", "https://bummi.upns.xyz", "https://loadm.cam", "https://anibum.playerp2p.online", "https://pelisplus.upns.pro", "https://pelisplus.rpmstream.live", "https://pelisplus.strp2p.com", "https://flemmix.upns.pro", "https://moflix.rpmplay.xyz", "https://moflix.upns.xyz", "https://flix2day.xyz", "https://primevid.click",
         "https://totocoutouno.rpmlive.online", "https://dismoiceline.uns.bio", "https://doremifasol.ezplayer.me", "https://marcus.p2pstream.vip","https://animeav1.uns.bio",
         "https://serix.upns.live",
+        // 2026-11-03 (banc « Une bataille après l'autre », 1Jour1Film · OnRegardeOu) : même lecteur
+        //   `/#<code>` + `/api/v1/video`. Ce jour-là toute la famille Rpmvid ne répond pas
+        //   (flemmix « en maintenance », coflix.upn.one et totocoutouno en délai dépassé).
+        "https://barbapapa.p2pstream.online",
         "https://coflix.upn.one",
         "https://flemmix.farm", "https://flemmix.rpmlive.online", "https://flemmix.upns.xyz", "https://flemmix.rpmstream.live", "https://flemmix.strp2p.com", "https://flemmix.ezplayer.me", "https://flemmix.uns.bio", "https://flemmix.upns.live", "https://flemmix.upn.one", "https://flemmix.p2pstream.vip", "https://flemmix.prof")
 
@@ -71,13 +75,21 @@ class RpmvidExtractor : Extractor() {
         val service = Extractor.createGsonService<Service>(mainLink)
         val apiUrl = "$mainLink/api/v1/video"
 
-        val hexResponse = service.get(
-            url = apiUrl,
-            referer = mainLink,
-            id = id,
-            w = "1920",
-            h = "1080",
-        )
+        // 2026-11-02 (banc de test : Rpmvid « HTTP 400 » sur 1Jour1Film et Movix) - l'API répond
+        //   400 {"message": "player is not recognized"}. Vérifié : leur PROPRE lecteur, lancé dans
+        //   une page cachée de l'appli, appelle la même adresse, reçoit le même refus et ne lit rien
+        //   (coflix.upn.one, totocoutouno.rpmlive.online). Ce lecteur est donc désactivé chez
+        //   l'hébergeur : on le déclare mort tout de suite (« introuvable ») au lieu d'une erreur
+        //   d'extracteur, pour que l'appli passe aussitôt au serveur suivant.
+        val hexResponse = try {
+            service.get(url = apiUrl, referer = mainLink, id = id, w = "1920", h = "1080")
+        } catch (e: retrofit2.HttpException) {
+            // 2026-11-03 (user) : ce 400 est un REFUS DU LECTEUR, pas une preuve que la vidéo est
+            //   supprimée (le même jour, toute la famille Rpmvid était en panne / « en maintenance »).
+            //   Formulé SANS « video not found » pour ne jamais partir au signalement des liens morts.
+            if (e.code() == 400) throw Exception("Rpmvid: lecteur refusé par l'hébergeur (HTTP 400 « player is not recognized »)")
+            throw e
+        }
 
         val decryptedJson = decryptHexPayloadSafe(hexResponse)
         val json = JsonParser.parseString(decryptedJson).asJsonObject

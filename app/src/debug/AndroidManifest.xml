@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-11-02 (user : « trouver un moyen de tester tous les serveurs plus facilement, au lieu de
+     s'embêter avec l'interface ») - BANC DE TEST DES SERVEURS. Version de TEST uniquement : ce
+     manifeste n'existe que dans le source set « debug », il n'entre jamais dans les APK publiés.
+     Lancement depuis le PC : outils/tester_serveurs.ps1 (adb am start + extras). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name="com.streamflixreborn.streamflix.banc.BancTestActivity"
+            android:label="Banc de test"
+            android:exported="true"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="stateHidden|adjustResize"
+            android:theme="@android:style/Theme.Material.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -207,6 +207,9 @@ class NetuExtractor : Extractor() {
             .build()
 
         val pageHtml = client.newCall(pageRequest).execute().use { response ->
+            // 2026-11-02 (banc Breaking Bad, younetu.org/stream/… en 404 vérifié depuis le PC) :
+            //   404/410 = vidéo supprimée → lien mort (dead-content, signalé à la base).
+            if (response.code == 404 || response.code == 410) throw Exception("Netu: video not found - page removed (HTTP ${response.code})")
             if (!response.isSuccessful) throw Exception("Netu page error: ${response.code}")
             response.body?.string() ?: throw Exception("Empty Netu page")
         }
@@ -243,7 +246,14 @@ class NetuExtractor : Extractor() {
         val hash = Regex("""(?:var|let|const)\s+hash\s*=\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
             ?: Regex("""data-hash\s*=\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
             ?: Regex("""hash\s*:\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
-            ?: throw Exception("Could not find hash in Netu page")
+            ?: run {
+                // 2026-11-02 (banc Dune 2, waaw.to vérifié depuis le PC) : « We can't find the file
+                //   you are looking for. It maybe got deleted by the owner… » → lien MORT.
+                if (Regex("""(?i)can't find the file|got deleted|removed due|file not found""").containsMatchIn(pageHtml)) {
+                    throw Exception("Netu: video not found - file removed (deleted by the owner or copyright)")
+                }
+                throw Exception("Could not find hash in Netu page")
+            }
         val iss = Regex("""(?:var|let|const)\s+iss\s*=\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
 
         val formBody = FormBody.Builder().add("hash", hash).add("r", embedUrl)

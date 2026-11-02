@@ -56,7 +56,10 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
     //   → simple bascule de domaine. L'auto-redirection runtime trouvait déjà casa ; on remet
     //   juste un défaut VIVANT (frembed.asia NXDOMAIN = 0 catalogue au 1er boot sinon).
     //   Les anciens domaines morts sont ignorés dans le cache pour forcer la bascule.
-    private val DEAD_DOMAINS = listOf("audin213", "frembed.bond", "frembed.hair", "frembed.cyou", "frembed.asia")
+    // 2026-11-02 (user) : frembed.asia est de nouveau VIVANT — c'est le site de redirection de
+    //   Frembed (302 → frembed.uno, comme frembed.bar et frembed.casa, vérifié depuis le PC).
+    //   Retiré des domaines morts.
+    private val DEAD_DOMAINS = listOf("audin213", "frembed.bond", "frembed.hair", "frembed.cyou")
 
     override val defaultPortalUrl: String = "https://frembed.bar/"
 

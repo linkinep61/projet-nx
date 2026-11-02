@@ -4995,6 +4995,9 @@ class PlayerTvFragment : Fragment() {
                     || src.contains("luluvid") || src.contains("luluvdoo") || src.contains("lulucdn")
                     || wvUrl.contains("luluvdo") || wvUrl.contains("lulustream")
                     || wvUrl.contains("luluvid") || wvUrl.contains("luluvdoo")
+                    // 2026-11-02 (banc Superman, « Livavid » / « Premium 1 HD » en 403) : miroirs
+                    //   LuluStream absents d'ici → flux data: lu sans la WebView → segments refusés.
+                    || wvUrl.contains("livavid") || wvUrl.contains("lulust.com")
         }
 
         /** Dropload : flux dropcdn lu par la WebView partagée de DroploadExtractor. */
@@ -5529,7 +5532,9 @@ class PlayerTvFragment : Fragment() {
                     requireContext(),
                     com.streamflixreborn.streamflix.utils.WebViewDataSource.Factory(wv)
                 )
-                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(webViewDsFactory))
+                // 2026-11-03 : + FiltreManifesteHls (IV explicites des morceaux tnmr.org, cf. ivExplicites).
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(com.streamflixreborn.streamflix.utils.FiltreManifesteHls.Fabrique(
+                        com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(webViewDsFactory)))
                     .createMediaSource(mediaItem)
                 player.setMediaSource(hlsSource)
                 usingWebView = true
@@ -6656,6 +6661,8 @@ class PlayerTvFragment : Fragment() {
                                 is Video.Type.Episode -> database.episodeDao().getById(videoType.id)
                             }
 
+                            android.util.Log.i("REPRISE", "sauvegarde ${videoType.javaClass.simpleName} pos=${currentPos / 1000}s durée=${if (duration > 0) duration / 1000 else duration}s " +
+                                "commencé=$hasStarted fini=$hasFinished vraimentFini=$hasReallyFinished serveur=${currentServer?.name}")
                             when {
                                 hasStarted && !hasFinished -> {
                                     watchItem?.isWatched = false
@@ -6663,6 +6670,7 @@ class PlayerTvFragment : Fragment() {
                                     watchItem?.watchHistory = WatchItem.WatchHistory(
                                         lastEngagementTimeUtcMillis = System.currentTimeMillis(),
                                         lastPlaybackPositionMillis = currentPos,
+                                    // (journal de diagnostic 2026-11-02, cf. REPRISE ci-dessous)
                                         durationMillis = duration,
                                     )
                                 }
@@ -7380,6 +7388,8 @@ class PlayerTvFragment : Fragment() {
                     val lastPlaybackPositionMillis = watchItem?.watchHistory
                         ?.let { it.lastPlaybackPositionMillis - 10.seconds.inWholeMilliseconds }
 
+                    android.util.Log.i("REPRISE", "reprise ${videoType.javaClass.simpleName} à ${(lastPlaybackPositionMillis ?: 0) / 1000}s " +
+                        "(enregistré ${watchItem?.watchHistory?.lastPlaybackPositionMillis?.div(1000)}s sur ${watchItem?.watchHistory?.durationMillis?.div(1000)}s, vu=${watchItem?.isWatched})")
                     kotlinx.coroutines.withContext(Dispatchers.Main) {
                         player.seekTo(lastPlaybackPositionMillis ?: 0)
                     }
@@ -7434,7 +7444,9 @@ class PlayerTvFragment : Fragment() {
         }
 
         private fun ExoPlayer.hasFinished(): Boolean {
-            return (this.currentPosition > (this.duration * 0.90))
+            // 2026-11-02 : durée inconnue (C.TIME_UNSET, négative) → 0,9 × durée est négatif et TOUT passait
+            //   pour « fini » (film marqué vu, reprise effacée). Une durée inconnue = pas fini.
+            return this.duration > 0 && (this.currentPosition > (this.duration * 0.90))
         }
 
         private fun ExoPlayer.hasReallyFinished(): Boolean {

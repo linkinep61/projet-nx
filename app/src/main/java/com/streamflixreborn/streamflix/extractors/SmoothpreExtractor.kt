@@ -57,8 +57,35 @@ class SmoothpreExtractor : Extractor() {
             origin = origin,
             userAgent = Extractor.DEFAULT_USER_AGENT,
         )
-        val html = document.toString()
+        var html = document.toString()
         Log.d(TAG, "HTML length=${html.length}")
+        // 2026-11-03 (banc The Last of Us S2E1, Coflix Boston · Smoothpre) : vérifié dans le navigateur,
+        //   la page répond « L'intégration de vidéos est restreinte pour ce domaine » (4 Ko, sans script)
+        //   avec le Referer de Coflix. Avec Referer lecteurvideo.com (lecteur RNVIDS, même famille
+        //   EarnVids que minochinos/morencius) : vraie page 28 Ko + script packé. On rejoue donc une
+        //   fois avec ce Referer quand l'intégration est refusée.
+        //   La page arrive en français OU en anglais (« Video embed restricted for this domain ») selon
+        //   la langue de l'appareil → on rejoue aussi sur toute page courte sans script de lecteur.
+        if (!html.contains("eval(function(p,a,c,k,e,d)") &&
+            (html.length < 8_000 ||
+             Regex("""(?i)int[ée]gration de vid[ée]os est restreinte|embed(?:ding)?.{0,20}restricted""").containsMatchIn(html))) {
+            Log.d(TAG, "intégration restreinte pour $referer → nouvel essai via lecteurvideo.com")
+            // ⚠ Requête OkHttp directe, CACHE CONTOURNÉ : via le service Retrofit, la même adresse
+            //   revenait du cache HTTP en 0,15 s avec la page « restreinte » du premier essai.
+            val req = okhttp3.Request.Builder().url(link)
+                .header("User-Agent", Extractor.DEFAULT_USER_AGENT)
+                .header("Referer", "https://lecteurvideo.com/")
+                .header("Origin", "https://lecteurvideo.com")
+                .header("Sec-Fetch-Dest", "iframe")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "cross-site")
+                .cacheControl(okhttp3.CacheControl.FORCE_NETWORK)
+                .build()
+            html = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                Extractor.sharedClient.newCall(req).execute().use { it.body?.string().orEmpty() }
+            }
+            Log.d(TAG, "nouvel essai : HTML length=${html.length}")
+        }
 
         val packedJS = Regex("(eval\\(function\\(p,a,c,k,e,d\\)(.|\\n)*?)</script>")
             .find(html)

@@ -49,7 +49,11 @@ object SanteSources {
     private val client = OkHttpClient.Builder().callTimeout(5, TimeUnit.SECONDS).build()
     private val portee = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private fun actif() = !UserPreferences.modeLeger
+    /** 2026-11-02 : vrai pendant le banc de test des serveurs (version de test) - ses recherches et
+     *  lectures d'essai ne doivent pas fausser le bilan partagé. */
+    @Volatile var horsBilan = false
+
+    private fun actif() = !UserPreferences.modeLeger && !horsBilan
 
     /** Source d'un serveur de secours (`bkreg::<source>::<id>`), sinon null. */
     private fun sourceDe(s: Video.Server): Pair<String, String>? {
@@ -76,6 +80,8 @@ object SanteSources {
     fun essai(s: Video.Server) { sourceDe(s)?.let { demarres.remove(s.id); ajouter(it.first, 2) } }
 
     fun demarre(s: Video.Server?) {
+        // 2026-11-02 : la vidéo a démarré → si la base avait ce lien en attente de retrait, on l'annule.
+        s?.src?.let { LiensMorts.jouee(it) }
         val src = s?.let { sourceDe(it) } ?: return
         if (demarres.add(s.id)) ajouter(src.first, 3)
     }

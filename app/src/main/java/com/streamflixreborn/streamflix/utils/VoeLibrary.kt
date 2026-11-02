@@ -928,8 +928,10 @@ object VoeLibrary {
             val marque = Regex("(?i)s0*${saison}[ ._-]?e0*${episode}(?!\\d)")
             val episodes = fichiers.filter { f ->
                 val propre = RE_ID_TETE.replace(f.titre, "")
+                // 2026-11-02 : même contrôle durci que la bibliothèque Vidara (nom de série AVANT
+                //   SxxExx, même mot de tête) — cf. VidaraLibrary.serieCorrespond.
                 marque.containsMatchIn(propre) &&
-                    motTeteCouvert(propre, titresConnus)
+                    VidaraLibrary.serieCorrespond(propre, marque, titresConnus)
             }
             if (episodes.isNotEmpty()) {
                 Log.d(TAG, "rattachement episode S${saison}E${episode} : " +

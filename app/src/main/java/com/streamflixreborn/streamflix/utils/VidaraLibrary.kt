@@ -367,6 +367,41 @@ object VidaraLibrary {
         }
     }
 
+    /**
+     * 2026-11-02 (banc The Last of Us S1E1 : « ONYX · Vidara » proposait le fichier
+     *   « Houdinis Last Secrets - S01E01.mkv », supprimé en plus). `motTeteCouvert` accepte un
+     *   fichier dès que le mot de tête du titre demandé figure N'IMPORTE OÙ dans son nom ;
+     *   « The Last of Us » se réduit à {last} → « Houdinis LAST Secrets S01E01 » passait.
+     *   Pour un ÉPISODE, on regarde le nom de série écrit AVANT le marqueur SxxExx : il doit
+     *   COMMENCER par le même mot que le titre et en contenir tous les mots significatifs.
+     *   Nom de série absent (fichier « S01E01.mkv » seul) → pas de rattachement (voir plus bas).
+     */
+    internal fun serieCorrespond(propre: String, marque: Regex, titresConnus: Collection<String>): Boolean {
+        val debut = marque.find(propre)?.range?.first ?: return false
+        // Étiquettes d'équipe / de qualité (« [Team] », « (2023) ») retirées : sinon « [Team] Frieren
+        //   S01E01 » aurait « team » pour mot de tête.
+        val nomSerie = propre.substring(0, debut).replace(Regex("""\[[^\]]*]|\([^)]*\)"""), " ")
+        val cw = BackupRegistry.sigWords(nomSerie).toList()
+        // Aucun nom de série (82 fichiers « S01E001_Hôtel démoniaque.mkv » dans l'index le 2026-11-02,
+        //   sans dossier) : impossible de savoir de quelle série il s'agit → pas de rattachement
+        //   automatique (« pas de serveur plutôt que le mauvais ») ; ils restent dans le TV Hub.
+        if (cw.isEmpty()) return false
+        fun proche(a: String, b: String): Boolean {
+            if (a == b) return true
+            val court = if (a.length <= b.length) a else b
+            val long = if (a.length <= b.length) b else a
+            return court.length >= 4 && long.startsWith(court) && long.length - court.length <= 2
+        }
+        // Même mot de tête, puis l'un des deux noms contenu dans l'autre : « mushoku tensei » (fichier)
+        //   ⊂ « Mushoku Tensei: Jobless Reincarnation » (TMDB) passe ; « Houdinis Last Secrets »
+        //   contre « The Last of Us » ne passe pas (têtes « houdinis » ≠ « last »).
+        return titresConnus.any { t ->
+            val qw = BackupRegistry.sigWords(t).toList()
+            qw.isNotEmpty() && proche(cw.first(), qw.first()) &&
+                (qw.all { q -> cw.any { proche(it, q) } } || cw.all { c -> qw.any { proche(it, c) } })
+        }
+    }
+
     /** Duree du fichier compatible avec celle annoncee par TMDB ? Cf. VoeLibrary. */
     private fun dureeCompatible(fichierSec: Int, basSec: Int?, hautSec: Int?): Boolean {
         if (fichierSec <= 0) return true
@@ -452,7 +487,7 @@ object VidaraLibrary {
             }
             val episodes = fichiers.filter { f ->
                 val propre = sansPrefixe(f.titre)
-                marque.containsMatchIn(propre) && motTeteCouvert(propre, titresConnus)
+                marque.containsMatchIn(propre) && serieCorrespond(propre, marque, titresConnus)
             }
             if (episodes.isNotEmpty()) {
                 Log.d(TAG, "Vidara : rattachement S${saison}E${episode} -> ${episodes.size}")

@@ -343,6 +343,7 @@ abstract class Extractor {
             ApiVoirFilmExtractor(),
             StreamixExtractor(),
             ShareCloudyExtractor(),
+            FluxoraExtractor(),
             StreamrubyExtractor(),
             VidaraExtractor(),
             EmbedoriginExtractor(),
@@ -367,19 +368,8 @@ abstract class Extractor {
             //   citron-edge signé. Joué dans l'overlay WebView (même pattern que SeekStreaming).
             SwiftFlowExtractor(),
             XshotcokExtractor(),
-            // 2026-08-16 — DARKIBOX DÉSACTIVÉ PROVISOIREMENT (demande user).
-            //   Deux choses se sont produites en même temps :
-            //   1. le domaine ne sert plus de pages d'embed — darkibox.com redirige vers
-            //      hydracker.com, qui renvoie la MÊME page de portail (440 Ko) quelle que
-            //      soit l'URL demandée, sans aucun marqueur de lecteur (ni `sources:`, ni
-            //      m3u8, ni jwplayer). L'extracteur cherche l'URL source par regex dans le
-            //      HTML du serveur : il ne peut plus rien y trouver.
-            //   2. l'accès est coupé chez les utilisateurs (blocage FAI) — d'où les
-            //      connect-fail et dns-fail massifs, concentrés sur la France et l'Afrique
-            //      francophone, là où se trouve la base d'utilisateurs.
-            //   Télémétrie : 45 tentatives, 0 succès, sans interruption depuis le 9 août.
-            //   À RÉACTIVER si un vrai domaine d'hébergement de fichiers réapparaît.
-            // DarkiboxExtractor(),
+            // 2026-11-02 : Darkibox (hydracker.com) SUPPRIMÉ - site fermé définitivement (page « Fermeture
+            //   définitive », vérifiée au navigateur avec le user). Ses liens sont écartés dans BackupRegistry.
             Up4StreamExtractor(),
             // 2026-05-04 : nouveaux extracteurs pour les vieilles séries FR
             // (NY911, Friends, etc.) — backend allostreaming.one / waaatch.art
@@ -592,6 +582,10 @@ abstract class Extractor {
                 }
                 val msg = cur.message?.lowercase().orEmpty()
                 when {
+                    // 2026-11-02 (banc The Dog Stars) : « SwiftFlow: no source in /stream: {"error":
+                    //   "Rate limit dépassé…"} » tombait en dead-content via « no source » → un lien
+                    //   VIVANT aurait été signalé mort. Une limitation de débit passe AVANT tout.
+                    msg.contains("rate limit") || msg.contains("too many requests") || msg.contains("http 429") -> return "http-429"
                     // 2026-05-09 : "dead-content" — la VIDÉO a été supprimée
                     // côté CDN (Vidoza "File was deleted", Filemoon "video not
                     // found", VOE "title 404", etc.). C'est PAS un bug de
@@ -627,6 +621,20 @@ abstract class Extractor {
                 depth++
             }
             return "other"
+        }
+
+        /** 2026-11-02 : vrai marqueur « vidéo supprimée » dans la chaîne des causes (voir l'appel). */
+        fun preuveLienMort(e: Throwable): Boolean {
+            var cur: Throwable? = e
+            var depth = 0
+            while (cur != null && depth < 6) {
+                val msg = cur.message?.lowercase().orEmpty()
+                if (msg.contains("rate limit") || msg.contains("too many requests")) return false
+                if (listOf("deleted", "video not found", "video expired", "file removed", "file not found",
+                        "removed by", "tombstone", "link rot", "fichier supprimé", "page removed").any { msg.contains(it) }) return true
+                cur = cur.cause; depth++
+            }
+            return false
         }
 
         /**
@@ -1087,6 +1095,12 @@ abstract class Extractor {
                             Log.w("Extractor", "${foundExtractor.name} : 2e essai KO → miroirs")
                         }
                     }
+                    // 2026-11-03 (banc Mercredi S2E1, Coflix Boston · Mivalyo) : mivalyo.com est suspendu
+                    //   (« client hold », DNS inexistant) et le miroir principal dhtpre.com répond « File is
+                    //   no longer available… deleted » pour le même fichier. Ce verdict était jeté et seule
+                    //   l'erreur DNS remontait. Désormais, si un miroir dit clairement « vidéo supprimée »,
+                    //   on garde ce verdict (les miroirs interchangeables partagent les mêmes fichiers).
+                    var verdictMiroir: Exception? = null
                     if (isDomainError(e) && foundExtractor.miroirsInterchangeables && foundExtractor.aliasUrls.isNotEmpty()) {
                         val linkHost = extractHost(finalLink)
                         if (linkHost != null) {
@@ -1129,6 +1143,10 @@ abstract class Extractor {
                                     return filtered
                                 } catch (altE: Exception) {
                                     Log.w("Extractor", "Domain fallback $altHost also failed: ${altE.message}")
+                                    if (classifyError(altE) == "dead-content" && preuveLienMort(altE)) {
+                                        verdictMiroir = altE
+                                        break
+                                    }
                                 }
                             }
                         }
@@ -1138,11 +1156,22 @@ abstract class Extractor {
                     // le type d'erreur (timeout / 403 / parsing / …) et de logger
                     // le provider source (UserPreferences.currentProvider) dans le
                     // rapport bug — utile pour debug à distance.
-                    recordFailure(name, error = e)
+                    val erreur = verdictMiroir ?: e
+                    recordFailure(name, error = erreur)
+                    // 2026-11-02 : vidéo réellement supprimée chez l'hébergeur (page « 404 / introuvable /
+                    //   supprimée » lue par l'extracteur) → signalée à la base, qui la revérifie avant de
+                    //   l'ajouter à la liste des liens morts (cf. LiensMorts).
+                    // 2026-11-02 : seulement sur un marqueur FORT (vidéo supprimée / introuvable
+                    //   dite par l'hébergeur). « no source » / « no result » / « no streams » restent
+                    //   dead-content pour la santé de l'extracteur, mais sont trop vagues pour
+                    //   accuser le lien (ex. réponse de limitation de débit, agrégateur à vide).
+                    if (classifyError(erreur) == "dead-content" && preuveLienMort(erreur)) {
+                        com.streamflixreborn.streamflix.utils.LiensMorts.signaler(link, erreur.message)
+                    }
                     // 2026-08-21 : le rapport automatique vers GitHub a été retiré (voir
                     //   ExtractorFailureTracker, qui garde la trace des échecs EN LOCAL et
                     //   alimente l'écran « Extracteurs »).
-                    throw e
+                    throw erreur
                 }
                 val extractDurationMs = System.currentTimeMillis() - extractStartMs
                 com.streamflixreborn.streamflix.utils.ExtractorLatencyTracker
@@ -1267,6 +1296,28 @@ abstract class Extractor {
                     Log.i("Extractor", "Front Vidara reconnu à la page : $hoteInconnu → VidaraExtractor")
                     return enforceFrenchSubtitlesOnly(VidaraExtractor().extract(finalLink))
                 }
+            }
+            // 2026-11-02 (banc Breaking Bad : vidoza.net / younetu en 404, uptostream.link « domain
+            //   for sale ») : hébergeur inconnu MAIS la page elle-même n'existe plus → c'est un
+            //   lien mort (dead-content → signalé à la base), pas un « extracteur manquant ».
+            //   Sonde courte (6 s max) ; au moindre doute on garde le message historique.
+            val codePage = runCatching {
+                sharedClient.newBuilder().callTimeout(6, TimeUnit.SECONDS).build().newCall(
+                    okhttp3.Request.Builder().url(finalLink)
+                        .header("User-Agent", DEFAULT_USER_AGENT)
+                        .build()
+                ).execute().use { r ->
+                    val corps = if (r.code == 200) r.body?.string().orEmpty().take(6000) else ""
+                    Log.d("Extractor", "sonde hôte inconnu : HTTP ${r.code}, ${corps.length} car. « ${corps.replace(Regex("\\s+"), " ").take(160)} »")
+                    when {
+                        r.code == 404 || r.code == 410 -> "HTTP ${r.code}"
+                        Regex("""(?i)domain is for sale|this domain is parked""").containsMatchIn(corps) -> "domaine à vendre"
+                        else -> null
+                    }
+                }
+            }.onFailure { Log.d("Extractor", "sonde hôte inconnu KO : ${it.javaClass.simpleName} ${it.message}") }.getOrNull()
+            if (codePage != null) {
+                throw Exception("No extractor: video not found - page removed ($codePage) for URL: $finalLink")
             }
             throw Exception("No extractors found for URL: $finalLink")
         }

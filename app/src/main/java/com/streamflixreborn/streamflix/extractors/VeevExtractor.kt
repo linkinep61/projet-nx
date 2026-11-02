@@ -85,9 +85,20 @@ open class VeevExtractor : Extractor() {
                         ?: throw Exception("Empty JSON response from Veev")
 
                     val fileJson = JSONObject(jsonResponse).optJSONObject("file")
-                        ?: throw Exception("Video removed")
+                        ?: throw Exception("Veev: réponse sans fichier (${jsonResponse.take(80)})")
 
-                    if (fileJson.optString("file_status") == "OK") {
+                    // 2026-11-03 : statut ≠ OK → on l'écrit dans le message. « Supprimée » (liste noire)
+                    //   seulement si le statut le dit ; vérifié dans le navigateur sur 5djhc5xt5115 :
+                    //   « The video has been removed ».
+                    val statut = fileJson.optString("file_status")
+                    if (statut != "OK") {
+                        android.util.Log.w("Veev", "file_status=$statut pour $mediaId")
+                        if (Regex("""(?i)delet|remov|dmca|abuse|copyright|not.?found""").containsMatchIn(statut)) {
+                            throw Exception("Veev: video not found - file removed (statut « $statut »)")
+                        }
+                        throw Exception("Veev: fichier indisponible (statut « $statut »)")
+                    }
+                    if (statut == "OK") {
                         val dv = fileJson.getJSONArray("dv").getJSONObject(0).getString("s")
                         val sourceUrl = decodeUrl(veevDecode(dv), buildArray(ch)[0])
                         val fileMimeType = fileJson.optString("file_mime_type", "")
@@ -100,7 +111,14 @@ open class VeevExtractor : Extractor() {
             }
             throw Exception("Unable to locate video")
         } else {
-            throw Exception("Video removed")
+            // 2026-11-03 (banc Stranger Things S5E1, Coflix Boston · Veev) : vérifié dans le navigateur,
+            //   la page dit « The video has been removed. … by the uploader, by our system or due to
+            //   copyright violation ». Formulé pour être reconnu comme vidéo supprimée (liste noire),
+            //   mais seulement quand la page le dit ; sinon c'est la page qui a changé.
+            if (Regex("""(?i)video has been removed|file (?:was|has been) (?:deleted|removed)""").containsMatchIn(responseBody)) {
+                throw Exception("Veev: video not found - file removed (page « The video has been removed »)")
+            }
+            throw Exception("Veev: lecteur introuvable dans la page (page modifiée ?)")
         }
     }
     fun String.toExoPlayerMimeType(): String {

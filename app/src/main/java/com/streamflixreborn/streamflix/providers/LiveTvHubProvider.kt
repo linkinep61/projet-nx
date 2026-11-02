@@ -1832,6 +1832,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 else -> continue
             }
             if (title.isBlank() || tvhubNorm(title) !in wanted) continue
+            // 2026-11-02 (user : « RMC, pourquoi il est là ? » sur un film) : un clip Brut
+            //   (BFM Play, `NEUF_BRUT_…`) intitulé « The Dog Stars…) » passait le filtre strict
+            //   parce que la normalisation efface la ponctuation. Brut = actus, jamais un film ;
+            //   et un titre tronqué (« … ») n'est pas un titre exact, on ne peut rien en conclure.
+            if (id.contains("NEUF_BRUT", ignoreCase = true) || title.contains('…') || title.endsWith("...")) continue
 
             // TF1+ / M6+ = LOGIN REQUIS. On ne les propose qu'aux comptes CONNECTÉS (sinon serveur
             //   mort). France.tv/Arte (gratuit sans compte) passent toujours. Détection par l'id.
