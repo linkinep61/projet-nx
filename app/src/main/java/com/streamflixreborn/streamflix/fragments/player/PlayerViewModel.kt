@@ -1017,7 +1017,10 @@ class PlayerViewModel(
         if (list.isEmpty()) return
         // 2026-10-21 (user : « les cœurs prioritaires ne devraient pas être impactés ») : les
         //   serveurs ❤ restent en tête, dans leur ordre ; le tri par qualité ne touche que le reste.
-        val coeurs = list.filter { com.streamflixreborn.streamflix.utils.ExtractorRanker.estFavori(it) }
+        val coeurs = list.filter {
+            com.streamflixreborn.streamflix.utils.ExtractorRanker.estFavori(it) ||
+                com.streamflixreborn.streamflix.utils.ExtractorRanker.estServeurOnyx(it)   // 2026-11-04
+        }
         val idsCoeurs = coeurs.map { it.id }.toHashSet()
         val reste = list.filter { it.id !in idsCoeurs }
         val vfSorted = reste.filter { isVfServer(it) }.sortedByDescending { qualityRank(it.quality) }
@@ -1697,22 +1700,30 @@ class PlayerViewModel(
                 //   joue pour de vrai, on ne coupe plus jamais.
                 if (!lectureDemarree && !coeurDejaLance) {
                     val favoris = favorisDuProvider()
-                    val coeur = if (favoris.isEmpty()) null else fresh.firstOrNull {
+                    val vraiCoeur = if (favoris.isEmpty()) null else fresh.firstOrNull {
                         // 2026-11-03 : + cœurs « hébergeur » de « Gérer les sources ».
                         com.streamflixreborn.streamflix.utils.ExtractorRanker.correspondFavori(it, favoris)
                     }
+                    // 2026-11-04 (user : « notre serveur ONYX passe toujours en prioritaire, sauf si
+                    //   les gens mettent des cœurs par-dessus ») : le serveur ONYX bénéficie du même
+                    //   raccourci qu'un cœur, UNE fois, mais sans verrouiller `coeurDejaLance` : un vrai
+                    //   cœur arrivant ensuite (avant la première image) garde le dernier mot.
+                    val onyx = if (vraiCoeur == null && !onyxDejaLance) fresh.firstOrNull {
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.estServeurOnyx(it)
+                    } else null
+                    val coeur = vraiCoeur ?: onyx
                     if (coeur != null) {
                         // Lot tardif (un serveur a déjà été choisi) → il faut un jeton pour
                         //   que le fragment accepte de basculer malgré `initialServerPicked`.
                         if (firstEmitted) raccourciCoeurEnAttente = true
-                        coeurDejaLance = true
+                        if (vraiCoeur != null) coeurDejaLance = true else onyxDejaLance = true
                         autoPlayEmitted = true
                         firstEmitted = true
                         val liste = listOf(coeur) + accumulated.filter { it.id != coeur.id }
                         allKnownServers = liste
                         Log.i(
                             "ServDiag",
-                            "PROG RACCOURCI CŒUR : '${coeur.name}' favori → lecture immédiate " +
+                            "PROG RACCOURCI ${if (vraiCoeur != null) "CŒUR" else "ONYX"} : '${coeur.name}' → lecture immédiate " +
                                 "(ni tri, ni stabilisation, ni grâce FR)",
                         )
                         _state.emit(State.SuccessLoadingServers(collapseIdenticalServers(liste), autoPlay = true))
@@ -2095,6 +2106,8 @@ class PlayerViewModel(
      * une fois un cœur lancé, les suivants ne le remplacent plus.
      */
     @Volatile private var coeurDejaLance = false
+    /** 2026-11-04 : le raccourci ONYX (bibliothèque Vidara perso) a déjà été pris pour ce titre. */
+    @Volatile private var onyxDejaLance = false
 
     /** True UNE seule fois, si un cœur attend d'être joué. Remet le jeton à zéro. */
     fun consommerRaccourciCoeur(): Boolean {
@@ -2108,6 +2121,7 @@ class PlayerViewModel(
         lectureDemarree = false
         raccourciCoeurEnAttente = false
         coeurDejaLance = false
+        onyxDejaLance = false
     }
 
     private fun favorisDuProvider(): Set<String> {
@@ -2207,6 +2221,9 @@ class PlayerViewModel(
             // 2026-07-08 (user "les cœurs ne sont même pas classés dans le VOD") :
             // Un serveur cœur = TOUJOURS en tête, peu importe la langue.
             if (isFav(s)) return -1
+            // 2026-11-04 (user) : le serveur ONYX aussi — derrière les cœurs (le tri amont,
+            //   stable, met déjà cœur 500 > ONYX 400), devant tout le reste.
+            if (com.streamflixreborn.streamflix.utils.ExtractorRanker.estServeurOnyx(s)) return -1
 
             val lang = serverLang(s)
             return if (curLang != null) {

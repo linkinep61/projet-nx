@@ -530,7 +530,10 @@ class BancTestActivity : ComponentActivity() {
             //   The Dog Stars). On saute à 90 % de la durée et la lecture doit y repartir : au moins
             //   3 s lues après le saut, en 20 s maximum. Ignoré si la durée est inconnue (direct).
             var finTxt = ""
-            if (image && son && dureeMedia > DUREE_MIN_MS && p.isCurrentMediaItemSeekable) {
+            // 2026-11-05 (user : « Enlève le fait qu'on doit avancer jusqu'à la fin de la vidéo ») :
+            //   saut à 90 % désactivé. Remettre à true pour le réactiver.
+            val sautVersLaFin = false
+            if (sautVersLaFin && image && son && dureeMedia > DUREE_MIN_MS && p.isCurrentMediaItemSeekable) {
                 val cible = dureeMedia * 9 / 10
                 val cibleTxt = "%dh%02d".format(cible / 3_600_000, (cible / 60_000) % 60)
                 p.seekTo(cible)

@@ -1667,6 +1667,12 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         } else {
             server.src
         }
+        // 2026-11-05 (banc Spider-Man : « FS · Filmoon » en échec « VOE : no encoded JSON ») : le relais
+        //   sort vers un front Vidara inconnu (fvosabfgt89i7.com) → reconnu à sa page, cf. VidaraExtractor.
+        if (finalUrl != server.src &&
+            com.streamflixreborn.streamflix.extractors.VidaraExtractor.estFrontInconnu(finalUrl)) {
+            return com.streamflixreborn.streamflix.extractors.VidaraExtractor().extract(finalUrl)
+        }
         return Extractor.extract(finalUrl)
     }
 

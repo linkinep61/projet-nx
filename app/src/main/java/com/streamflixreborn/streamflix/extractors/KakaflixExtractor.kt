@@ -109,6 +109,16 @@ class KakaflixExtractor : Extractor() {
             throw Exception("Redirect proxy failed: $link -> ${derniereErreur.removePrefix("pas de sortie (").removeSuffix(")")}")
         }
 
+        // 2026-11-05 (banc Spider-Man : « FS · Filmoon » et « CoflixWiki · Netu » en échec « VOE : no
+        //   encoded JSON ») — le relais sort désormais vers un NOUVEAU domaine Vidara
+        //   (fvosabfgt89i7.com/e/<id>, 6ᵉ front en un mois). Vérifié dans Chrome : lecteur « Vidara »
+        //   (aboutlink vidara.so), POST /api/stream rend le flux. Inconnu de la liste des domaines,
+        //   le lien partait chez VOE. On reconnaît donc Vidara à sa PAGE, pas à son nom de domaine :
+        //   un front de plus ne cassera plus rien.
+        if (VidaraExtractor.estFrontInconnu(resolvedUrl)) {
+            Log.i("RedirectProxy", "sortie vers un front Vidara non répertorié : ${resolvedUrl.toHttpUrlOrNull()?.host} → VidaraExtractor")
+            return VidaraExtractor().extract(resolvedUrl)
+        }
         return Extractor.extract(resolvedUrl)
     }
 

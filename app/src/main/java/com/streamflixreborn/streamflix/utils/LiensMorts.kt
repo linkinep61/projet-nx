@@ -38,7 +38,10 @@ object LiensMorts {
     private val annonces = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var chargeLe = 0L
     private val signales = ConcurrentHashMap.newKeySet<String>()
-    private val client = OkHttpClient.Builder().callTimeout(8, TimeUnit.SECONDS).build()
+    // 2026-11-03 : date de compilation de l'APK sur chaque envoi (cf. SanteSources, réglage VERSION_MIN du Worker).
+    private val client = OkHttpClient.Builder().callTimeout(8, TimeUnit.SECONDS)
+        .addInterceptor { it.proceed(it.request().newBuilder().header("X-Onyx-Build", com.streamflixreborn.streamflix.BuildConfig.BUILD_TIME.toString()).build()) }
+        .build()
     private val portee = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Même normalisation que le Worker (normLien) : hôte sans « www. » + chemin + paramètres + ancre. */
@@ -96,6 +99,9 @@ object LiensMorts {
 
     /** Lien lu « supprimé » par un extracteur : envoyé une fois par session à la base (qui vérifie). */
     fun signaler(lien: String, preuve: String?) {
+        // 2026-11-03 : le banc de test (version de test) ne signale rien — ses centaines d'essais depuis
+        //   un seul réseau remplissaient la liste d'attente (comme pour le bilan, cf. SanteSources.horsBilan).
+        if (SanteSources.horsBilan) return
         if (!lien.startsWith("http")) return
         val n = norm(lien) ?: return
         if (Regex("""^\d{1,3}(\.\d{1,3}){3}""").containsMatchIn(n)) return   // adresse IP : non contrôlable

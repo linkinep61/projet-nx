@@ -6604,6 +6604,8 @@ class PlayerTvFragment : Fragment() {
                     // 2026-10-04 : mode léger → la recherche de serveurs se met en pause pendant la lecture.
                     if (isPlaying) com.streamflixreborn.streamflix.utils.BackupRegistry.signalerLecture(true)
                 if (isPlaying) com.streamflixreborn.streamflix.utils.SanteSources.demarre(currentServer)
+                    // 2026-11-04 : vues Vidara (ne fait rien si le flux n'est pas Vidara).
+                    com.streamflixreborn.streamflix.utils.VidaraVues.lecture(currentVideo, isPlaying)
                     // 2026-05-20 : respecter keepScreenOnWhenPaused (parité mobile)
                     binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
 

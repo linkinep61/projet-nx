@@ -41,6 +41,34 @@ import org.json.JSONObject
  */
 class VidaraExtractor : Extractor() {
 
+    companion object {
+        /**
+         * 2026-11-05 (banc Spider-Man) : les relais (kokoflix…) sortent vers des fronts Vidara qui
+         * changent tous les quelques jours (fvosabfgt89i7.com = 6ᵉ en un mois). Plutôt que d'ajouter
+         * chaque nom à la main, on reconnaît Vidara à sa PAGE : lecteur jwplayer signé
+         * `aboutlink:"https://vidara.so"` / `abouttext:"Vidara"` (vérifié dans Chrome). Un seul GET,
+         * fait seulement pour un lien /e/<id> dont le domaine n'est pas déjà connu.
+         */
+        suspend fun estFrontInconnu(url: String): Boolean = withContext(Dispatchers.IO) {
+            val hote = Regex("^https?://([^/]+)").find(url)?.groupValues?.get(1)?.lowercase()
+                ?: return@withContext false
+            if (!Regex("""/e/[A-Za-z0-9]+/?$""").containsMatchIn(url.substringBefore('?'))) return@withContext false
+            val connu = VidaraExtractor().let { v -> (v.aliasUrls + v.mainUrl).any { it.removePrefix("https://") == hote } }
+            if (connu) return@withContext false
+            runCatching {
+                sharedClient.newCall(
+                    Request.Builder().url(url)
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+                        .build()
+                ).execute().use { r ->
+                    val page = r.body?.string().orEmpty()
+                    page.contains("aboutlink:\"https://vidara.so", ignoreCase = true) ||
+                        page.contains("abouttext:\"Vidara\"", ignoreCase = true)
+                }
+            }.getOrDefault(false).also { if (it) Log.i("VidaraExtractor", "front Vidara reconnu à sa page : $hote") }
+        }
+    }
+
     override val name = "Vidara"
     override val mainUrl = "https://vidara.to"
 
@@ -145,6 +173,7 @@ class VidaraExtractor : Extractor() {
         }
 
         var (code, body) = appelStream(origin)
+        var frontUtilise = origin
         // 2026-10-22 (user : « on est censé avoir ce serveur là aussi mais il fonctionne pas »,
         //   Lecteur Movix 4 = vidara.to) — vidara.to/e/<id> REDIRIGE désormais vers un autre
         //   front (vérifié dans Chrome : gaqghe.com/e/<id>, dont le lecteur appelle
@@ -162,6 +191,7 @@ class VidaraExtractor : Extractor() {
                 android.util.Log.d("VidaraExtractor", "/api/stream HTTP $code sur $origin → front redirigé $front")
                 val r2 = appelStream(front)
                 code = r2.first; body = r2.second
+                if (code in 200..299) frontUtilise = front
             }
         }
         if (code !in 200..299) throw Exception("Vidara: /api/stream HTTP $code")
@@ -238,6 +268,9 @@ class VidaraExtractor : Extractor() {
             }
         }
         if (sousTitres.isNotEmpty()) Log.d("VidaraExtractor", "$filecode : ${sousTitres.size} sous-titre(s) — ${sousTitres.joinToString { it.label }}")
+
+        // 2026-11-04 : la lecture dans l'appli compte comme une vue sur Vidara (cf. VidaraVues).
+        com.streamflixreborn.streamflix.utils.VidaraVues.enregistrer(streamUrl, frontUtilise, filecode)
 
         Video(
             source = streamUrl,

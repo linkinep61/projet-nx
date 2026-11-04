@@ -46,7 +46,12 @@ object SanteSources {
     private val demarres = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val signales = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
-    private val client = OkHttpClient.Builder().callTimeout(5, TimeUnit.SECONDS).build()
+    // 2026-11-03 (user : « les gens n'ont pas mis la vraie mise à jour ») - chaque envoi porte la date de
+    //   compilation de l'APK (0 = version compilée à la main) : la base peut ignorer les anciennes versions
+    //   qui signalent des pannes déjà réparées (réglage VERSION_MIN du Worker).
+    private val client = OkHttpClient.Builder().callTimeout(5, TimeUnit.SECONDS)
+        .addInterceptor { it.proceed(it.request().newBuilder().header("X-Onyx-Build", com.streamflixreborn.streamflix.BuildConfig.BUILD_TIME.toString()).build()) }
+        .build()
     private val portee = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** 2026-11-02 : vrai pendant le banc de test des serveurs (version de test) - ses recherches et

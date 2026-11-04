@@ -235,6 +235,18 @@ class StreamFlixApp : Application() {
                 android.util.Log.d("Prechauffe", "lecteurs prêts en ${System.currentTimeMillis() - t0} ms")
             }
         }
+        // 2026-11-04 (user : « notre serveur ONYX est arrivé ultra en retard ») — mesuré sur l'Oppo :
+        //   l'index de la bibliothèque Vidara (1 400 fichiers, un GET public) n'était téléchargé qu'au
+        //   premier film, 3,7 s avant que le serveur ONYX n'apparaisse. On le charge ici, 5 s après le
+        //   démarrage ; il reste en mémoire 6 h (cf. VidaraLibrary.toutNav).
+        applicationScope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(5_000L)
+            runCatching {
+                val t0 = System.currentTimeMillis()
+                val n = com.streamflixreborn.streamflix.utils.VidaraLibrary.toutNav().size
+                android.util.Log.d("Prechauffe", "index Vidara prêt : $n fichiers en ${System.currentTimeMillis() - t0} ms")
+            }
+        }
         // 2026-08-27 (VPN global) : le ProxySelector doit être posé AVANT que
         //   le moindre OkHttpClient ne soit construit — OkHttp capture
         //   ProxySelector.getDefault() à la construction du client, pas à

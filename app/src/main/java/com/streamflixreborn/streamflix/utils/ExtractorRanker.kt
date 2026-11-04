@@ -471,6 +471,11 @@ object ExtractorRanker {
                 return ExtractorToggleStore.FAVORITE_BONUS + computeQualityBonus(qualityStr)
         }
 
+        // 2026-11-04 (user : « notre serveur ONYX passe toujours en prioritaire, sauf si les gens
+        //   mettent des cœurs par-dessus ») : la bibliothèque Vidara perso juste SOUS les cœurs
+        //   (500) et AU-DESSUS de tout le reste, quelle que soit la qualité.
+        if (estServeurOnyx(server)) return ONYX_BONUS + computeQualityBonus(qualityStr)
+
         // Papadustream natif (captcha Cloudflare Turnstile) → dernier recours (check de nom, gratuit).
         val isCaptchaGated = srcLower.contains("papadustream") || srcLower.contains("#xf=")
         if (isCaptchaGated) return -100
@@ -536,6 +541,13 @@ object ExtractorRanker {
      *  « AniCloud · Filemoon (VOSTFR) » ≠ « Filemoon (VOSTFR) » ≠ « Movix · Filemoon (VOSTFR) ».
      *  Avant, tous les serveurs du même extracteur partageaient la même clé →
      *  favoriser un Filemoon les favorisait TOUS. */
+    /** Serveur « ONYX » = fichier de la bibliothèque Vidara perso (VidaraLibrary.serveurDe). */
+    const val ONYX_BONUS = 400
+    //   Direct (« livehub::vidara::<code> ») ou enveloppé par le registre de secours
+    //   (« bkreg::ONYX Films::livehub::vidara::<code> ») : on cherche le marqueur n'importe où.
+    //   « livehub::vidaracom:: » (partage des amis) ne matche pas : ce n'est pas notre serveur.
+    fun estServeurOnyx(server: Video.Server): Boolean = server.id.contains("livehub::vidara::")
+
     fun favKeyFor(server: Video.Server): String = favKeyFor(server.name)
 
     /** 2026-10-21 : vrai si le serveur porte un ❤ pour le provider courant. */

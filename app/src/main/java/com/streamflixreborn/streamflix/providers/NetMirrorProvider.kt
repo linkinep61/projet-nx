@@ -2258,6 +2258,11 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
     /** Rend (hôte qui a répondu, réponse) — seulement si au moins un MP4 utilisable. */
     private fun net27Appel(tmdb: String, saison: Int?, episode: Int?, doublage: Pair<String, String>? = null): Pair<String, JSONObject>? {
         if (tmdb.isBlank() || !tmdb.all { it.isDigit() }) return null
+        // 2026-11-04 (user : « NetMirror faux match sur le premier épisode » de Bleach S2) - une source
+        //   appelait avec « saison 0 » ; l'API la remplace SANS LE DIRE par la saison 1 et sert donc un
+        //   autre épisode (vérifié : se=0&ep=1 → currentSeason 1). Saison 0 refusée, et la saison /
+        //   l'épisode renvoyés doivent être ceux demandés (contrôle plus bas).
+        if (saison != null && saison <= 0) { Log.d(TAG, "net27 : saison $saison refusée (tmdb=$tmdb)"); return null }
         val base = if (saison != null && episode != null)
             "/api/embed-tmdb/$tmdb?type=tv&se=$saison&ep=$episode"
         else "/api/embed-tmdb/$tmdb?type=movie"
@@ -2275,6 +2280,11 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                     if (!r.isSuccessful) null else JSONObject(r.body?.string().orEmpty())
                 }
             }.onFailure { Log.d(TAG, "net27 : $hote injoignable (${it.message})") }.getOrNull() ?: continue
+            if (saison != null && episode != null &&
+                (j.optInt("currentSeason", saison) != saison || j.optInt("currentEpisode", episode) != episode)) {
+                Log.w(TAG, "net27 : demandé S${saison}E$episode, reçu S${j.optInt("currentSeason")}E${j.optInt("currentEpisode")} → écarté (tmdb=$tmdb)")
+                return null
+            }
             // Hôte vivant : sa réponse fait foi (pas de flux = l'œuvre est absente, inutile d'insister).
             val utilisables = j.optJSONArray("streams")?.let { s ->
                 (0 until s.length()).count { s.optJSONObject(it)?.optString("url")?.let { u -> u.startsWith("http") && !u.contains(NET27_PUB) } == true }

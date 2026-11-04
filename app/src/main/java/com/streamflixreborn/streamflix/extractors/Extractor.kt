@@ -1165,7 +1165,16 @@ abstract class Extractor {
                     //   dite par l'hébergeur). « no source » / « no result » / « no streams » restent
                     //   dead-content pour la santé de l'extracteur, mais sont trop vagues pour
                     //   accuser le lien (ex. réponse de limitation de débit, agrégateur à vide).
-                    if (classifyError(erreur) == "dead-content" && preuveLienMort(erreur)) {
+                    // 2026-11-03 (bilan : 34 pages FrAnime signalées « SendVid: video not found ») — si
+                    //   l'erreur vient d'un AUTRE extracteur que celui-ci (page d'un site qui ouvre un
+                    //   lecteur à l'intérieur), c'est ce lecteur-là qui est mort, pas la page : on ne
+                    //   signale pas la page (la retirer cacherait tout l'épisode).
+                    // Auteur = préfixe court « Nom: » du message (sans espace) ; sinon inconnu → on signale comme avant.
+                    val auteur = erreur.message?.substringBefore(':', "")?.takeIf { it.length in 2..25 && ' ' !in it.trim() }
+                        ?.lowercase()?.filter { it.isLetterOrDigit() }.orEmpty()
+                    val nous = name.lowercase().filter { it.isLetterOrDigit() }
+                    val memeExtracteur = auteur.isEmpty() || auteur == nous || auteur.startsWith(nous) || nous.startsWith(auteur)
+                    if (classifyError(erreur) == "dead-content" && preuveLienMort(erreur) && memeExtracteur) {
                         com.streamflixreborn.streamflix.utils.LiensMorts.signaler(link, erreur.message)
                     }
                     // 2026-08-21 : le rapport automatique vers GitHub a été retiré (voir

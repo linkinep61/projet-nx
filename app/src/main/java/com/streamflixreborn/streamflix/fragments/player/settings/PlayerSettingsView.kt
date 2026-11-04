@@ -516,7 +516,11 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                     if (n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b"))) return false
                     return true
                 }
-                val favoris = serveurs.filter { estFavori(it) }
+                // 2026-11-04 (user : « notre serveur ONYX toujours en prioritaire, sauf cœur ») : le serveur
+                //   ONYX (bibliothèque Vidara perso) sort de son dossier « ONYX Films » comme un cœur, juste
+                //   APRÈS les cœurs — sinon il restait replié avec Ciné Films & co.
+                fun estOnyx(s: Settings.Server) = s.id.contains("livehub::vidara::")
+                val favoris = serveurs.filter { estFavori(it) } + serveurs.filter { !estFavori(it) && estOnyx(it) }
                 val idsFavoris = favoris.map { it.id }.toHashSet()
                 val groupes = LinkedHashMap<String, MutableList<Settings.Server>>()
                 for (s in serveurs) {
