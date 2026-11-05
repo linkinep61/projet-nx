@@ -43,6 +43,10 @@ import java.util.concurrent.TimeUnit
 object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, FilterableProvider, ProgressiveServersProvider {
 
     override val name = "AnimeSama"
+    // 2026-11-05 (user : « tu mets juste le filtre ») : toutes les listes du catalogue sont
+    //   triees par date de sortie, les plus recentes d'abord (parametre tri=recent du site).
+    // 2026-11-05 : nouvelle mise en page du site (cartes « as-carte », titre « as-carte-titre »,
+    //   badge « as-badge ») — les deux formats sont reconnus (« catalog-card » / « as-carte »).
     override val defaultBaseUrl: String = "https://anime-sama.to/"
     override val baseUrl: String = defaultBaseUrl
         get() {
@@ -120,8 +124,8 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         try {
             var page = 1
             while (page <= 5) { // reduced from 20 — enough for exclusion filter
-                val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
-                val cards = fetchDocument(filmUrl).select(".catalog-card")
+                val filmUrl = "${baseUrl}catalogue/?tri=recent&type[]=Film&page=$page"
+                val cards = fetchDocument(filmUrl).select(".catalog-card, .as-carte-oeuvre")
                 if (cards.isEmpty()) break
                 cards.forEach { card ->
                     card.selectFirst("a[href*=/catalogue/]")?.attr("href")
@@ -361,7 +365,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 h.contains("User cancelled")) return true
             val looksLikeChallenge = challengeKeywords.any { h.contains(it, ignoreCase = true) }
             // marqueurs de contenu réel propres à AnimeSama (équivalent mov-t/posterimg)
-            val hasRealContent = h.contains("/catalogue/") || h.contains("catalog-card") ||
+            val hasRealContent = h.contains("/catalogue/") || h.contains("catalog-card") || h.contains("as-carte") ||
                 h.contains("episodes.js") || h.contains("panneauAnime") ||
                 h.contains("anime-sama")
             return looksLikeChallenge && !hasRealContent
@@ -424,6 +428,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val response = client.newCall(request).execute()
         val html = response.body?.string() ?: ""
         val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        // 2026-11-05 DIAGNOSTIC (user : « plus rien dans FR et VOSTFR ») : ce que le site renvoie.
+        if (url.contains("/catalogue/?")) {
+            Log.d(TAG, "[diag] $url -> HTTP ${response.code}, ${html.length} car., " +
+                "as-carte=${doc.select(".as-carte-oeuvre").size} catalog-card=${doc.select(".catalog-card").size} " +
+                "titre=${doc.title().take(60)}")
+        }
         // Challenge CF intermittent détecté → on bascule sur le pipeline Wiflix.
         if (isCloudflareChallenge(doc) ||
             challengeKeywords.any { html.contains(it, ignoreCase = true) }
@@ -576,12 +586,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         // ── Catégories Catalogue (page 1) — lancées EN PARALLÈLE du scrape homepage ──
         val catalogAnimeDeferred = async(Dispatchers.IO) {
             try {
-                val catalogAnimeDoc = fetchDocument("${baseUrl}catalogue/?type[]=Anime&page=1")
-                catalogAnimeDoc.select(".catalog-card").mapNotNull { card ->
+                val catalogAnimeDoc = fetchDocument("${baseUrl}catalogue/?tri=recent&type[]=Anime&page=1")
+                catalogAnimeDoc.select(".catalog-card, .as-carte-oeuvre").mapNotNull { card ->
                     val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                     val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                         .split("/").firstOrNull() ?: return@mapNotNull null
-                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     TvShow(id = slug, title = title, poster = img)
                 }.distinctBy { it.id }
@@ -592,12 +602,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         }
         val catalogFilmDeferred = async(Dispatchers.IO) {
             try {
-                val catalogFilmDoc = fetchDocument("${baseUrl}catalogue/?type[]=Film&page=1")
-                catalogFilmDoc.select(".catalog-card").mapNotNull { card ->
+                val catalogFilmDoc = fetchDocument("${baseUrl}catalogue/?tri=recent&type[]=Film&page=1")
+                catalogFilmDoc.select(".catalog-card, .as-carte-oeuvre").mapNotNull { card ->
                     val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                     val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                         .split("/").firstOrNull() ?: return@mapNotNull null
-                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     Movie(id = slug, title = title, poster = img)
                 }.distinctBy { it.id }
@@ -666,7 +676,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 // Title: prefer img alt, then h2.card-title, then slug
                 val imgEl = card.selectFirst("img")
                 val title = imgEl?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
-                    ?: card.selectFirst("h2.card-title")?.text()?.trim()
+                    ?: card.selectFirst("h2.card-title, .as-carte-titre")?.text()?.trim()
                     ?: slug.replace("-", " ").replaceFirstChar { it.uppercase() }
 
                 val rawImg = imgEl?.let { el ->
@@ -689,8 +699,8 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 //
                 // Les scans ont href /catalogue/{slug}/scan/{lang} → segment 2
                 // = "scan" qui n'est PAS dans l'allowlist → SKIP automatique.
-                val badgeText = card.selectFirst(".badge-text")?.text()?.trim()?.lowercase() ?: ""
-                val parentBadgeClasses = card.select(".badge").joinToString(" ") { it.className() }.lowercase()
+                val badgeText = card.selectFirst(".badge-text, .as-badge")?.text()?.trim()?.lowercase() ?: ""
+                val parentBadgeClasses = card.select(".badge, .as-badge").joinToString(" ") { it.className() }.lowercase()
                 val pathSegments = href.substringAfter("/catalogue/").split("/").filter { it.isNotBlank() }
                 val typeSegment = pathSegments.getOrNull(1)?.lowercase() ?: ""
 
@@ -698,7 +708,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 val videoTypeSegments = listOf("saison", "film", "movie", "kai", "oav", "ova", "special", "episodes", "vostfr", "vf", "va", "vo")
 
                 val isVideoByBadge = videoBadgeTokens.any { badgeText.contains(it) } ||
-                        listOf("anime-badge", "film-badge", "movie-badge").any { parentBadgeClasses.contains(it) }
+                        listOf("anime-badge", "film-badge", "movie-badge", "as-badge-anime", "as-badge-film").any { parentBadgeClasses.contains(it) }
                 val isVideoByPath = videoTypeSegments.any { token ->
                     typeSegment == token || typeSegment.startsWith("${token}-") || typeSegment.startsWith(token) && typeSegment.length <= token.length + 2
                 }
@@ -1217,6 +1227,24 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     // ========== MOVIES ==========
 
+    /** 2026-11-05 (user : « le filtre devrait etre juste avant tous les genres ») : la plage
+     *  choisie dans la ligne « Annee » du selecteur (YearFilter) part au site en
+     *  annee_min / annee_max. FR = onglet Films de l'appli, VOSTFR = onglet Series. */
+    // 2026-11-05 : Série et Film ont chacun LEUR année (sinon 2026 choisi pour les séries
+    //   vidait l'onglet Film : aucun film 2026 encore sur le site).
+    init {
+        com.streamflixreborn.streamflix.utils.YearFilter.sousOnglet = { p ->
+            if (p == name) (if (lastTypeFilter == "Film") "Film" else "Anime") else null
+        }
+    }
+
+    private fun anneeUrl(fr: Boolean, film: Boolean = false): String {
+        val p = com.streamflixreborn.streamflix.utils.YearFilter.get(if (film) "$name#Film" else "$name#Anime",
+            if (fr) com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS
+            else com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES)
+        return if (p.actif) "&annee_min=${p.debut}&annee_max=${p.fin}" else ""
+    }
+
     override suspend fun getMovies(page: Int): List<Movie> {
         // FR tab: returns BOTH series (isSeries=true) and films (isSeries=false)
         // 2026-06-20 (FIX) : NE PAS toucher aux flags lastLanguageFilter/lastTypeFilter
@@ -1226,12 +1254,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
         // 1. Anime series with VF → Movie with isSeries=true
         try {
-            val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=VF&page=$page"
-            fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
+            val animeUrl = "${baseUrl}catalogue/?tri=recent${anneeUrl(true)}&type[]=Anime&langue[]=VF&page=$page"
+            fetchDocument(animeUrl).select(".catalog-card, .as-carte-oeuvre").mapNotNull { card ->
                 val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                     .split("/").firstOrNull() ?: return@mapNotNull null
-                val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@mapNotNull null
                 val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
             }.let { lot ->
@@ -1243,12 +1271,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
         // 2. Standalone films from catalogue type=Film → Movie with isSeries=false
         try {
-            val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
-            fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
+            val filmUrl = "${baseUrl}catalogue/?tri=recent${anneeUrl(true, film = true)}&type[]=Film&page=$page"
+            fetchDocument(filmUrl).select(".catalog-card, .as-carte-oeuvre").mapNotNull { card ->
                 val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                     .split("/").firstOrNull() ?: return@mapNotNull null
-                val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@mapNotNull null
                 val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 Movie(id = "$slug@film0", title = title, poster = img)
             }.let { lot ->
@@ -1277,25 +1305,25 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         //   dernière page à l'infini, la liste s'empilait donc sans jamais finir.
         return when (language) {
             "film" -> try {
-                val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
-                fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
+                val filmUrl = "${baseUrl}catalogue/?tri=recent${anneeUrl(false, film = true)}&type[]=Film&page=$page"
+                fetchDocument(filmUrl).select(".catalog-card, .as-carte-oeuvre").mapNotNull { card ->
                     val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                     val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                         .split("/").firstOrNull() ?: return@mapNotNull null
-                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     TvShow(id = "$slug@vostfr-film0", title = title, poster = img).also { it.isMovie = true }
                 }.let { lot -> if (pageRecyclee("tv|film", lot.map { it.id })) emptyList() else lot }
             } catch (_: Exception) { emptyList() }
             else -> try {
                 val filmSlugs = getFilmSlugs()
-                val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vostfr&page=$page"
-                fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
+                val animeUrl = "${baseUrl}catalogue/?tri=recent${anneeUrl(false)}&type[]=Anime&langue[]=vostfr&page=$page"
+                fetchDocument(animeUrl).select(".catalog-card, .as-carte-oeuvre").mapNotNull { card ->
                     val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                     val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                         .split("/").firstOrNull() ?: return@mapNotNull null
                     if (slug in filmSlugs) return@mapNotNull null
-                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     TvShow(id = "$slug@vostfr", title = title, poster = img)
                 }.let { lot -> if (pageRecyclee("tv|serie", lot.map { it.id })) emptyList() else lot }
@@ -1309,25 +1337,25 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         // Anti-boucle de pagination : voir le pavé plus haut.
         return when (language) {
             "film" -> try {
-                val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
-                fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
+                val filmUrl = "${baseUrl}catalogue/?tri=recent${anneeUrl(true, film = true)}&type[]=Film&page=$page"
+                fetchDocument(filmUrl).select(".catalog-card, .as-carte-oeuvre").mapNotNull { card ->
                     val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                     val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                         .split("/").firstOrNull() ?: return@mapNotNull null
-                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     Movie(id = "$slug@film0", title = title, poster = img)
                 }.let { lot -> if (pageRecyclee("mv|film", lot.map { it.id })) emptyList() else lot }
             } catch (_: Exception) { emptyList() }
             else -> try {
                 val filmSlugs = getFilmSlugs()
-                val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=VF&page=$page"
-                fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
+                val animeUrl = "${baseUrl}catalogue/?tri=recent${anneeUrl(true)}&type[]=Anime&langue[]=VF&page=$page"
+                fetchDocument(animeUrl).select(".catalog-card, .as-carte-oeuvre").mapNotNull { card ->
                     val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                     val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                         .split("/").firstOrNull() ?: return@mapNotNull null
                     if (slug in filmSlugs) return@mapNotNull null
-                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@mapNotNull null
                     val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                     Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
                 }.let { lot -> if (pageRecyclee("mv|serie", lot.map { it.id })) emptyList() else lot }
@@ -2272,7 +2300,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         //      (jusqu'à 3), et on ne s'arrête que sur une page RÉELLEMENT vide.
         val idEncode = java.net.URLEncoder.encode(id, "UTF-8")
         fun urlPour(p: Int): String {
-            val sb = StringBuilder("${baseUrl}catalogue/?genre[]=$idEncode&page=$p")
+            val sb = StringBuilder("${baseUrl}catalogue/?tri=recent${anneeUrl(lang.equals("vf", true), film = type == "Film")}&genre[]=$idEncode&page=$p")
             if (!langParam.isNullOrEmpty()) sb.append("&langue[]=$langParam")
             if (!type.isNullOrEmpty()) sb.append("&type[]=$type")
             return sb.toString()
@@ -2288,7 +2316,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             pageCourante = curseur.second + 1
         }
         var document = fetchDocument(urlPour(pageCourante))
-        var cartes = document.select(".catalog-card")
+        var cartes = document.select(".catalog-card, .as-carte-oeuvre")
         var sauts = 0
         while (sauts < 3 &&
             cartes.isNotEmpty() &&
@@ -2301,7 +2329,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             pageCourante++
             sauts++
             document = fetchDocument(urlPour(pageCourante))
-            cartes = document.select(".catalog-card")
+            cartes = document.select(".catalog-card, .as-carte-oeuvre")
         }
         curseurGenre = cle to pageCourante
         Log.d(TAG, "[getGenre] id=$id page=$page→$pageCourante lang=$lang type=$type " +
@@ -2320,7 +2348,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 // Anti-boucle : le site re-sert sa dernière page à l'infini (voir le
                 //   pavé ANTI-BOUCLE DE PAGINATION). Un slug déjà rendu = page recyclée.
                 if (!inedit("genre|$cle", "g", slug)) return@flatMap emptyList<Show>()
-                val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@flatMap emptyList<Show>()
+                val title = card.selectFirst(".card-title, .as-carte-titre")?.text()?.trim() ?: return@flatMap emptyList<Show>()
                 val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 // 2026-06-20 (user "sur FR il y a rien") : MoviesViewModel
                 //   filterIsInstance<Movie>() et TvShowsViewModel

@@ -59,7 +59,8 @@ object VidaraLibrary {
         val titre: String get() = nomBrut.substringBeforeLast('.', nomBrut).trim()
         /** Nom LISIBLE (sans l'identifiant TMDB de tete). Cf. VoeLibrary.titreAffiche. */
         val titreAffiche: String
-            get() = titre.replace(RE_ID_TETE, "").replace(RE_TV_TETE, "").trim().ifBlank { titre }
+            get() = titre.replace(RE_ID_TETE, "").replace(RE_TV_TETE, "").replace(RE_NUM_SITE, "")
+                .trim().ifBlank { titre }
         val embed: String get() = "$EMBED/e/$code"
     }
 
@@ -428,9 +429,15 @@ object VidaraLibrary {
         saison: Int = 0,
         episode: Int = 0,
     ): List<Video.Server> {
-        if (!actif) return emptyList()
+        // 2026-11-05 (user : « fais ce que tu veux pour faire apparaitre les series ») : les
+        //   serveurs ONYX viennent de l'INDEX PUBLIE (data/vidara.json), qui couvre les DEUX
+        //   comptes Vidara (films + series). AVANT : chaque appareil relisait le compte des
+        //   films par l'API toutes les 10 min -> limite Vidara (200 req/min) depassee en
+        //   permanence, et le compte des series n'etait jamais vu. Plus AUCUNE cle Vidara dans
+        //   l'appli (user : « enleve-la ») : index seulement.
         val fichiers = try {
-            toutRapide().filterNot { it.estClip }
+            toutNav()
+            cacheTous.filterNot { it.estClip }
         } catch (e: Exception) {
             Log.w(TAG, "lecture Vidara KO : ${e.message}")
             return emptyList()
@@ -538,6 +545,8 @@ object VidaraLibrary {
     val disponible: Boolean get() = true
 
     @Volatile private var cacheNav: List<Fichier> = emptyList()
+    /** 2026-11-05 : TOUT l'index (fichiers sans dossier compris) — sert aux serveurs ONYX. */
+    @Volatile private var cacheTous: List<Fichier> = emptyList()
     @Volatile private var cacheNavTs: Long = 0L
     private val verrouNav = kotlinx.coroutines.sync.Mutex()
 
@@ -578,6 +587,7 @@ object VidaraLibrary {
                 ?: run { Log.w(TAG, "index sans champ items"); return@withLock cacheNav }
 
             val liste = ArrayList<Fichier>(tableau.length())
+            val tous = ArrayList<Fichier>(tableau.length())
             for (i in 0 until tableau.length()) {
                 val o = tableau.optJSONObject(i) ?: continue
                 val code = o.optString("code").trim()
@@ -585,14 +595,11 @@ object VidaraLibrary {
                 val nom = o.optString("titre").ifBlank { o.optString("nom") }
                 if (nom.isBlank()) continue
                 val chemin = normaliseChemin(o.optString("dossier").trim())
-                // 2026-10-26 (user : « tout ce qui est en dehors de ces dossiers ne devrait
-                //   pas être là ») : un fichier sans dossier dans l'index n'est jamais affiché.
-                if (chemin.isBlank()) continue
                 val estClipDossier = java.text.Normalizer
                     .normalize(chemin, java.text.Normalizer.Form.NFD)
                     .replace(Regex("\\p{Mn}+"), "").lowercase()
                     .let { it.contains("clip") || it.contains("musique") }
-                liste += Fichier(
+                val f = Fichier(
                     code = code,
                     nomBrut = nom,
                     // L'index publie la durée en SECONDES (vérifié : 7500 = 125 min).
@@ -602,6 +609,12 @@ object VidaraLibrary {
                     ajout = o.optString("ajout").trim(),
                     vid = o.optLong("vid", 0L),
                 )
+                tous += f
+                // 2026-10-26 (user : « tout ce qui est en dehors de ces dossiers ne devrait
+                //   pas être là ») : un fichier sans dossier n'est jamais affiché dans la
+                //   NAVIGATION (il reste utilisable comme serveur, cf. cacheTous).
+                if (chemin.isBlank()) continue
+                liste += f
             }
             // Un échec (liste vide) ne doit JAMAIS écraser un cache garni.
             if (liste.isEmpty() && cacheNav.isNotEmpty()) {
@@ -609,6 +622,7 @@ object VidaraLibrary {
                 return@withLock cacheNav
             }
             cacheNav = liste
+            cacheTous = tous
             cacheNavTs = System.currentTimeMillis()
             Log.i(TAG, "index Vidara chargé : ${liste.size} fichiers, " +
                 "${liste.map { it.dossier }.distinct().size} dossier(s)")
@@ -803,6 +817,10 @@ object VidaraLibrary {
      * le bon en tete. Sans annee dans le nom du fichier, on ne cherche donc PAS.
      */
     private val RE_ANNEE_FIN = Regex("""\((\d{4})\)\s*$""")
+    /** 2026-11-05 : « Le Voile du secret [1465886] » — numéro du film sur le site d'origine
+     *  (ajouté par les scripts de téléchargement), PAS un identifiant TMDB : jamais affiché,
+     *  et retiré avant la recherche titre + année (il masquait l'année finale). */
+    private val RE_NUM_SITE = Regex("""\s*\[\s*\d{4,8}\s*]""")
 
     /**
      * Cle de recherche « q:<titre>|<annee> », dans le MEME cache que les identifiants —
@@ -811,9 +829,10 @@ object VidaraLibrary {
      * Rend null si le nom ne porte pas d'annee exploitable.
      */
     private fun cleRechercheDe(f: Fichier): String? {
-        val m = RE_ANNEE_FIN.find(f.titre) ?: return null
+        val brut = f.titre.replace(RE_NUM_SITE, "").trim()
+        val m = RE_ANNEE_FIN.find(brut) ?: return null
         val annee = m.groupValues[1]
-        val titre = f.titre.removeRange(m.range).trim().trim('-', '.', '_').trim()
+        val titre = brut.removeRange(m.range).trim().trim('-', '.', '_').trim()
         if (titre.isBlank()) return null
         return "q:${titre.lowercase()}|$annee"
     }

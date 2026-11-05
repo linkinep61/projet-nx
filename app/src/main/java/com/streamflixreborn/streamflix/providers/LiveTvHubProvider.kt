@@ -3948,6 +3948,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  Retourne null si l'item n'est pas dans un dossier (= vrai live WiTV/Vavoo). */
     private fun folderSiblingsOf(currentId: String?): List<TvShow>? {
         if (currentId.isNullOrBlank()) return null
+        // 2026-11-06 (signalement : « le contenu proposé pour le zapping n'est pas celui de la
+        //   section qui devrait être ») : une chaîne de Mix FR est souvent rangée dans PLUSIEURS
+        //   catégories (Séries, Nouveautés, 100 % Français…). folderContents est une
+        //   ConcurrentHashMap (ordre quelconque) : on rendait la PREMIÈRE catégorie trouvée, pas
+        //   celle d'où la chaîne a été lancée. La grille affichée en dernier (« __grid_active »,
+        //   cf. LiveHubFolderDialog.publierGrilleActive) passe donc en premier.
+        folderContents["__grid_active"]?.let { cats ->
+            for (cat in cats) {
+                val items = (cat.list as? List<*>)?.filterIsInstance<TvShow>() ?: continue
+                if (items.any { it.id == currentId }) return items
+            }
+        }
         for ((_, cats) in folderContents) {
             for (cat in cats) {
                 val items = (cat.list as? List<*>)?.filterIsInstance<TvShow>() ?: continue

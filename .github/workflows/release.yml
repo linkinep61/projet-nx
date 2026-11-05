@@ -31,7 +31,6 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           RABBITSTREAM_SOURCE_API: ${{ secrets.RABBITSTREAM_SOURCE_API }}
           VOE_API_KEY: ${{ secrets.VOE_API_KEY }}
-          VIDARA_API_KEY: ${{ secrets.VIDARA_API_KEY }}
           OPENSUBTITLES_API_KEY: ${{ secrets.OPENSUBTITLES_API_KEY }}
         run: |
           echo TMDB_API_KEY=$TMDB_API_KEY >> local.properties
@@ -39,9 +38,7 @@ jobs:
           # 2026-08-17 : clé API du serveur VOE perso du user (VoeLibrary). Vide si le secret
           #   n'est pas défini → build.gradle retombe sur "" → provider VOE inactif (pas d'échec).
           echo VOE_API_KEY=$VOE_API_KEY >> local.properties
-          # 2026-09-02 : clé API du serveur Vidara perso du user (VidaraLibrary). Vide si le secret
-          #   n'est pas défini → build.gradle retombe sur "" → source Vidara inactive (pas d'échec).
-          echo VIDARA_API_KEY=$VIDARA_API_KEY >> local.properties
+          # 2026-11-05 : plus de clé Vidara dans l'APK — les serveurs ONYX viennent de l'index publié.
           # 2026-10-16 : clés OpenSubtitles communes (plusieurs, séparées par des virgules). Sans ce
           #   secret, l'APK publié n'a AUCUNE clé et la recherche de sous-titres est morte (cf. CLAUDE.md).
           echo OPENSUBTITLES_API_KEY=$OPENSUBTITLES_API_KEY >> local.properties

@@ -2390,7 +2390,11 @@ class PlayerViewModel(
      *   suspendues depuis le 25/09/2026). Ses lecteurs sont retirés de toutes les listes, quel que
      *   soit le provider (FRAnime, AnimeSama, Vostfree…). Pour le rétablir : vider SERVEURS_MASQUES.
      */
-    private val SERVEURS_MASQUES = listOf("sibnet")
+    // 2026-11-06 (zap Mix FR sur l'émulateur : NullPointerException ici, lecteur refermé) : une
+    //   propriété AVEC valeur stockée, déclarée aussi bas dans la classe, n'est pas encore
+    //   initialisée quand la recherche de serveurs (lancée dès la construction du ViewModel)
+    //   arrive jusqu'ici → null. Accesseur sans valeur stockée : jamais null.
+    private val SERVEURS_MASQUES: List<String> get() = listOf("sibnet")
 
     private fun estServeurMasque(s: Video.Server): Boolean =
         SERVEURS_MASQUES.any { s.name.contains(it, ignoreCase = true) || s.src.contains(it, ignoreCase = true) }

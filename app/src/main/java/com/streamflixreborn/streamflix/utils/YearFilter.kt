@@ -86,12 +86,23 @@ object YearFilter {
      *   filtre INVISIBLE (constaté par le user — « ça ne marche pas sur Wiflix »), les
      *   écarter masquerait 80 % du catalogue. Retiré sur sa décision.
      */
+    // 2026-11-05 : AnimeSama ajouté — son nouveau site filtre par année côté serveur
+    //   (annee_min / annee_max), câblé dans AnimeSamaProvider.anneeUrl().
     fun estSupporte(providerName: String?): Boolean =
-        providerName == "Movix" || providerName == "Cloudstream" ||
+        providerName == "Movix" || providerName == "Cloudstream" || providerName == "AnimeSama" ||
             providerName == "NetMirror" || providerName?.startsWith("TMDb") == true
 
-    private fun cle(providerName: String, type: Type) =
-        "pref_year_filter_${type.cle}_$providerName"
+    /** 2026-11-05 (user : « on ne peut pas trier les films ») : un provider peut avoir des
+     *  SOUS-ONGLETS (AnimeSama : Série / Film dans FR et VOSTFR) qui doivent garder chacun leur
+     *  année. Il renvoie ici le sous-onglet affiché ; un nom déjà qualifié (« AnimeSama#Film »)
+     *  est pris tel quel. */
+    @Volatile var sousOnglet: ((String) -> String?)? = null
+
+    private fun cle(providerName: String, type: Type): String {
+        val sous = if ('#' in providerName) null else sousOnglet?.invoke(providerName)
+        val nom = if (sous != null) "$providerName#$sous" else providerName
+        return "pref_year_filter_${type.cle}_$nom"
+    }
 
     fun get(providerName: String, type: Type): Plage = try {
         Plage.deserialise(

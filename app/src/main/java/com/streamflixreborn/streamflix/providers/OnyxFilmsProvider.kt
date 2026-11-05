@@ -225,6 +225,7 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
         val otf: List<com.streamflixreborn.streamflix.utils.OtfTvService.OtfMovie>,
         val persoPrep: List<Prep>,
         val commuPrep: List<Prep>,
+        val seriesPrep: List<SeriePerso> = emptyList(),
     )
 
     /** Fichier perso / communauté déjà prêt (titre, clé, affiche, rangée). */
@@ -240,6 +241,10 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
         val rangeeDe = HashMap<String, String>()   // dossier → rangée ("" = exclu)
         return perso.mapNotNull { f ->
             if (f.estClip) return@mapNotNull null
+            // 2026-11-06 (user : « des séries qui apparaissent dans Nouveau … ça gâche l'interface »,
+            //   vu : « SEAL Team 2017 FHD - S07E06 » rangé dans « À vérifier ») : un ÉPISODE
+            //   (SxxExx dans le nom) n'est jamais un film, quel que soit son dossier → séries.
+            if (RE_SXE.containsMatchIn(VidaraLibrary.sansPrefixe(f.titre))) return@mapNotNull null
             val r = rangeeDe.getOrPut(f.dossier) {
                 val rg = rangeeVidara(f.dossier)
                 if (rg == "Clips musique" || norm(f.dossier).startsWith("serie")) "" else rg
@@ -260,6 +265,127 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
         val titre = propre(VidaraLibrary.titrePour(b))
         Prep(b, titre, cleTitre(runCatching { VidaraLibrary.idTmdbDe(b) }.getOrNull(), titre),
             VidaraLibrary.posterPour(b), "Partage de la communauté")
+    }
+
+    // ─────────────────────────────────────── séries de la bibliothèque perso (Vidara)
+    // 2026-11-05 (user : « quand on va dans ONYX Films, dans l'onglet Séries, les nouvelles
+    //   séries vont apparaître ici … il faut combler le manque ») : les fichiers des dossiers
+    //   « Série / … » (2e compte Vidara) deviennent de vraies séries — onglet Séries, filtre
+    //   « ONYX », rangée d'accueil, recherche — avec saisons et épisodes lus dans les noms
+    //   (« tv232018 - Has Fallen - S01E01 », copies « #2 » = serveurs en plus).
+    //   Regroupement : identifiant TMDB de série (« tv… ») sinon nom écrit avant SxxExx.
+    private const val P_VS = "onyx::vs::"     // série   : onyx::vs::<clé>
+    private const val P_VSS = "onyx::vss::"   // saison  : onyx::vss::<clé>|<n>
+    private const val P_VSE = "onyx::vse::"   // épisode : onyx::vse::<clé>|<saison>|<épisode>
+    private val RE_SXE = Regex("(?i)(?<![a-z0-9])s(\\d{1,2})[ ._-]?e(\\d{1,4})(?!\\d)")
+
+    private class EpPerso(val saison: Int, val episode: Int, val f: VidaraLibrary.Fichier)
+    private class SeriePerso(val cle: String, val titre: String, val eps: List<EpPerso>, val ajout: String, val vid: Long) {
+        val id: String get() = P_VS + cle
+    }
+
+    /** Affiches TMDB des séries sans fiche dans VidaraLibrary (clé de série → URL). */
+    private val affichesSeries = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile private var seriesMemo: Pair<List<VidaraLibrary.Fichier>, List<SeriePerso>>? = null
+
+    private fun joliNom(s: String): String =
+        if (s != s.lowercase()) s
+        else s.split(' ').filter { it.isNotBlank() }.joinToString(" ") { it.replaceFirstChar { c -> c.titlecase() } }
+
+    /** Séries perso, de la plus récemment alimentée à la plus ancienne (mémorisé par index). */
+    private fun seriesPerso(perso: List<VidaraLibrary.Fichier>): List<SeriePerso> {
+        seriesMemo?.takeIf { it.first === perso }?.let { return it.second }
+        val groupes = LinkedHashMap<String, MutableList<EpPerso>>()
+        val noms = HashMap<String, String>()
+        for (f in perso) {
+            if (f.estClip) continue
+            val sansId = VidaraLibrary.sansPrefixe(f.titre)
+            val m = RE_SXE.find(sansId) ?: continue
+            // 2026-11-06 : épisode hors dossier « Série » (« À vérifier »…) compté aussi ; les
+            //   fichiers posés hors de tout dossier restent exclus (absents de la navigation).
+            if (!norm(f.dossier).startsWith("serie") && f.dossier == "Sans dossier") continue
+            val nomBrut = sansId.substring(0, m.range.first)
+                .replace('.', ' ').replace('_', ' ').trim().trim('-', ' ').trim()
+            val tv = runCatching { VidaraLibrary.idTmdbDe(f) }.getOrNull()?.takeIf { it.startsWith("tv") }
+            val n = norm(nomBrut)
+            val cle = tv ?: if (n.isNotEmpty()) "n$n" else continue
+            groupes.getOrPut(cle) { ArrayList() } += EpPerso(m.groupValues[1].toInt(), m.groupValues[2].toInt(), f)
+            if (nomBrut.isNotBlank()) noms.putIfAbsent(cle, nomBrut)
+        }
+        val out = groupes.map { (cle, eps) ->
+            val fiche = if (cle.startsWith("tv")) VidaraLibrary.ficheDe(eps.first().f) else null
+            val titre = fiche?.titre?.takeIf { it.isNotBlank() } ?: joliNom(noms[cle] ?: eps.first().f.titreAffiche)
+            val recent = eps.maxWith(compareBy<EpPerso>({ it.f.ajout }, { it.f.vid })).f
+            SeriePerso(cle, titre, eps.sortedWith(compareBy<EpPerso>({ it.saison }, { it.episode }, { it.f.nomBrut })),
+                recent.ajout, recent.vid)
+        }.sortedWith(compareByDescending<SeriePerso> { it.ajout }.thenByDescending { it.vid })
+        seriesMemo = perso to out
+        Log.i(TAG, "séries perso : ${out.size} (${out.sumOf { it.eps.size }} fichiers)")
+        return out
+    }
+
+    private fun posterDe(sp: SeriePerso): String? =
+        (if (sp.cle.startsWith("tv")) VidaraLibrary.ficheDe(sp.eps.first().f)?.poster else null)
+            ?: affichesSeries[sp.cle]
+
+    /** Affiches manquantes : TMDB par identifiant (« tv… ») ou par nom de série. */
+    private suspend fun completerAffiches(series: List<SeriePerso>) = coroutineScope {
+        series.filter { posterDe(it) == null }.map { sp ->
+            async(Dispatchers.IO) {
+                runCatching {
+                    val t = if (sp.cle.startsWith("tv"))
+                        com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShowById(sp.cle.removePrefix("tv").toInt(), "fr-FR")
+                    else com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShow(sp.titre, language = "fr-FR")
+                    t?.poster?.takeIf { it.isNotBlank() }?.let { affichesSeries[sp.cle] = it }
+                }
+            }
+        }.awaitAll()
+    }
+
+    private suspend fun seriePerso(cle: String): SeriePerso? {
+        val perso = withTimeoutOrNull(25_000) { runCatching { VidaraLibrary.toutNav() }.getOrNull() }.orEmpty()
+        return seriesPerso(perso).firstOrNull { it.cle == cle }
+    }
+
+    private fun episodesDe(sp: SeriePerso, saison: Int, tmdb: Map<Int, Episode> = emptyMap()): List<Episode> =
+        sp.eps.filter { it.saison == saison }.groupBy { it.episode }.toSortedMap().map { (e, l) ->
+            val t = tmdb[e]
+            val vost = l.all { VidaraLibrary.etiquetteLangue(it.f.nomBrut).isNotEmpty() }
+            Episode(id = P_VSE + sp.cle + "|" + saison + "|" + e, number = e,
+                title = (t?.title?.takeIf { it.isNotBlank() } ?: "Épisode $e") + (if (vost) " (VOSTFR)" else ""),
+                poster = t?.poster ?: posterDe(sp), overview = t?.overview)
+        }
+
+    /** Titres / images des épisodes chez TMDB (séries identifiées « tv… » seulement). */
+    private suspend fun episodesTmdb(sp: SeriePerso, saison: Int): Map<Int, Episode> {
+        if (!sp.cle.startsWith("tv")) return emptyMap()
+        return withTimeoutOrNull(6_000) {
+            runCatching {
+                com.streamflixreborn.streamflix.utils.TmdbUtils.getEpisodesBySeason(sp.cle.removePrefix("tv"), saison, "fr-FR")
+            }.getOrNull()
+        }.orEmpty().associateBy { it.number }
+    }
+
+    private suspend fun ficheSeriePerso(cle: String): TvShow {
+        val sp = seriePerso(cle)
+            ?: return TvShow(id = P_VS + cle, title = "").apply { providerName = name }
+        val t = withTimeoutOrNull(6_000) {
+            runCatching {
+                if (cle.startsWith("tv")) com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShowById(cle.removePrefix("tv").toInt(), "fr-FR")
+                else com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShow(sp.titre, language = "fr-FR")
+            }.getOrNull()
+        }
+        val affiche = posterDe(sp) ?: t?.poster
+        val saisons = sp.eps.map { it.saison }.distinct().sorted().map { n ->
+            Season(id = P_VSS + cle + "|" + n, number = n, title = "Saison $n", poster = affiche,
+                episodes = episodesDe(sp, n, episodesTmdb(sp, n)))
+        }
+        return TvShow(id = P_VS + cle, title = sp.titre).copy(
+            poster = affiche, banner = t?.banner ?: affiche, overview = t?.overview,
+            released = t?.released?.let { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(it.time) },
+            rating = t?.rating, genres = t?.genres ?: emptyList(),
+            cast = t?.cast ?: emptyList(), seasons = saisons,
+        ).apply { providerName = name }
     }
 
     @Volatile private var sourcesMemo: Sources? = null
@@ -299,8 +425,14 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
         //   des gros index Ciné Films encore en cours.
         val persoPrep = async(Dispatchers.Default) { preparerPerso(perso.await()) }
         val commuPrep = async(Dispatchers.Default) { preparerCommu(commu.await()) }
+        // Séries perso + leurs affiches manquantes, pendant que les gros index arrivent.
+        val seriesPrep = async(Dispatchers.Default) {
+            val l = seriesPerso(perso.await())
+            withTimeoutOrNull(8_000) { runCatching { completerAffiches(l) } }
+            l
+        }
         Sources(perso.await(), commu.await(), vegeta.await() != null, ola.await() != null, otf.await(),
-            persoPrep.await(), commuPrep.await())
+            persoPrep.await(), commuPrep.await(), seriesPrep.await())
     }
 
     /** Version accueil (40 titres par rangée), gardée pour retrouver les tuiles affichées. */
@@ -517,6 +649,16 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
                 .forEach { ids += it.second }
             rangees[k] = "Derniers ajouts" to ids
         }
+        // 2026-11-05 : séries perso (2e compte Vidara), dernières alimentées en tête.
+        if (src.seriesPrep.isNotEmpty()) {
+            val ids = LinkedHashSet<String>()
+            for (sp in src.seriesPrep) {
+                entrees.getOrPut(sp.id) { Entree(sp.id, sp.titre, posterDe(sp), serie = true) }
+                ids += sp.id
+            }
+            rangees["seriesonyx"] = "Séries ONYX" to ids
+            totaux["seriesonyx"] = ids.size
+        }
         val t1 = System.currentTimeMillis()
         // 2. partage de la communauté
         for (p in src.commuPrep) {
@@ -623,6 +765,7 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
             return when {
                 n.startsWith("derniersajouts") -> -2
                 n.startsWith("nouveauxfilms") -> -1
+                n.startsWith("seriesonyx") -> -1
                 n.startsWith("nouveau") -> 0
                 n.startsWith("partage") -> 1
                 n.startsWith("filmsotf") -> 2
@@ -751,6 +894,8 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
             if (ok(Origine.OLA)) OlaVod.indexSiCharge()?.let { idx ->
                 for (f in idx.films) yield(LigneOlaFilm(norm(propre(f.titre)), f)) }
         } else {
+            if (ok(Origine.PERSO)) for (sp in s.seriesPrep)
+                yield(LigneFixe(norm(sp.titre), sp.id, sp.titre, posterDe(sp), true, Origine.PERSO))
             if (ok(Origine.VEGETA)) VegetaVod.indexSiCharge()?.let { idx ->
                 for (se in idx.series) yield(LigneVegetaSerie(norm(se.titre), se)) }
             if (ok(Origine.OLA)) OlaVod.indexSiCharge()?.let { idx ->
@@ -855,6 +1000,7 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
         val s = chargerSources()
         val v = VegetaVod.indexSiCharge(); val o = OlaVod.indexSiCharge()
         val presentes = if (series) listOfNotNull(
+            Origine.PERSO.takeIf { s.seriesPrep.isNotEmpty() },
             Origine.VEGETA.takeIf { v?.series?.isNotEmpty() == true },
             Origine.OLA.takeIf { o?.series?.isNotEmpty() == true },
         ) else listOfNotNull(
@@ -932,6 +1078,7 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
     }
 
     override suspend fun getTvShow(id: String): TvShow {
+        if (id.startsWith(P_VS)) return ficheSeriePerso(id.removePrefix(P_VS))
         if (id.startsWith(P_FILM)) {
             val (titre, poster) = infosDe(id)
             return TvShow(id = id, title = titre).copy(
@@ -965,7 +1112,17 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
         ).apply { providerName = name }
     }
 
-    override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> =
+    override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
+        if (seasonId.startsWith(P_VSS)) {
+            val p = seasonId.removePrefix(P_VSS).split("|")
+            val n = p.getOrNull(1)?.toIntOrNull() ?: return emptyList()
+            val sp = seriePerso(p[0]) ?: return emptyList()
+            return episodesDe(sp, n, episodesTmdb(sp, n))
+        }
+        return episodesHub(seasonId)
+    }
+
+    private suspend fun episodesHub(seasonId: String): List<Episode> =
         LiveTvHubProvider.getEpisodesBySeason(seasonId.removePrefix(PREFIX)).map { ep ->
             Episode(id = PREFIX + ep.id, number = ep.number, title = ep.title, poster = ep.poster, overview = ep.overview)
         }
@@ -984,7 +1141,16 @@ object OnyxFilmsProvider : Provider, ProgressiveServersProvider {
     override suspend fun getPeople(id: String, page: Int): People = People(id = id, name = id)
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
-        val sources: List<Source> = if (id.startsWith(P_FILM)) {
+        val sources: List<Source> = if (id.startsWith(P_VSE)) {
+            // Épisode d'une série perso : chaque copie (« #2 »…) = un serveur ONYX de plus.
+            val p = id.removePrefix(P_VSE).split("|")
+            val sa = p.getOrNull(1)?.toIntOrNull() ?: -1
+            val ep = p.getOrNull(2)?.toIntOrNull() ?: -1
+            val sp = seriePerso(p[0])
+            Log.d(TAG, "serveurs série perso ${p[0]} S${sa}E$ep (série ${if (sp == null) "introuvable" else "trouvée"})")
+            sp?.eps.orEmpty().filter { it.saison == sa && it.episode == ep }
+                .map { Source("livehub::vidara::${it.f.code}", Origine.PERSO) }
+        } else if (id.startsWith(P_FILM)) {
             // Catalogue complet déjà construit → ses sources ; sinon recherche directe (rapide).
             cache?.entrees?.get(id)?.sources?.sortedBy { it.origine.rang } ?: sourcesDirectes(id)
         } else {

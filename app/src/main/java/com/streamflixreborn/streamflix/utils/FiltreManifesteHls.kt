@@ -41,7 +41,12 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
         delegue.addTransferListener(transferListener)
     }
 
-    override fun getUri(): Uri? = uriCourante ?: delegue.uri
+    // 2026-11-06 (signalement : « la fonction zap est non fonctionnelle sur l'ensemble du
+    //   répertoire Mix FR ») : l'adresse RÉELLE après redirection d'abord. Les chaînes Pluto de
+    //   Mix FR passent par jmp2.uk/plu-….m3u8, qui redirige vers le serveur Pluto ; ExoPlayer
+    //   résout les variantes RELATIVES du manifeste contre getUri(). Avec l'adresse d'avant
+    //   redirection, il demandait jmp2.uk/1042180/playlist.m3u8?…jwt=… → HTTP 414, écran noir.
+    override fun getUri(): Uri? = delegue.uri ?: uriCourante
 
     override fun getResponseHeaders(): Map<String, List<String>> = delegue.responseHeaders
 
@@ -64,7 +69,11 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
         passePlat = false
         val brut = try {
             delegue.open(dataSpec)
-            DataSourceUtil.readToEnd(delegue)
+            DataSourceUtil.readToEnd(delegue).also {
+                // Manifeste lu puis délégué fermé (son uri repasse à null) : on garde l'adresse
+                //   FINALE (après redirection), base des adresses relatives du manifeste.
+                delegue.uri?.let { u -> uriCourante = u }
+            }
         } catch (e: Throwable) {
             runCatching { delegue.close() }
             throw e
