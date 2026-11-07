@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
  */
 object LiensMorts {
     private const val TAG = "LiensMorts"
-    private const val URL_BASE = "https://onyx-index-test.logami61250.workers.dev"
+    private const val URL_BASE = "https://relais-k3.logami61250.workers.dev"
     private const val RAFRAICHIR_MS = 3 * 3600_000L
 
     @Volatile private var ensemble: Set<String> = emptySet()

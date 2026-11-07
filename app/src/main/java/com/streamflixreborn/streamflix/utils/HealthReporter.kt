@@ -45,7 +45,7 @@ object HealthReporter {
      */
     private const val TELEMETRIE_D1_ACTIVE = false
 
-    private const val ENDPOINT = "https://streamflix-api.logami61250.workers.dev/health/event"
+    private const val ENDPOINT = "https://relais-a7.logami61250.workers.dev/health/event"
     private const val PREFS = "health_reporter"
     private const val KEY_DEVICE = "anon_device_id"
     private const val FLUSH_AT = 10          // envoie dès 10 événements en attente

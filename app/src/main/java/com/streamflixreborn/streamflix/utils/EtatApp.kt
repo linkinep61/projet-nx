@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
 object EtatApp {
 
     private const val TAG = "EtatApp"
-    private const val URL_ETAT = "https://streamflix-api.logami61250.workers.dev/etat"
+    private const val URL_ETAT = "https://relais-a7.logami61250.workers.dev/etat"
 
     private const val PREFS = "etat_app"
     private const val K_BLOQUEE = "bloquee"

@@ -34,7 +34,7 @@ import java.util.concurrent.TimeUnit
  */
 object SanteSources {
     private const val TAG = "SanteSources"
-    private const val URL_BASE = "https://onyx-index-test.logami61250.workers.dev"
+    private const val URL_BASE = "https://relais-k3.logami61250.workers.dev"
     private const val INTERVALLE_MS = 10 * 60_000L
 
     // Index des compteurs : recherches, recherches avec serveurs, lectures tentées, lectures

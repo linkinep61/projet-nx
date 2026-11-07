@@ -198,7 +198,7 @@ object DeviceSyncManager {
         return tout
     }
 
-    private const val API_URL = "https://streamflix-api.logami61250.workers.dev"
+    private const val API_URL = "https://relais-a7.logami61250.workers.dev"
     private val JSON_MEDIA = "application/json".toMediaType()
 
     // ── ENVOI ──────────────────────────────────────────────────────────

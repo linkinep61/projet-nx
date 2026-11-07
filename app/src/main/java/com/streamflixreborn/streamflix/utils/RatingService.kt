@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap
 object RatingService {
 
     private const val TAG = "RatingService"
-    private const val API_URL = "https://streamflix-api.logami61250.workers.dev"
+    private const val API_URL = "https://relais-a7.logami61250.workers.dev"
     private const val PREFS_NAME = "community_rating_votes"
     private val JSON_MEDIA = "application/json".toMediaType()
 

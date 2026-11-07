@@ -28,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap
 object FicheCommunaute {
 
     private const val TAG = "FicheCommunaute"
-    private const val API_URL = "https://streamflix-api.logami61250.workers.dev"
+    private const val API_URL = "https://relais-a7.logami61250.workers.dev"
     private const val PREFS = "fiche_communaute"
     private const val DUREE_MS = 24 * 60 * 60 * 1000L
     private const val MAX_ENTREES = 3000

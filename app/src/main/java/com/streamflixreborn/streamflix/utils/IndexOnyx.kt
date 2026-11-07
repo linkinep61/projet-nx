@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  */
 object IndexOnyx {
     private const val TAG = "IndexOnyx"
-    private const val URL_BASE = "https://onyx-index-test.logami61250.workers.dev"
+    private const val URL_BASE = "https://relais-k3.logami61250.workers.dev"
     // 2026-11-01 (Bleach S2E46 sur la télé : « base injoignable (616 ms) : timeout » alors que le
     //   Worker répond en 30 ms) — quand 40 sources partent en même temps sur une box TV, la
     //   réponse met plus de 600 ms à arriver et la base était perdue. 4 s (relevé sur l'Oppo :
