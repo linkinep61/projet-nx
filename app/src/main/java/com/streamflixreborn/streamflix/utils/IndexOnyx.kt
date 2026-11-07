@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  */
 object IndexOnyx {
     private const val TAG = "IndexOnyx"
-    private const val URL_BASE = "https://onyx-index-test.logami61250.workers.dev"
+    private const val URL_BASE = "https://db.velkara.net"
     // 2026-11-01 (Bleach S2E46 sur la télé : « base injoignable (616 ms) : timeout » alors que le
     //   Worker répond en 30 ms) — quand 40 sources partent en même temps sur une box TV, la
     //   réponse met plus de 600 ms à arriver et la base était perdue. 4 s (relevé sur l'Oppo :
@@ -97,12 +97,12 @@ object IndexOnyx {
         override fun callEnd(call: okhttp3.Call) = fin("ok")
         override fun callFailed(call: okhttp3.Call, ioe: java.io.IOException) = fin("échec ${ioe.message}")
     }
-    private val client = OkHttpClient.Builder().callTimeout(DELAI_MS, TimeUnit.MILLISECONDS)
+    private val client = OkHttpClient.Builder().addInterceptor(CleServices).callTimeout(DELAI_MS, TimeUnit.MILLISECONDS)
         .eventListenerFactory { ChronoEtapes() }.build()
     /** 2ᵉ essai : connexions À PART (une connexion restée accrochée au Worker figé n'est pas réutilisée). */
-    private val clientNeuf = OkHttpClient.Builder().callTimeout(DELAI_MS, TimeUnit.MILLISECONDS)
+    private val clientNeuf = OkHttpClient.Builder().addInterceptor(CleServices).callTimeout(DELAI_MS, TimeUnit.MILLISECONDS)
         .connectionPool(okhttp3.ConnectionPool()).eventListenerFactory { ChronoEtapes() }.build()
-    private val clientEnvoi = OkHttpClient.Builder().callTimeout(5, TimeUnit.SECONDS).build()
+    private val clientEnvoi = OkHttpClient.Builder().addInterceptor(CleServices).callTimeout(5, TimeUnit.SECONDS).build()
     private val portee = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
 
     /** Une seule question par film/épisode, partagée par toutes les sources (cache 10 min). */

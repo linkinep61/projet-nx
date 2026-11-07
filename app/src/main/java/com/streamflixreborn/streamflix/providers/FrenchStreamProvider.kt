@@ -443,7 +443,11 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         val nouveautesSeriesDeferred = async {
             try {
                 withTimeoutOrNull(6_000L) {
-                    service.getTvShows("series").select("div.short").mapNotNull { item ->
+                    // 2026-11-12 (user : « nouveaux films et nouvelles séries proposent les mêmes
+                    //   choses ») : vérifié dans Chrome, `/series` est devenu la liste GÉNÉRALE du
+                    //   site (films et séries mélangés, 8 films sur 18). La vraie liste des séries
+                    //   est `/s-tv/` (« Série streaming complet », pagination `/s-tv/page/N`).
+                    service.getTvShows("s-tv/").select("div.short").mapNotNull { item ->
                         val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
                         val href = linkEl.attr("href")
                         val id = extractNewsId(href) ?: return@mapNotNull null
@@ -759,7 +763,9 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 || title.matches(Regex(".*\\bS\\d{1,2}\\b.*", RegexOption.IGNORE_CASE))
         }
         return try {
-            val url = if (page <= 1) "series" else "series/page/$page"
+            // 2026-11-12 : `/series` mélange maintenant films et séries → `/s-tv/` (cf. getHome).
+            //   Le filtre « Saison » ci-dessous reste en garde-fou.
+            val url = if (page <= 1) "s-tv/" else "s-tv/page/$page/"
             val document = service.getTvShows(url)
             // 2026-05-04 : on filtre les films qui s'invitent dans /series
             // (vu : "Sarah's Oil", "Le Diable s'habille en Prada 2", "F1 2026").

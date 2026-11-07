@@ -242,6 +242,80 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     private val episodesJsCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
     private const val EPISODES_JS_CACHE_MAX = 40
 
+    // 2026-11-12 : nouveau format du site. La page de saison contient
+    //     var eps1 = ["lien:44580", ...]; var epsMeta = {"44580":["hote"(, etat)]}; var epsJeton = "...";
+    //   Les entrees ne sont plus des adresses mais des reperes « lien:<n> » : la vraie adresse
+    //   se demande a /api/lien.php avec le jeton de la page (valable 24 h).
+    //   On reconstruit ici un texte au MEME format que l'ancien episodes.js
+    //     var eps1 = ['https://<hote>/__lien_as__/<n>', ...];
+    //   pour que tous les appelants (comptage, dedoublonnage, noms de serveurs) restent
+    //   inchanges. Les reperes sont remplaces par la vraie adresse dans getServers
+    //   (vraieAdresse). Etat 1 dans epsMeta = video supprimee -> suffixe « /hs », jamais proposee.
+    private const val MARQUE_LIEN = "/__lien_as__/"
+    private val jetonsLiens = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Texte « facon episodes.js » tire de la page de saison ; null si la page n'a pas de liste. */
+    private fun episodesDepuisPage(html: String, cle: String): String? {
+        val listes = Regex("""var\s+(eps\w+)\s*=\s*\[([\s\S]*?)\]""").findAll(html).toList()
+        if (listes.none { it.groupValues[1] == "eps1" }) return null
+        val meta = Regex("""var\s+epsMeta\s*=\s*(\{[\s\S]*?\})\s*;""").find(html)?.groupValues?.get(1)
+            ?.let { runCatching { org.json.JSONObject(it) }.getOrNull() }
+        val jeton = Regex("""var\s+epsJeton\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1).orEmpty()
+        if (jeton.isNotBlank()) jetonsLiens[cle] = jeton
+        val sb = StringBuilder()
+        var reperes = 0
+        for (m in listes) {
+            val entrees = Regex("""["']([^"']*)["']""").findAll(m.groupValues[2]).map { it.groupValues[1] }.toList()
+            if (entrees.isEmpty()) continue
+            sb.append("var ").append(m.groupValues[1]).append(" = [")
+            entrees.forEachIndexed { i, e ->
+                val adresse = if (e.startsWith("lien:")) {
+                    reperes++
+                    val n = e.substring(5)
+                    val mt = meta?.optJSONArray(n)
+                    val hote = mt?.optString(0).orEmpty().ifBlank { "lien.invalid" }
+                    val hs = if (mt != null && mt.optInt(1, 0) == 1) "/hs" else ""
+                    "https://$hote$MARQUE_LIEN$n$hs"
+                } else e
+                if (i > 0) sb.append(',')
+                sb.append('\'').append(adresse).append('\'')
+            }
+            sb.append("];\n")
+        }
+        Log.d(TAG, "[Liens] page lue : ${listes.size} liste(s), $reperes repere(s), jeton=${jeton.isNotBlank()} ($cle)")
+        return sb.toString().takeIf { it.contains("var eps1") }
+    }
+
+    /**
+     * Vraie adresse d'une entree de liste : inchangee si c'est deja une adresse, sinon demandee
+     * a /api/lien.php. null = video supprimee, jeton manquant ou refus du site.
+     * Jeton perime -> on relit la page (nouveau jeton) et on reessaie une fois.
+     */
+    private suspend fun vraieAdresse(url: String, cle: String, essai: Int = 0): String? {
+        if (!url.contains(MARQUE_LIEN)) return url
+        if (url.endsWith("/hs")) return null
+        val n = url.substringAfter(MARQUE_LIEN).substringBefore("/")
+        val jeton = jetonsLiens[cle]
+        val reponse = if (jeton.isNullOrBlank()) null else try {
+            fetchText("${baseUrl}api/lien.php?j=$jeton&l=$n")
+        } catch (e: Exception) {
+            Log.w(TAG, "[Liens] $n : ${e.message}")
+            null
+        }
+        val vraie = reponse?.let { runCatching { org.json.JSONObject(it).optString("u") }.getOrNull() }
+            ?.takeIf { it.startsWith("http") }
+        if (vraie != null) return vraie
+        if (essai == 0) {
+            // Jeton perime ou absent : la page est relue (cache vide), puis second essai.
+            episodesJsCache.remove(cle)
+            jetonsLiens.remove(cle)
+            runCatching { chargerEpisodesJs(cle) }
+            return vraieAdresse(url, cle, 1)
+        }
+        Log.w(TAG, "[Liens] $n non resolu (${reponse?.take(60)})")
+        return null
+    }
+
     /** episodes.js avec cache ; probe = true → client court (probeClient), sinon client normal. */
     private suspend fun chargerEpisodesJs(url: String, probe: Boolean = false): String {
         val entree = episodesJsCache[url]
@@ -249,7 +323,15 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             if (System.currentTimeMillis() - entree.second <= CACHE_TTL_MS) return entree.first
             episodesJsCache.remove(url, entree)
         }
-        val texte = if (probe) probeText(url) else fetchText(url)
+        // 2026-11-12 : le site a supprime les fichiers episodes.js (404 partout). Les listes
+        //   sont desormais ecrites DANS la page de la saison : on lit la page d'abord. Une
+        //   page absente leve la meme exception qu'avant (saison inexistante). Si la page
+        //   existe sans liste, on retente l'ancien fichier (au cas ou le site y reviendrait).
+        val page = url.removeSuffix("episodes.js")
+        val depuisPage = if (page != url) {
+            episodesDepuisPage(if (probe) probeText(page) else fetchText(page), url)
+        } else null
+        val texte = depuisPage ?: (if (probe) probeText(url) else fetchText(url))
         if (texte.contains("var eps1") && challengeKeywords.none { texte.contains(it, ignoreCase = true) }) {
             val now = System.currentTimeMillis()
             episodesJsCache.entries.removeAll { now - it.value.second > CACHE_TTL_MS }
@@ -2004,7 +2086,8 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                                 .map { it.groupValues[1] }.toList()
                             Log.d(TAG, "[Movie Servers] $lang $varName: ${urls.size} urls, using index $filmIndex")
                             if (filmIndex < urls.size) {
-                                val url = urls[filmIndex]
+                                // 2026-11-12 : repere « lien:<n> » -> vraie adresse (null = supprimee / refus).
+                                val url = vraieAdresse(urls[filmIndex], fetchUrl) ?: continue
                                 val serverName = getServerName(varName, url)
                                 val langSuffix = if (languages.size > 1) " (${langLabels[lang]})" else ""
                                 langServers.add(Video.Server(
@@ -2061,13 +2144,20 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
             if (episodesJs.isBlank()) return emptyList()
 
-            for (match in epsRegex.findAll(episodesJs)) {
-                val varName = match.groupValues[1]
-                val urls = urlRegex.findAll(match.groupValues[2])
-                    .map { it.groupValues[1] }.toList()
+            // 2026-11-12 : les entrees sont des reperes « lien:<n> » ; on demande les vraies
+            //   adresses de CET episode en parallele (une par lecteur) avant de nommer les serveurs.
+            val bruts = epsRegex.findAll(episodesJs).mapNotNull { match ->
+                val urls = urlRegex.findAll(match.groupValues[2]).map { it.groupValues[1] }.toList()
+                if (episodeIndex < urls.size) match.groupValues[1] to urls[episodeIndex] else null
+            }.toList()
+            val resolus = coroutineScope {
+                bruts.map { (varName, brut) -> async { varName to vraieAdresse(brut, fetchUrl) } }.awaitAll()
+            }
+            Log.d(TAG, "[TV Servers] ${bruts.size} lecteur(s) annonce(s), ${resolus.count { it.second != null }} adresse(s) obtenue(s)")
 
-                if (episodeIndex < urls.size) {
-                    val url = urls[episodeIndex]
+            for ((varName, resolu) in resolus) {
+                run {
+                    val url = resolu ?: return@run
                     val serverName = getServerName(varName, url)
                     Log.d(TAG, "[TV Servers] $varName → $serverName$tvLangLabel → ${url.take(80)}")
                     servers.add(Video.Server(

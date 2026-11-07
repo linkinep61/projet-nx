@@ -157,6 +157,18 @@ class BancTestActivity : ComponentActivity() {
     /** Lancement depuis le PC : adb shell am start -n …/BancTestActivity --es q "titre" [--es tmdb 123 --es type tv --ei s 1 --ei e 2] */
     private fun lireIntent() {
         val i = intent ?: return
+        i.getStringExtra("url")?.takeIf { it.isNotBlank() }?.let { lancerUrl(it); return }
+        if (i.getBooleanExtra("revue", false)) {
+            // 2026-11-12 : revue de toutes les sources (voir RevueSources).
+            travail?.cancel()
+            lignes.clear(); liste.removeAllViews()
+            travail = lifecycleScope.launch {
+                RevueSources.lancer(i.getStringExtra("seul"), File(rapport.parentFile, "revue.txt")) { l ->
+                    runOnUiThread { resume.text = l.take(120) }
+                }
+            }
+            return
+        }
         val q = i.getStringExtra("q")
         val tmdb = i.getStringExtra("tmdb")
         if (q.isNullOrBlank() && tmdb.isNullOrBlank()) return
@@ -165,7 +177,8 @@ class BancTestActivity : ComponentActivity() {
         champTitre.setText(q ?: "tmdb:$tmdb")
         if (s > 0) champSaison.setText("$s")
         if (e > 0) champEpisode.setText("$e")
-        lancer(q, tmdb, i.getStringExtra("type"), s, e, rouges = i.getBooleanExtra("rouges", false))
+        lancer(q, tmdb, i.getStringExtra("type"), s, e, rouges = i.getBooleanExtra("rouges", false),
+            seul = i.getStringExtra("seul"))
     }
 
     override fun onDestroy() {
@@ -176,7 +189,11 @@ class BancTestActivity : ComponentActivity() {
     }
 
     // ── Déroulé d'un test ─────────────────────────────────────────────────────────
-    private fun lancer(q: String?, tmdb: String?, type: String?, s: Int, e: Int, rouges: Boolean = false) {
+    // 2026-11-12 (user : « pourquoi tu t'es pas focus directement sur les serveurs à regarder ?
+    //   on peut pas faire ça dans le banc ? ») : `seul` = ne tester que les serveurs dont le nom
+    //   (« Source · Serveur ») contient ce texte. Toutes les sources sont encore interrogées, mais
+    //   seuls les serveurs retenus sont extraits et lus : un essai ciblé prend 1 min au lieu de 10.
+    private fun lancer(q: String?, tmdb: String?, type: String?, s: Int, e: Int, rouges: Boolean = false, seul: String? = null) {
         travail?.cancel()
         lignes.clear(); liste.removeAllViews()
         nbOk = 0; nbKo = 0; nbEnCours = 0; collecteFinie = false; fichierTitre = null
@@ -220,6 +237,7 @@ class BancTestActivity : ComponentActivity() {
                                 //   sources IPTV jamais testées (rien à réparer de notre côté).
                                 if (SOURCES_IPTV.any { srv.id.removePrefix(BackupRegistry.PREFIX).startsWith("$it::") }) continue
                                 if (rouges && srv.name in dejaOk) continue   // vert au test précédent : on ne le rejoue pas
+                                if (!seul.isNullOrBlank() && !srv.name.contains(seul, ignoreCase = true)) continue
                                 val l = ajouterLigne(srv)
                                 portee.launch { tester(l, semExtraction, semLecture) }
                             }
@@ -230,6 +248,39 @@ class BancTestActivity : ComponentActivity() {
             }
             ecrireFin()
             majResume()
+        }
+    }
+
+    // 2026-11-12 (essai d'un nouvel hébergeur) : test d'UNE adresse de lecteur donnée
+    //   (adb … --es url "https://…"), sans passer par les sources : extraction puis lecture.
+    private fun lancerUrl(url: String) {
+        travail?.cancel()
+        lignes.clear(); liste.removeAllViews()
+        nbOk = 0; nbKo = 0; nbEnCours = 0; collecteFinie = false; fichierTitre = null
+        travail = lifecycleScope.launch {
+            titreCourant = "Adresse directe"
+            ecrireDebut("Adresse directe", "0")
+            val l = ajouterLigne(Video.Server(id = "direct", name = "Direct · ${android.net.Uri.parse(url).host}", src = url))
+            afficher(l, Color.LTGRAY, "◌", "extraction…")
+            val t0 = SystemClock.elapsedRealtime()
+            val video = try {
+                withTimeout(60_000L) { withContext(Dispatchers.IO) { Extractor.extract(url) } }
+            } catch (ex: Throwable) {
+                if (ex is CancellationException && ex !is TimeoutCancellationException) throw ex
+                terminer(l, Sonde(false, "extracteur : ${ex.javaClass.simpleName} ${ex.message?.take(120)}", null, null), SystemClock.elapsedRealtime() - t0)
+                collecteFinie = true; ecrireFin(); majResume(); return@launch
+            }
+            val tEx = SystemClock.elapsedRealtime() - t0
+            l.video = video
+            android.util.Log.i("BANC", "direct : source=${video.source.take(70)} clic=${video.needsWebViewClick} webView=${video.webViewUrl?.take(60)}")
+            val refus = when {
+                video.source.isBlank() -> "extracteur : aucune adresse de flux"
+                video.needsWebViewClick -> "navigateur requis (clic)"
+                else -> null
+            }
+            if (refus != null) terminer(l, Sonde(false, refus, null, null), tEx)
+            else { afficher(l, Color.WHITE, "▶", "lecture en cours (8 s)…"); terminer(l, sonder(video), tEx) }
+            collecteFinie = true; ecrireFin(); majResume()
         }
     }
 
@@ -424,7 +475,7 @@ class BancTestActivity : ComponentActivity() {
             com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(
                 // DefaultDataSource : accepte aussi les listes de lecture « data: » (Lulustream, Wiflix Lecteur 3).
                 androidx.media3.datasource.DefaultDataSource.Factory(this, avecEcoute)))
-        val p = ExoPlayer.Builder(this, rendus).setMediaSourceFactory(DefaultMediaSourceFactory(sources)).build()
+        val p = ExoPlayer.Builder(this, rendus).setMediaSourceFactory(DefaultMediaSourceFactory(sources, com.streamflixreborn.streamflix.utils.media3.ExtracteursAviDabord())).build()
         val mime = when {
             v.type?.contains("mpegurl", true) == true || v.source.contains(".m3u8", true) -> MimeTypes.APPLICATION_M3U8
             v.type?.contains("dash", true) == true || v.source.contains(".mpd", true) -> MimeTypes.APPLICATION_MPD

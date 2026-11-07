@@ -32,6 +32,7 @@ jobs:
           RABBITSTREAM_SOURCE_API: ${{ secrets.RABBITSTREAM_SOURCE_API }}
           VOE_API_KEY: ${{ secrets.VOE_API_KEY }}
           OPENSUBTITLES_API_KEY: ${{ secrets.OPENSUBTITLES_API_KEY }}
+          CLE_VELKARA: ${{ secrets.CLE_VELKARA }}
         run: |
           echo TMDB_API_KEY=$TMDB_API_KEY >> local.properties
           echo RABBITSTREAM_SOURCE_API=$RABBITSTREAM_SOURCE_API >> local.properties
@@ -42,6 +43,8 @@ jobs:
           # 2026-10-16 : clés OpenSubtitles communes (plusieurs, séparées par des virgules). Sans ce
           #   secret, l'APK publié n'a AUCUNE clé et la recherche de sous-titres est morte (cf. CLAUDE.md).
           echo OPENSUBTITLES_API_KEY=$OPENSUBTITLES_API_KEY >> local.properties
+          # 2026-11-07 : cle d'acces aux services en ligne de l'appli (pare-feu du domaine).
+          echo CLE_VELKARA=$CLE_VELKARA >> local.properties
 
       - name: Decode Keystore
         run: echo "${{ secrets.KEYSTORE }}" | base64 -d > streamflix-release.jks

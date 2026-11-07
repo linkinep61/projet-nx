@@ -125,6 +125,7 @@ object NetworkClient {
             Log.w("NetworkClient", "buildClient() on MAIN thread — skipping security wait")
         }
         val builder = OkHttpClient.Builder()
+            .addInterceptor(CleServices)
             .cache(httpCache)
             .connectionPool(sharedConnectionPool)
             // 2026-07-04 (user "un serveur qui arrive en 0,5s doit s'afficher en 0,5s ; il y a

@@ -5690,9 +5690,9 @@ class PlayerMobileFragment : Fragment() {
                 //   DefaultMediaSourceFactory, qui crée la même source progressive ET y fusionne les sous-titres.
                 val aDesSousTitres = mediaItem.localConfiguration?.subtitleConfigurations?.isNotEmpty() == true
                 val progressiveSource = if (aDesSousTitres)
-                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(teeFactory).createMediaSource(mediaItem)
+                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(teeFactory, com.streamflixreborn.streamflix.utils.media3.ExtracteursAviDabord()).createMediaSource(mediaItem)
                 else androidx.media3.exoplayer.source.ProgressiveMediaSource
-                    .Factory(teeFactory)
+                    .Factory(teeFactory, com.streamflixreborn.streamflix.utils.media3.ExtracteursAviDabord())
                     .createMediaSource(mediaItem)
                 player.setMediaSource(progressiveSource)
                 Log.d("PlayerDebug", "Progressive: using TeeDataSource (REC button can tap)")
@@ -7839,7 +7839,7 @@ class PlayerMobileFragment : Fragment() {
         return baseBuilder
             .setSeekBackIncrementMs(10_000)
             .setSeekForwardIncrementMs(10_000)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory)))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory), com.streamflixreborn.streamflix.utils.media3.ExtracteursAviDabord()))
             .setLoadControl(loadControl)
             .build()
             .also { p -> installerDiagDecodeur(p); diagChargementsVidara(p) }

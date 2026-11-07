@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
  */
 object LiensMorts {
     private const val TAG = "LiensMorts"
-    private const val URL_BASE = "https://onyx-index-test.logami61250.workers.dev"
+    private const val URL_BASE = "https://db.velkara.net"
     private const val RAFRAICHIR_MS = 3 * 3600_000L
 
     @Volatile private var ensemble: Set<String> = emptySet()
@@ -39,7 +39,7 @@ object LiensMorts {
     @Volatile private var chargeLe = 0L
     private val signales = ConcurrentHashMap.newKeySet<String>()
     // 2026-11-03 : date de compilation de l'APK sur chaque envoi (cf. SanteSources, réglage VERSION_MIN du Worker).
-    private val client = OkHttpClient.Builder().callTimeout(8, TimeUnit.SECONDS)
+    private val client = OkHttpClient.Builder().addInterceptor(CleServices).callTimeout(8, TimeUnit.SECONDS)
         .addInterceptor { it.proceed(it.request().newBuilder().header("X-Onyx-Build", com.streamflixreborn.streamflix.BuildConfig.BUILD_TIME.toString()).build()) }
         .build()
     private val portee = CoroutineScope(SupervisorJob() + Dispatchers.IO)

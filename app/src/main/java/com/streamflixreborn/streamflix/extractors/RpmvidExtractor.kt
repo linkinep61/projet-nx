@@ -88,6 +88,13 @@ class RpmvidExtractor : Extractor() {
             //   supprimée (le même jour, toute la famille Rpmvid était en panne / « en maintenance »).
             //   Formulé SANS « video not found » pour ne jamais partir au signalement des liens morts.
             if (e.code() == 400) throw Exception("Rpmvid: lecteur refusé par l'hébergeur (HTTP 400 « player is not recognized »)")
+            // 2026-11-12 (revue des serveurs rouges, Wiflix « Rpmvid - FMX ») : `/api/v1/video`
+            //   répond 404 alors que le lien lit dans Chrome. Vérifié : flemmix.upns.pro/#<id>
+            //   renvoie maintenant vers un AUTRE lecteur (turboembed.com/<code>, jwplayer), qui
+            //   charge `/e/<expiration>/<jeton>/…/master.txt` après un clic. L'ancienne API
+            //   n'existe plus sur ces hôtes : on demande l'adresse au lecteur lui-même, par la
+            //   page cachée déjà utilisée plus bas (elle reconnaît `master.txt` et fait le clic).
+            if (e.code() == 404) return viaLecteur(link) ?: throw e
             throw e
         }
 
@@ -211,6 +218,30 @@ class RpmvidExtractor : Extractor() {
             headers = headers,
             type = MimeTypes.APPLICATION_M3U8,
             fileName = nomFichier,
+        )
+    }
+
+    /** Adresse du flux obtenue en laissant tourner le lecteur de la page (voir le 404 plus haut). */
+    private suspend fun viaLecteur(link: String): Video? {
+        val signee = try {
+            OnlyFlixResolver.resolveMasterM3u8(link)
+        } catch (e: Exception) {
+            android.util.Log.w("RpmvidExtractor", "lecteur de remplacement KO: ${e.message}")
+            null
+        }
+        if (signee.isNullOrBlank()) return null
+        // Le flux est servi par le lecteur d'arrivée (pas par l'hôte du lien) : c'est lui l'origine.
+        val origine = runCatching { val u = URL(signee); "${u.protocol}://${u.host}" }.getOrNull() ?: return null
+        android.util.Log.d("RpmvidExtractor", "API 404 → flux obtenu via le lecteur ($origine)")
+        return Video(
+            source = signee,
+            emptyList(),
+            headers = mapOf(
+                "User-Agent" to com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA,
+                "Referer" to "$origine/",
+                "Origin" to origine,
+            ),
+            type = MimeTypes.APPLICATION_M3U8,
         )
     }
 

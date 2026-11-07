@@ -5545,6 +5545,7 @@ class PlayerTvFragment : Fragment() {
                 // 2026-08-08 : même nettoyage de manifeste que sur les autres branches.
                 val source = DefaultMediaSourceFactory(
                     com.streamflixreborn.streamflix.utils.FiltreManifesteHls.Fabrique(dataSourceFactory),
+                com.streamflixreborn.streamflix.utils.media3.ExtracteursAviDabord(),
                 ).createMediaSource(mediaItem)
                 player.setMediaSource(source)
                 usingWebView = false
@@ -5803,6 +5804,7 @@ class PlayerTvFragment : Fragment() {
                     //   dans le log, alors que le 403 sur `iframes-v1-a1.m3u8` revenait).
                     val source = DefaultMediaSourceFactory(
                         com.streamflixreborn.streamflix.utils.FiltreManifesteHls.Fabrique(dataSourceFactory),
+                    com.streamflixreborn.streamflix.utils.media3.ExtracteursAviDabord(),
                     ).createMediaSource(mediaItem)
                     player.setMediaSource(source)
                     Log.d("PlayerDebug", "TV: explicit MediaSource (Cronet=$usingCronet DoH=$usingDoH, preserving non-default DataSource)")
@@ -9132,7 +9134,7 @@ class PlayerTvFragment : Fragment() {
                     return 6
                 }
             }
-            val mediaSourceFactory = DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory))
+            val mediaSourceFactory = DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory), com.streamflixreborn.streamflix.utils.media3.ExtracteursAviDabord())
                 .setLoadErrorHandlingPolicy(resilientLoadErrorPolicy)
 
             // 2026-07-05 (user "VLC décode l'AV1, reproduis-le in-app") : sélecteur de pistes qui

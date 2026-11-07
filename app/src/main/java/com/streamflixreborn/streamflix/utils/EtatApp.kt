@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
 object EtatApp {
 
     private const val TAG = "EtatApp"
-    private const val URL_ETAT = "https://streamflix-api.logami61250.workers.dev/etat"
+    private const val URL_ETAT = "https://api.velkara.net/etat"
 
     private const val PREFS = "etat_app"
     private const val K_BLOQUEE = "bloquee"
@@ -41,6 +41,7 @@ object EtatApp {
 
     private val client by lazy {
         okhttp3.OkHttpClient.Builder()
+            .addInterceptor(CleServices)
             .connectTimeout(3, TimeUnit.SECONDS)
             .readTimeout(3, TimeUnit.SECONDS)
             .callTimeout(4, TimeUnit.SECONDS)

@@ -154,6 +154,8 @@ interface Provider {
             DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FranimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
+            // 2026-11-12 (user) : nouveau site d'animés VF/VOSTFR, affiché sous le nom « Animamix ».
+            AnimamixProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
             // 2026-05-21 : AnimeSite SUPPRIMÉ du provider list (user). SendvidExtractor reste dispo pour les autres.
             // AnimeSiteProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
             // 2026-05-18 : AllMovieLand SUPPRIMÉ. Catalog principalement Bollywood

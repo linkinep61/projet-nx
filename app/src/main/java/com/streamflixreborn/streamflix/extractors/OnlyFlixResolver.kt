@@ -326,6 +326,9 @@ object OnlyFlixResolver {
                     // Vrai dès que la page a réclamé sa configuration : elle est vivante, on
                     //   lui accorde alors le délai long (cf. la note sur le délai adaptatif).
                     var pageVivante = false
+                    // 2026-11-12 : voir shouldOverrideUrlLoading (lecteur qui renvoie vers un autre).
+                    var gesteFait = false
+                    var hoteRenvoi: String? = null
                     // 2026-11-03 DIAGNOSTIC : instant de lancement, pour dater chaque étape.
                     val t0Diag = System.currentTimeMillis()
                     var destroyHook: (() -> Unit)? = null
@@ -540,6 +543,7 @@ object OnlyFlixResolver {
                                 // VRAI geste tactile au centre = démarre la lecture P2P (→ vrai master.m3u8)
                                 val w = if (view.width > 0) view.width else 720
                                 val h = if (view.height > 0) view.height else 1280
+                                gesteFait = true
                                 realTap(view, w / 2f, h / 2f)
                                 view.evaluateJavascript(PROBE_JS) { result ->
                                     val src = result?.trim('"')?.replace("\\/", "/")?.replace("\\u0026", "&") ?: ""
@@ -614,6 +618,19 @@ object OnlyFlixResolver {
                                 h.split(".").let { if (it.size >= 2) it.takeLast(2).joinToString(".") else h }
                             }
                             if (hoteDest.isBlank() || racine(hoteDest) == racine(hoteLecteur)) return false
+                            // 2026-11-12 (Wiflix « Rpmvid - FMX » rouge, lit dans Chrome) : flemmix.upns.pro
+                            //   renvoie DE LUI-MÊME vers un autre lecteur (turboembed.com) dès le
+                            //   chargement, et ce renvoi était refusé comme une publicité → 30 s
+                            //   d'attente dans le vide. Une publicité part d'un clic ; ce renvoi-là
+                            //   arrive AVANT notre premier geste. On l'accepte donc une seule fois,
+                            //   et le domaine d'arrivée devient le lecteur autorisé.
+                            hoteRenvoi?.let { if (racine(hoteDest) == racine(it)) return false }
+                            if (!gesteFait && hoteRenvoi == null && !request.hasGesture()) {
+                                hoteRenvoi = hoteDest
+                                pageVivante = true
+                                Log.d(TAG, "renvoi vers un autre lecteur accepté → $hoteDest")
+                                return false
+                            }
                             Log.d(TAG, "navigation publicitaire bloquée → $hoteDest")
                             return true
                         }

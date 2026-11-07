@@ -38,7 +38,7 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
 
     override val name = "VoirAnime"
 
-    override val defaultBaseUrl: String = "https://voir-anime.to/"
+    override val defaultBaseUrl: String = "https://voiranime.cx/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -264,8 +264,12 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
 
         initializeService()
         return try {
-            val document = service.search(query, page)
+            val document = if (page > 1) service.searchPage(page, query) else service.search(query)
             parseSearchResults(document)
+        } catch (e: retrofit2.HttpException) {
+            // Au-delà de la dernière page, le site répond 404 : fin des résultats, pas une erreur.
+            if (e.code() != 404) Log.e("VoirAnimeProvider", "search error: ", e)
+            emptyList()
         } catch (e: Exception) {
             Log.e("VoirAnimeProvider", "search error: ", e)
             emptyList()
@@ -809,7 +813,19 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
             }?.takeIf { it.isNotBlank() && it.startsWith("http") }
             val poster = improveImageUrl(rawPoster)
 
-            TvShow(id = id, title = title, poster = poster) as AppAdapter.Item
+            // 2026-11-12 (user : « il ne propose qu'un épisode quand c'est marqué série ») : tous
+            //   les résultats étaient rendus en SÉRIE, films compris (badge « Série », un seul
+            //   « épisode » S1 E1). La page de résultats donne pourtant le type (« Type : Movie »)
+            //   et le dernier épisode (« (FILM VF) … ») : on s'en sert pour reconnaître les films.
+            val typeSite = item.select(".post-content_item")
+                .firstOrNull { it.selectFirst(".summary-heading")?.text()?.trim().equals("Type", true) }
+                ?.selectFirst(".summary-content")?.text()?.trim()?.lowercase().orEmpty()
+            val dernierEp = item.selectFirst(".latest-chap, .meta-item")?.text()?.lowercase().orEmpty()
+            val estFilm = typeSite == "movie" || typeSite == "film" ||
+                (typeSite.isEmpty() && Regex("""\((film|movie)\b""").containsMatchIn(dernierEp))
+
+            if (estFilm) Movie(id = id, title = title, poster = poster) as AppAdapter.Item
+            else TvShow(id = id, title = title, poster = poster) as AppAdapter.Item
         }.distinctBy { (it as? TvShow)?.id ?: (it as? Movie)?.id }
     }
 
@@ -836,6 +852,15 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
         suspend fun search(
             @Query("s") query: String,
             @Query("page") page: Int = 1,
+            @Query("post_type") postType: String = "wp-manga"
+        ): Document
+
+        // 2026-11-12 : le site ignore `?page=N` (il renvoie toujours la page 1) ; ses pages de
+        //   résultats sont `/page/N/?s=…`. Sans ça, la série « Naruto » (page 3) restait introuvable.
+        @GET("page/{page}/")
+        suspend fun searchPage(
+            @retrofit2.http.Path("page") page: Int,
+            @Query("s") query: String,
             @Query("post_type") postType: String = "wp-manga"
         ): Document
 

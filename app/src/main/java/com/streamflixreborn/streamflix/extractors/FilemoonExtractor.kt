@@ -411,7 +411,11 @@ open class FilemoonExtractor : Extractor() {
          *     on ne se présente comme intégrateur autorisé QU'APRÈS un 403, et uniquement
          *     avec des domaines dont on a la preuve qu'ils sont sur la liste.
          */
-        val parentsAutorises = PARENTS_AUTORISES
+        // 2026-11-12 : l'intégrateur connu de l'hôte (table `byseParentUrl`, ex. voiranime.cx
+        //   pour mfw09) passe EN PREMIER dans les tentatives de secours — c'est lui que la
+        //   liste blanche de la vidéo autorise ; lecteurvideo.com y est refusé.
+        val parentsAutorises =
+            (listOfNotNull(parentUrl?.let { it.trimEnd('/') + "/" }) + PARENTS_AUTORISES).distinct()
 
         /**
          * 2026-08-25, 2e passe — CE SONT NOS `X-Embed-*` QUI NOUS DÉNONÇAIENT.
@@ -500,9 +504,13 @@ open class FilemoonExtractor : Extractor() {
             playbackDomain = currentDomain
             headers["Referer"] = parentUrl
             headers["Origin"] = parentOrigin!!
-            headers["X-Embed-Parent"] = embedParent
-            headers["X-Embed-Origin"] = embedOrigin
-            headers["X-Embed-Referer"] = embedReferer
+            // 2026-11-12 : quand `details` n'est passé qu'en se présentant comme l'intégrateur
+            //   autorisé (mfw09 → voiranime.cx), `playback` doit dire LA MÊME CHOSE dans ses
+            //   X-Embed-* ; y annoncer le lien mfw09 lui-même donnait 403.
+            val parentDecl = parentDebloque
+            headers["X-Embed-Parent"] = parentDecl ?: embedParent
+            headers["X-Embed-Origin"] = parentDecl?.trimEnd('/') ?: embedOrigin
+            headers["X-Embed-Referer"] = parentDecl ?: embedReferer
         } else if (linkType == "d") {
             playbackDomain = currentDomain
             headers["Referer"] = link
@@ -1141,8 +1149,12 @@ open class FilemoonExtractor : Extractor() {
     )
 
     private fun byseParentUrl(currentDomain: String): String? = when {
+        // 2026-11-12 : VoirAnime est passé sur voiranime.cx et son LECTEUR MOON sur mfw09.org
+        //   (même frontend Byse). Sans intégrateur annoncé, mfw09 répond 403 « embedding from
+        //   this domain is not allowed » ; avec voiranime.cx, 200 (vérifié dans Chrome).
         currentDomain.contains("gn1r5n", ignoreCase = true) ||
-            currentDomain.contains("weneverbeenfree", ignoreCase = true) -> "https://voir-anime.to"
+            currentDomain.contains("weneverbeenfree", ignoreCase = true) ||
+            currentDomain.contains("mfw09", ignoreCase = true) -> "https://voiranime.cx"
         // ── 2026-08-06 : LE RÉFÉRENT ENVOYÉ ÉTAIT UNE **API**, PAS UN SITE ────────────────
         //   User : « pourquoi il n'a pas réussi la lecture et met autant de temps ».
         //   Le journal montrait `referer=https://api.movix.fun/` et une réponse **HTTP 428**

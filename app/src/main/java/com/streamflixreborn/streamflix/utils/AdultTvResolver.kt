@@ -50,18 +50,25 @@ object AdultTvResolver {
         }
     }
 
-    /** Playlist HLS sans aucun segment ni variante (chaîne qui ne diffuse rien). En cas de
-     *  doute (réseau, code d'erreur) → false : on tente la chaîne normalement. */
-    private fun playlistVide(client: okhttp3.OkHttpClient, url: String, referer: String): Boolean = try {
+    /** État du flux de la chaîne : "ok", "vide" (playlist HLS sans segment ni variante : la
+     *  chaîne ne diffuse rien) ou "erreur <code HTTP>". */
+    //  2026-11-12 (user : « quand la vidéo de base n'est pas disponible, on est censé avoir la
+    //   pub qui s'affiche comme le site ») : une chaîne (Passion XXX TV) ne rendait pas une
+    //   playlist vide mais une ERREUR HTTP → l'ancien test répondait « pas vide », la chaîne
+    //   était tentée quand même et finissait en écran noir, sans le flux de remplacement.
+    //   On distingue donc trois états : "ok", "vide", "erreur <code>". Seule une exception
+    //   réseau (doute réel) laisse tenter la chaîne normalement.
+    private fun etatPlaylist(client: okhttp3.OkHttpClient, url: String, referer: String): String = try {
         client.newCall(
             Request.Builder().url(url).header("User-Agent", UA).header("Referer", referer).build()
         ).execute().use { r ->
-            if (!r.isSuccessful) return@use false
+            if (!r.isSuccessful) return@use "erreur ${r.code}"
             val corps = r.body?.string().orEmpty()
-            corps.contains("#EXTM3U") && !corps.contains("#EXTINF") &&
+            val vide = corps.contains("#EXTM3U") && !corps.contains("#EXTINF") &&
                 corps.lineSequence().none { it.isNotBlank() && !it.trimStart().startsWith("#") }
+            if (vide) "vide" else "ok"
         }
-    } catch (_: Exception) { false }
+    } catch (_: Exception) { "ok" }
 
     suspend fun resolve(src: String): Video? = if (OxaxResolver.isOxaxUrl(src)) OxaxResolver.resolve(src) else withContext(Dispatchers.IO) {
         try {
@@ -106,8 +113,9 @@ object AdultTvResolver {
             //   `playerConfig.fallbackUrl` (flux de remplacement). On fait pareil.
             val secours = cfg["fallbackUrl"].orEmpty().takeIf { it.startsWith("http") }
             var choisi = lien
-            if (lien.startsWith("http") && secours != null && playlistVide(client, lien, page)) {
-                Log.w(TAG, "$slug : flux de la chaîne vide → flux de remplacement du site")
+            val etat = if (lien.startsWith("http") && secours != null) etatPlaylist(client, lien, page) else "ok"
+            if (etat != "ok" && secours != null) {
+                Log.w(TAG, "$slug : flux de la chaîne $etat → flux de remplacement du site")
                 choisi = secours
             } else if (!lien.startsWith("http") && secours != null) {
                 choisi = secours

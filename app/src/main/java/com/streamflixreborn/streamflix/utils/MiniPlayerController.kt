@@ -2484,7 +2484,7 @@ object MiniPlayerController {
 
         // 2026-05-17 : MediaSourceFactory avec retry policy résilient (cf
         //   resilientLoadErrorPolicy déclaré au niveau classe).
-        val mediaSourceFactory = DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory))
+        val mediaSourceFactory = DefaultMediaSourceFactory(com.streamflixreborn.streamflix.utils.SauteImageDataSource.Factory(dataSourceFactory), com.streamflixreborn.streamflix.utils.media3.ExtracteursAviDabord())
             .setLoadErrorHandlingPolicy(resilientLoadErrorPolicy)
 
         // 2026-06-15 v8 (user "se coupe moins mais lag") : EXTENSION_RENDERER_MODE_ON

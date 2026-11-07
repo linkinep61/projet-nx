@@ -34,7 +34,7 @@ import java.util.concurrent.TimeUnit
  */
 object SanteSources {
     private const val TAG = "SanteSources"
-    private const val URL_BASE = "https://onyx-index-test.logami61250.workers.dev"
+    private const val URL_BASE = "https://db.velkara.net"
     private const val INTERVALLE_MS = 10 * 60_000L
 
     // Index des compteurs : recherches, recherches avec serveurs, lectures tentées, lectures
@@ -49,7 +49,7 @@ object SanteSources {
     // 2026-11-03 (user : « les gens n'ont pas mis la vraie mise à jour ») - chaque envoi porte la date de
     //   compilation de l'APK (0 = version compilée à la main) : la base peut ignorer les anciennes versions
     //   qui signalent des pannes déjà réparées (réglage VERSION_MIN du Worker).
-    private val client = OkHttpClient.Builder().callTimeout(5, TimeUnit.SECONDS)
+    private val client = OkHttpClient.Builder().addInterceptor(CleServices).callTimeout(5, TimeUnit.SECONDS)
         .addInterceptor { it.proceed(it.request().newBuilder().header("X-Onyx-Build", com.streamflixreborn.streamflix.BuildConfig.BUILD_TIME.toString()).build()) }
         .build()
     private val portee = CoroutineScope(SupervisorJob() + Dispatchers.IO)

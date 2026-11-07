@@ -163,9 +163,16 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
             Log.d(TAG_BYPASS, "Cache HIT for $url")
             return it
         }
-        // Tentative 1 (hors verrou, rapide) : OkHttp direct UNIQUEMENT si le cookie
-        //   cf_clearance existe déjà — sinon CF renvoie la page challenge.
-        if (hasCfClearanceCookie()) tryOkHttp(url)?.let { return it }
+        // Tentative 1 (hors verrou, rapide) : OkHttp direct.
+        // 2026-11-12 (revue des providers : recherche refusée, saisons manquantes) : cette tentative
+        //   n'était faite QUE si un cookie cf_clearance existait. Or le site n'impose plus de
+        //   vérification Cloudflare : le cookie n'existe jamais, et CHAQUE page partait dans la page
+        //   cachée. Pour la recherche c'est fatal : ouverte comme une page, l'adresse répond
+        //   « Access denied » (vérifié dans Chrome), alors qu'en requête directe elle répond
+        //   normalement (5 recherches de suite OK, même à 1 s d'écart). On tente donc toujours la
+        //   requête directe d'abord ; la page cachée reste le secours si une vérification revient
+        //   (tryOkHttp renvoie null sur un 403 ou une page de vérification).
+        tryOkHttp(url)?.let { return it }
 
         // 2026-06-29 (user "captcha visible au 1er lancement, 403 en cascade") :
         //   getHome lance ~15 pages en parallèle. Sans verrou, chacune lance son
@@ -731,18 +738,20 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
         Movie(
             id = id,
             title = title,
-            overview = document.selectFirst("span[itemprop='description']")?.text() ?: "",
+            overview = (document.selectFirst("span[itemprop='description']")?.text()
+                ?: document.select("ul.mov-list li").find { it.selectFirst("div.mov-label")?.text()?.startsWith("Synopsis") == true }
+                    ?.selectFirst("div.mov-desc")?.text()) ?: "",
             released = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "Date de sortie:" }
                 ?.selectFirst("div.mov-desc")?.text()?.substringBefore(" to"),
             runtime = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "Durée:" }
                 ?.selectFirst("div.mov-desc")?.text()?.extractRuntime(),
-            poster = document.selectFirst("div.mov-img img[itemprop='thumbnailUrl']")
+            poster = document.selectFirst("div.mov-img img[itemprop='thumbnailUrl'], div.mov-img img")
                 ?.attr("src")?.toUrl(),
             genres = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "GENRE:" }
-                ?.select("span[itemprop='genre'] a")?.map {
+                ?.select("span[itemprop='genre'] a, a[href*=/genre/]")?.map {
                     Genre(
                         id = it.attr("href").substringAfter("/genre/").substringBefore("/"),
                         name = it.text(),
@@ -750,11 +759,11 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
                 } ?: listOf(),
             directors = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "RÉALISATEUR:" }
-                ?.selectFirst("div.mov-desc span[itemprop='name']")?.text()
+                ?.selectFirst("div.mov-desc span[itemprop='name'], div.mov-desc span")?.text()
                 .toPeople(),
             cast = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "ACTEURS:" }
-                ?.selectFirst("div.mov-desc span[itemprop='name']")?.text()
+                ?.selectFirst("div.mov-desc span[itemprop='name'], div.mov-desc span")?.text()
                 .toPeople(),
             recommendations = relatedFilms,
         )
@@ -766,9 +775,13 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
         val isFrench = document.selectFirst("ul.mov-list li:contains(Version) .mov-desc span")
             ?.text().isFrench()
 
-        val rawTitle = document.selectFirst("h1[itemprop=name]")?.text() ?: ""
+        // 2026-11-12 (revue des providers : fiche série sans titre, sans affiche ni résumé) : le site
+        //   a retiré les attributs itemprop (h1, affiche, synopsis, genres, acteurs). Vérifié dans
+        //   Chrome : <header class="full-title"><h1>, <img id="posterimg">, ligne « Synopsis: ».
+        //   Les anciens sélecteurs restent en premier au cas où ils reviendraient.
+        val rawTitle = document.selectFirst("h1[itemprop=name], header.full-title h1")?.text() ?: ""
         val title = rawTitle.toTitle(isFrench)
-        val poster = document.selectFirst("div.mov-img img[itemprop=thumbnailUrl]")?.attr("src")
+        val poster = document.selectFirst("div.mov-img img[itemprop=thumbnailUrl], div.mov-img img")?.attr("src")
             ?.toUrl()
 
         val baseTitle = rawTitle
@@ -941,7 +954,9 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
         TvShow(
             id = id,
             title = title,
-            overview = document.selectFirst("span[itemprop=description]")?.text(),
+            overview = (document.selectFirst("span[itemprop=description]")?.text()
+                ?: document.select("ul.mov-list li").find { it.selectFirst("div.mov-label")?.text()?.startsWith("Synopsis") == true }
+                    ?.selectFirst("div.mov-desc")?.text()),
             released = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "Date de sortie:" }
                 ?.selectFirst("div.mov-desc")?.text()?.substringBefore(" to"),
@@ -952,7 +967,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
             seasons = seasons,
             genres = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "GENRE:" }
-                ?.select("span[itemprop='genre'] a")?.map {
+                ?.select("span[itemprop='genre'] a, a[href*=/genre/]")?.map {
                     Genre(
                         id = it.attr("href").substringAfter("/genre/").substringBefore("/"),
                         name = it.text(),
@@ -960,11 +975,11 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
                 } ?: listOf(),
             directors = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "RÉALISATEUR:" }
-                ?.selectFirst("div.mov-desc span[itemprop='name']")?.text()
+                ?.selectFirst("div.mov-desc span[itemprop='name'], div.mov-desc span")?.text()
                 .toPeople(),
             cast = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text() == "ACTEURS:" }
-                ?.selectFirst("div.mov-desc span[itemprop='name']")?.text()
+                ?.selectFirst("div.mov-desc span[itemprop='name'], div.mov-desc span")?.text()
                 .toPeople(),
             recommendations = recommendations,
         )
@@ -974,7 +989,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
         val document = safeGetDoc("${baseUrl}$seasonId.html") { service.getTvShow(seasonId) }
 
         // Get poster for episodes
-        val episodePoster = document.selectFirst("div.mov-img img[itemprop=thumbnailUrl]")
+        val episodePoster = document.selectFirst("div.mov-img img[itemprop=thumbnailUrl], div.mov-img img")
             ?.attr("src")?.toUrl()
 
         val epsText = document.selectFirst("div.eps")?.text() ?: return emptyList()
@@ -1281,7 +1296,77 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
             append("&full_search=0")
         }
         android.util.Log.d("FrenchAnime", "searchDirect: url=$searchUrl")
+        // 2026-11-12 (revue des providers : recherche FrenchAnime refusée) : le site ne sert sa
+        //   recherche qu'à une requête faite DEPUIS une de ses pages, par un vrai navigateur.
+        //   Mesuré : dans Chrome, fetch() depuis la page → 200 (même sans cookie) ; la même adresse
+        //   ouverte comme une page → « Access denied ». Depuis l'Oppo (même adresse IP que Chrome),
+        //   OkHttp est refusé quelle que soit la forme (7 variantes d'en-têtes, GET et POST : 403).
+        //   C'est donc la signature du client qui compte → on lance la recherche dans une page
+        //   cachée posée sur l'accueil du site, exactement comme leur barre de recherche.
+        // La toute première recherche part parfois avant la fin de l'initialisation de la page
+        //   d'accueil et se fait refuser une fois : un second essai une seconde après suffit.
+        (rechercheViaPage(searchUrl) ?: run { kotlinx.coroutines.delay(1_000L); rechercheViaPage(searchUrl) })?.let { html ->
+            android.util.Log.d("FrenchAnime", "searchDirect (page) « $query » p$page → ${Regex("mov-t").findAll(html).count()} résultat(s)")
+            return Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        }
         return getDocument(searchUrl, silentBypass = true)
+    }
+
+    // ── Recherche depuis une page du site (voir searchDirect) ──
+    @Volatile private var pageRecherche: android.webkit.WebView? = null
+    @Volatile private var pageRecherchePrete = false
+    @Volatile private var retourRecherche: ((String?) -> Unit)? = null
+    private val rechercheMutex = kotlinx.coroutines.sync.Mutex()
+
+    private suspend fun rechercheViaPage(url: String): String? = rechercheMutex.withLock {
+        kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+            kotlinx.coroutines.suspendCancellableCoroutine<String?> { cont ->
+                retourRecherche = { brut ->
+                    retourRecherche = null
+                    // Réponse « <code>|<page où tourne le script>|<html> ».
+                    val code = brut?.substringBefore('|')
+                    val reste = brut?.substringAfter('|').orEmpty()
+                    val ou = reste.substringBefore('|')
+                    val html = reste.substringAfter('|')
+                    val refus = html.contains("Access denied")
+                    Log.d("FrenchAnime", "recherche via page : HTTP $code depuis $ou, ${html.length} car.${if (refus) ", Access denied" else ""}")
+                    if (cont.isActive) cont.resume(if (code == "200" && !refus) html else null) { }
+                }
+                val js = "fetch(${org.json.JSONObject.quote(url)},{credentials:'include'})" +
+                    ".then(function(r){return r.text().then(function(t){OnyxRecherche.rendu(r.status+'|'+location.href+'|'+t)})})" +
+                    ".catch(function(e){OnyxRecherche.rendu('erreur '+e+'|'+location.href+'|')})"
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    try {
+                        val wv = pageRecherche ?: android.webkit.WebView(StreamFlixApp.instance.applicationContext).also { w ->
+                            w.settings.javaScriptEnabled = true
+                            w.settings.domStorageEnabled = true
+                            // Identité RÉELLE du WebView : avec la fausse « Pixel 8 / Chrome 131 »
+                            //   (STEALTH_UA) le site répond 403 à chaque recherche, même depuis sa page ;
+                            //   avec la vraie, 200 (mesuré sur l'Oppo le 2026-11-12).
+                            w.settings.userAgentString = android.webkit.WebSettings.getDefaultUserAgent(StreamFlixApp.instance.applicationContext)
+                            // Interface posée AVANT le premier chargement (sinon absente de la page).
+                            w.addJavascriptInterface(object {
+                                @android.webkit.JavascriptInterface
+                                fun rendu(t: String?) { retourRecherche?.invoke(t) }
+                            }, "OnyxRecherche")
+                            w.webViewClient = object : android.webkit.WebViewClient() {
+                                override fun shouldOverrideUrlLoading(v: android.webkit.WebView?, r: android.webkit.WebResourceRequest?) = true
+                                override fun onPageFinished(v: android.webkit.WebView?, u: String?) {
+                                    if (pageRecherchePrete) return
+                                    pageRecherchePrete = true
+                                    v?.evaluateJavascript(js, null)
+                                }
+                            }
+                            pageRecherche = w
+                        }
+                        if (pageRecherchePrete) wv.evaluateJavascript(js, null) else wv.loadUrl(baseUrl)
+                    } catch (e: Exception) {
+                        Log.w("FrenchAnime", "recherche via page impossible : ${e.message}")
+                        retourRecherche?.invoke(null)
+                    }
+                }
+            }
+        }.also { if (it == null) Log.d("FrenchAnime", "recherche via page : pas de réponse, repli") }
     }
 
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {

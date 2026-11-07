@@ -57,8 +57,8 @@ android {
         //   la balance sera alors differente parce qu'il y aura quelque chose en face.
         minSdk 23
         targetSdk 35
-        versionCode 108014
-        versionName "1.8.14"
+        versionCode 108015
+        versionName "1.8.15"
 
         // ABI pilotÃ©e par la propriÃ©tÃ© ABI_TARGET (local.properties, posÃ©e par la CI).
         //   APK par dÃ©faut = ARM (armeabi-v7a + arm64-v8a).
@@ -92,6 +92,11 @@ android {
         buildConfigField "String", "VIDARA_API_KEY", "\"${properties.getProperty("VIDARA_API_KEY") ?: ""}\""
         // 2026-10-03 (user : « signaler qu'il y a eu un écrasement ») : commit compilé, fourni par
         //   GitHub Actions (vide en local). Comparé au commit du tag de la release → écrasement.
+        // 2026-11-07 : cle d'acces aux services en ligne (secret CI CLE_VELKARA / local.properties), masquee.
+        def cleV = (properties.getProperty("CLE_VELKARA") ?: "").trim()
+        def masqueV = "q7Zk2LpW9xRt4NbE"
+        def cleVm = cleV.getBytes("UTF-8").toList().withIndex().collect { b, k -> String.format("%02x", (((b as int) & 0xff) ^ (masqueV.charAt(k % masqueV.length()) as int)) & 0xff) }.join("")
+        buildConfigField "String", "CV", "\"${cleVm}\""
         buildConfigField "String", "BUILD_SHA", "\"${System.getenv("GITHUB_SHA") ?: ""}\""
         // 2026-10-26 : heure de compilation (GitHub Actions seulement, 0 en local). Sur le dépôt de
         //   distribution, le tag ne bouge pas lors d'un écrasement : ce sont les APK qui sont
