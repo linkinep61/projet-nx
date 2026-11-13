@@ -48,7 +48,11 @@ object KissKh {
             val s = saison.coerceAtLeast(1)
             // Saison > 1 : KissKH range chaque saison comme un drama à part (« X Season 2 »).
             val voulus = titres.filter { it.isNotBlank() }.flatMap { t ->
-                if (estUnFilm || s == 1) listOf(norm(t)) else listOf(norm("$t Season $s"), norm("$t $s"))
+                // 2026-11-13 (bilan des sources : KissKH « à réparer ») — dès qu'un drama a plusieurs
+                //   saisons, KissKH renomme AUSSI la première (« Squid Game Season 1 ») : on ne la
+                //   trouvait donc jamais (vu au banc : recherche OK, 0 serveur).
+                if (estUnFilm) listOf(norm(t)) else if (s == 1) listOf(norm(t), norm("$t Season 1"))
+                else listOf(norm("$t Season $s"), norm("$t $s"))
             }.toSet()
             if (voulus.isEmpty()) return@withContext emptyList()
             var drama: JSONObject? = null

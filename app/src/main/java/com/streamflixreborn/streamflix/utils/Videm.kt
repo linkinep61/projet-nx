@@ -23,7 +23,11 @@ import java.util.concurrent.TimeUnit
  */
 object Videm {
     private const val TAG = "Videm"
-    const val BASE = "https://videm.xyz"
+    // 2026-11-13 (bilan des sources : « Videm 0 serveur sur 929 recherches ») : videm.xyz n'existe
+    //   plus (NXDOMAIN sur tous les DNS). Le service est passé sur videm.cc, qui redirige les
+    //   lecteurs vers videm.buzz : même page (`var Q`), même api.php (vérifié, serveur French
+    //   présent sur Spider-Man 969681). On vise directement l'hôte qui sert les lecteurs.
+    const val BASE = "https://videm.buzz"
     private const val UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -35,7 +39,12 @@ object Videm {
     //   refuse désormais PRÉCISÉMENT le Referer themoviedb.org (403), alors que google.com,
     //   vidsrc.to ou example.com passent (200, mesuré depuis le PC du user). Liste de repli : sur
     //   un 403, on essaie le suivant et on retient celui qui marche.
-    private val REFERERS = listOf("https://www.google.com/", "https://vidsrc.to/", "https://www.themoviedb.org/")
+    // 2026-11-15 (bilan : toujours 0 film trouvé après le changement d'adresse ; vu sur l'Oppo : 403
+    //   avec les trois origines) — Videm n'accepte plus « n'importe quel site intégrateur » mais une
+    //   liste : mesuré depuis le PC du user, 200 avec videm.cc (sa propre vitrine) et frembed.uno,
+    //   403 avec vidsrc.to, google.com, themoviedb.org, sans Referer et avec videm.buzz lui-même.
+    private val REFERERS = listOf("https://videm.cc/", "https://frembed.uno/",
+        "https://vidsrc.to/", "https://example.com/", "https://www.google.com/")
     @Volatile private var iReferer = 0
     private val REFERER get() = REFERERS[iReferer % REFERERS.size]
 

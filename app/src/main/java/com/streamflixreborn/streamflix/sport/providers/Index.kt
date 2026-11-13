@@ -39,7 +39,10 @@ object SportProviders {
         val streamed = async { isole(StreamedPk.ID) { StreamedPk.getStreams() } }
         // 2026-10-25 (liste du user, priorité 2) : planning thedaddy / DaddyLive.
         val daddy = async { isole(DaddyLive.ID) { DaddyLive.getStreams() } }
-        dami.await() + streamed.await() + daddy.await()
+        // 2026-11-15 (user : ajouter SportsOnline) : matchs du planning du jour, en français
+        //   quand une chaîne marquée FRENCH les diffuse (cf. SportsOnline).
+        val sportsOnline = async { isole(SportsOnline.ID) { SportsOnline.getStreams() } }
+        dami.await() + streamed.await() + daddy.await() + sportsOnline.await()
     }.sortedWith(
             compareBy<SportEvent> { if (it.enDirect) 0 else 1 }.thenBy { it.startsAt ?: Long.MAX_VALUE }
         )
@@ -51,6 +54,7 @@ object SportProviders {
         StreamedPk.ID -> StreamedPk.derniereListe()
         DaddyLive.ID -> DaddyLive.derniereListe()
         ChaineDirect.ID -> ChaineDirect.derniereListe()
+        SportsOnline.ID -> SportsOnline.derniereListe()
         else -> DamiTv.derniereListe()
     }
 
@@ -83,6 +87,13 @@ object SportProviders {
         //   Elle est chargée dans une WebView cachée (pubs bloquées, clic « play » simulé) le temps
         //   de capter le flux, puis c'est le lecteur ONYX qui le lit, comme les autres sources.
         //   Pas de flux capté → serveur en échec (le lecteur passe au suivant), jamais de page.
+        // 2026-11-15 : SportsOnline — la page de chaîne est une façade (iframe d'un hébergeur qui
+        //   change, vérification Cloudflare dans le lecteur) : lue par son extracteur, qui déduit le
+        //   Referer du flux. Pas de flux → null, le lecteur passe à la chaîne suivante du match.
+        if (provider == SportsOnline.ID) {
+            return runCatching { com.streamflixreborn.streamflix.extractors.Extractor.extract(url, server) }
+                .onFailure { Log.w(TAG, "[$provider] ${server.name} : ${it.message}") }.getOrNull()
+        }
         val origine = Regex("^https?://[^/]+").find(url)?.value ?: return null
         // 2026-10-27 (user, Canal+ Sport 4 « ne marche pas ») : ChaineDirect sert la playlist par son
         //   relais `/player/source2/?vp=<chiffré>&vc=…` (Content-Type HLS, sans « .m3u8 » dans

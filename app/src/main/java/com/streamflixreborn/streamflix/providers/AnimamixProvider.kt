@@ -38,7 +38,7 @@ import org.jsoup.nodes.Element
  *   - épisode : `const readers = {"vostfr": [urls…], "vf": [urls…]}` dans la page.
  *   Identifiants internes : chemin relatif (`slug`, `slug/saison-1`, `slug/saison-1/episode-1`).
  */
-object AnimamixProvider : Provider {
+object AnimamixProvider : Provider, ProgressiveServersProvider {
 
     private const val TAG = "Animamix"
     override val name = "Animamix"
@@ -218,11 +218,16 @@ object AnimamixProvider : Provider {
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         val doc = charger("$seasonId/")
+        // 2026-11-13 (user : « pas de jaquette sur les épisodes, tout est gris ») : le site ne donne
+        //   AUCUNE image par épisode (cartes texte seules). On prend l'illustration de la page de
+        //   saison (og:image, format paysage) pour tous ses épisodes.
+        val vignette = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?.takeIf { it.startsWith("http") }
         return doc.select("a.episode-card[href]").mapNotNull { a ->
             val id = chemin(a.attr("href"))
             val n = Regex("""episode-(\d+)""").find(id)?.groupValues?.get(1)?.toIntOrNull() ?: return@mapNotNull null
             val langues = a.attr("data-langs").trim().uppercase().replace(" ", " / ")
-            Episode(id = id, number = n,
+            Episode(id = id, number = n, poster = vignette,
                 title = (a.selectFirst(".episode-title")?.text()?.trim() ?: "Episode $n") +
                     if (langues.isNotBlank()) " ($langues)" else "")
         }.distinctBy { it.id }
@@ -272,6 +277,20 @@ object AnimamixProvider : Provider {
         Log.d(TAG, "getServers $id → ${serveurs.size} lecteur(s) " + parLangue.mapValues { it.value.size })
         serveurs
     }
+
+    /**
+     * 2026-11-13 (user : « il n'appelle pas les autres providers animés ») — le lecteur ne lance
+     * les sources de SECOURS que sur le chemin « progressif » (journal : `path provider=Animamix
+     * progressive=false`, puis aucun secours). On émet donc nos serveurs par ce chemin, comme
+     * VoirAnime et French-Anime : le lecteur y ajoute ensuite les secours tout seul.
+     */
+    override fun getServersProgressive(id: String, videoType: Video.Type): kotlinx.coroutines.flow.Flow<List<Video.Server>> =
+        kotlinx.coroutines.flow.channelFlow {
+            try {
+                val serveurs = withContext(Dispatchers.IO) { getServers(id, videoType) }
+                if (serveurs.isNotEmpty()) send(serveurs)
+            } catch (e: Exception) { Log.w(TAG, "serveurs natifs KO : ${e.message}") }
+        }
 
     override suspend fun getVideo(server: Video.Server): Video = Extractor.extract(server.src)
 }

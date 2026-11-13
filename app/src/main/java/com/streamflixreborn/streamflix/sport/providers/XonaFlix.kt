@@ -7,6 +7,10 @@ import com.streamflixreborn.streamflix.sport.StreamSource
 import com.streamflixreborn.streamflix.sport.TtlCache
 import com.streamflixreborn.streamflix.utils.NetworkClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -172,8 +176,49 @@ object XonaFlix {
 
     /** Chaînes fixes du catalogue Sport (cache 30 min ; pages 1..4, arrêt dès qu'une page
      *  n'apporte aucun slug nouveau). */
-    suspend fun chaines(): List<Chaine> =
-        cacheChaines.get { chargerChaines("Sport", PAGES_CATEGORIE_SPORT, false) }
+    suspend fun chaines(): List<Chaine> = cacheChaines.get {
+        val sport = chargerChaines("Sport", PAGES_CATEGORIE_SPORT, false)
+        sport + sportHorsCategorie(sport.mapTo(HashSet()) { it.slug })
+    }
+
+    // 2026-11-15 (user : « plein de chaînes de sport dans l'onglet IPTV de XonaFlix qui pourraient
+    //   être mises au bon endroit », puis « oui, tu peux les ajouter ») — comparé sur le site : 66
+    //   des 76 chaînes « de sport » de la catégorie IPTV sont DÉJÀ dans la catégorie Sport (mêmes
+    //   liens). Ne manquent que Automoto, L'Équipe et les deux Golf : on les repêche par leur NOM
+    //   (liste courte et stricte : « RMC Story », « Paris Première »… ne sont pas du sport).
+    //   Le motif s'applique au nom en minuscules SANS accents : écrit avec « [ée]quipe », il ne
+    //   reconnaissait pas « EQUIPE HD » sur l'appareil (vu au journal de diagnostic).
+    private val RX_SPORT_HORS_CATEGORIE = Regex("\\b(?:automoto|golf|equipe)\\b")
+
+    private fun sansAccents(s: String): String = Normalizer
+        .normalize(s, Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").lowercase()
+
+    /** Chaînes de sport que le site ne range que dans « IPTV ». Pages lues EN PARALLÈLE (~21) pour
+     *  ne pas ralentir l'ouverture du dossier Sport ; un échec ne retire rien au catalogue Sport. */
+    private suspend fun sportHorsCategorie(deja: Set<String>): List<Chaine> = runCatching {
+        withTimeoutOrNull(8_000L) {
+            coroutineScope {
+                (1..MAX_PAGES_TV).map { page ->
+                    async(Dispatchers.IO) {
+                        runCatching {
+                            Jsoup.parse(get("$BASE/tv?cat=IPTV&page=$page"), BASE)
+                                .select("a[href*=\"/live-broadcast/\"]").mapNotNull { a ->
+                                    val texte = a.text()
+                                    if (texte.contains("VS", ignoreCase = true)) return@mapNotNull null
+                                    val slug = a.absUrl("href").substringAfterLast('/')
+                                    val nom = nomChaine(texte)
+                                    if (slug.isBlank() || nom.isBlank() || slug in deja ||
+                                        !RX_SPORT_HORS_CATEGORIE.containsMatchIn(sansAccents(nom))) null
+                                    else Chaine(slug, nom, "")
+                                }
+                        }.getOrDefault(emptyList())
+                    }
+                }.awaitAll().flatten().distinctBy { it.slug }
+            }
+        }.orEmpty()
+    }.getOrDefault(emptyList()).also {
+        Log.i(TAG, "${it.size} chaînes de sport repêchées dans IPTV : ${it.joinToString { c -> c.nom }}")
+    }
 
     /** Pages parcourues pour la catégorie Sport (≈ 72 chaînes, mesuré le 2026-10-28). */
     private const val PAGES_CATEGORIE_SPORT = 4

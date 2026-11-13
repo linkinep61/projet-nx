@@ -189,7 +189,7 @@ object UserPreferences {
     // ⚠ 2026-09-27 (user : « Pour les VOD, je ne vois pas le serveur de mon IPTV » alors que le
     //   direct marchait dans Vavoo) : REFAIT la même erreur — « Mon IPTV » ajouté à BACKUP_SOURCES
     //   sans bumper. Le direct (Vavoo) ne passe pas par isBackupSourceEnabled, d'où l'asymétrie.
-    private const val CUR_BACKUP_MIGRATION = 20 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime ; v13 : ok.ru + archive.org ; v14 : Rutube ; v15 : Purstream ; v16 : ONYX ; v17 : Partage + Vegeta VOD ; v18 : Tokyvideo ; v19 : Ciné Films = ex Vegeta VOD renommé ; v20 : Mon IPTV)
+    private const val CUR_BACKUP_MIGRATION = 21 // (v21 : Animamix) bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime ; v13 : ok.ru + archive.org ; v14 : Rutube ; v15 : Purstream ; v16 : ONYX ; v17 : Partage + Vegeta VOD ; v18 : Tokyvideo ; v19 : Ciné Films = ex Vegeta VOD renommé ; v20 : Mon IPTV)
 
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :

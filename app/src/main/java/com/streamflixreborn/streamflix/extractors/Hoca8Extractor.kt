@@ -2,6 +2,10 @@ package com.streamflixreborn.streamflix.extractors
 
 import android.annotation.SuppressLint
 import android.os.Message
+import android.view.View
+import android.webkit.CookieManager
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -103,7 +107,9 @@ open class Hoca8Extractor : Extractor() {
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun extractByIntercepting(url: String): String? =
         withContext(Dispatchers.Main) {
-            withTimeoutOrNull(20_000L) {
+            // 2026-11-15 (user) : délai de garde 20 → 25 s — quand le lecteur passe par sa vérification,
+            //   l'adresse n'arrive qu'après 8 s et plus sur un Wi-Fi chargé, la marge était trop courte.
+            withTimeoutOrNull(25_000L) {
                 suspendCancellableCoroutine { cont ->
                     var resolved = false
 
@@ -114,6 +120,47 @@ open class Hoca8Extractor : Extractor() {
                         }
                     }
 
+                    /** 2026-11-15 : un m3u8 peut arriver dans le CORPS d'une réponse
+                     *  (le lecteur SportsOnline le renvoie en JSON après vérification).
+                     *  On le sort nous-mêmes, sans dépendre du JS de la page qui a pu
+                     *  déjà abandonner. */
+                    fun resolveDepuisCorps(texte: String, base: String) {
+                        val absolu = Regex("""https?://[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""")
+                            .find(texte)?.value
+                        val relatif = if (absolu == null)
+                            Regex("""(/[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*)""").find(texte)?.value
+                        else null
+                        val trouve = absolu ?: relatif?.let {
+                            runCatching {
+                                java.net.URL(java.net.URL(base), it).toString()
+                            }.getOrNull()
+                        }
+                        if (trouve != null) {
+                            android.util.Log.d("Hoca8Extractor", "m3u8 lu dans le corps de la réponse")
+                            android.os.Handler(android.os.Looper.getMainLooper()).post { resolve(trouve) }
+                        }
+                    }
+
+                    /** 2026-11-15 (user, durcissement) : l'adresse de la vidéo est choisie par NOM DE CLÉ dans
+                     *  la réponse, jamais par position (l'ordre et le nombre d'adresses peuvent changer). Ordre
+                     *  de préférence ci-dessous : les versions « sans P2P » d'abord — le manifeste P2P a donné
+                     *  « format illisible » au lecteur ONYX. `\/` et `\u0026` sont déséchappés et l'adresse
+                     *  rendue absolue. Rend (clé, adresse), ou null si aucune de ces clés n'est renseignée. */
+                    fun adresseVideo(texte: String, base: String): Pair<String, String>? {
+                        val json = runCatching { org.json.JSONObject(texte) }.getOrNull()
+                        for (cle in CLES_ADRESSE_VIDEO) {
+                            val brut = json?.optString(cle)?.takeIf { it.isNotBlank() && it != "null" }
+                                // Réponse qui n'est pas du JSON propre : la même clé, lue dans le texte.
+                                ?: Regex("\"" + cle + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)+)\"").find(texte)?.groupValues?.get(1)
+                                ?: continue
+                            val net = brut.replace("\\/", "/").replace("\\u0026", "&").replace("&amp;", "&").trim()
+                            val absolue = runCatching { java.net.URL(java.net.URL(base), net).toString() }.getOrNull()
+                                ?.takeIf { it.startsWith("http") } ?: continue
+                            return cle to absolue
+                        }
+                        return null
+                    }
+
                     val webView = WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
@@ -121,7 +168,26 @@ open class Hoca8Extractor : Extractor() {
                         settings.userAgentString = ANDROID_CHROME_UA
                         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         settings.mediaPlaybackRequiresUserGesture = false
+                        settings.javaScriptCanOpenWindowsAutomatically = true
+                        settings.cacheMode = WebSettings.LOAD_DEFAULT
+                        // 2026-11-15 (SportsOnline) : la vérification invisible vit dans une
+                        //   iframe TIERCE (challenges.cloudflare.com). Sans cookies tiers, le
+                        //   widget ne garde pas son état et ne rend jamais son jeton → la page
+                        //   n'envoie jamais son POST et la vidéo n'arrive pas. Chrome les accepte,
+                        //   la WebView les refuse par défaut. Ce n'est PAS un réglage « comme
+                        //   Chrome » suffisant à lui seul : il faut aussi le viewport ci-dessous.
+                        CookieManager.getInstance().setAcceptCookie(true)
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                     }
+                    // 2026-11-15 (SportsOnline) : la WebView n'est jamais attachée à une fenêtre.
+                    //   Sans mesure ni layout son viewport reste 0×0 ; un widget INVISIBLE se croit
+                    //   hors écran et ne s'exécute pas. On lui donne une taille réelle.
+                    webView.measure(
+                        View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                    )
+                    webView.layout(0, 0, 1080, 1920)
+
                     // 2026-05-16 v6 : bridge JS pour capturer l'URL .m3u8 in-page
                     // (HLS.js la fetch en mémoire, jamais visible par shouldInterceptRequest).
                     webView.addJavascriptInterface(object {
@@ -139,6 +205,68 @@ open class Hoca8Extractor : Extractor() {
                                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                                     resolve(url)
                                 }
+                            }
+                        }
+
+                        /**
+                         * 2026-11-15 (user, SportsOnline : « il n'y a aucun CF, c'est un autre truc… on n'a
+                         * peut-être pas l'extracteur pour ce nouveau lecteur ») — par moments, la page du
+                         * lecteur ne contient pas la vidéo : elle l'obtient par un envoi `POST /turnstile/<id>`
+                         * (jeton de la vérification invisible, que la WebView passe bien). MESURÉ : cet envoi
+                         * reçoit « 403 » dès qu'il porte l'en-tête « X-Requested-With: <nom de l'appli> »,
+                         * que la WebView ajoute d'office, et une vraie réponse sans lui (depuis le PC du
+                         * user : 403 avec, réponse du serveur sans ; sur l'Oppo : 403). C'est le même refus
+                         * que pour la page du lecteur, que cet extracteur va déjà chercher lui-même pour
+                         * cette raison. On fait donc pareil pour cet envoi : même adresse, même contenu,
+                         * même type de contenu, mêmes cookies, sans l'en-tête. Réservé à l'adresse
+                         * `/turnstile/<id>` du lecteur qui l'appelle (même hôte que sa page), pour qu'un
+                         * cadre de pub ne s'en serve pas.
+                         *
+                         * 2026-11-15 (correctif) : trois ajouts — le type de contenu envoyé par la page est
+                         * respecté (le lecteur poste du JSON, pas du formulaire) ; le garde-fou de route
+                         * accepte tout identifiant ; et le m3u8 présent dans la réponse est remonté
+                         * directement, sans attendre que la page le lise.
+                         *
+                         * Retour : « <code HTTP>\n<corps> », ou vide si rien n'a été envoyé.
+                         */
+                        @android.webkit.JavascriptInterface
+                        fun poster(adresse: String, corps: String, typeContenu: String, page: String): String {
+                            return try {
+                                val u = java.net.URL(adresse); val p = java.net.URL(page)
+                                if (u.protocol != "https" || !u.host.equals(p.host, ignoreCase = true) ||
+                                    !Regex("^/turnstile/[^/?#]+$").matches(u.path)) return ""
+                                val origine = "${p.protocol}://${p.host}"
+                                val type = typeContenu.ifBlank {
+                                    if (corps.trimStart().startsWith("{")) "application/json"
+                                    else "application/x-www-form-urlencoded"
+                                }
+                                val b = okhttp3.Request.Builder().url(adresse)
+                                    .header("User-Agent", ANDROID_CHROME_UA)
+                                    .header("Referer", page).header("Origin", origine)
+                                    .header("Accept", "application/json, text/plain, */*")
+                                    .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                                    .post(corps.toRequestBody(type.toMediaType()))
+                                runCatching { android.webkit.CookieManager.getInstance().getCookie(adresse) }
+                                    .getOrNull()?.takeIf { it.isNotBlank() }?.let { b.header("Cookie", it) }
+                                val client = okhttp3.OkHttpClient.Builder()
+                                    .callTimeout(12, java.util.concurrent.TimeUnit.SECONDS).build()
+                                client.newCall(b.build()).execute().use { r ->
+                                    val texte = r.peekBody(200_000L).string()
+                                    android.util.Log.d("Hoca8Extractor", "envoi /turnstile/ relayé → HTTP ${r.code} (${texte.length} car.)")
+                                    if (r.code in 200..299) {
+                                        if (page.startsWith("http")) pageCapture = page
+                                        // 2026-11-15 (user : « par nom de clé, pas par position ») — cf. adresseVideo.
+                                        val parCle = adresseVideo(texte, adresse)
+                                        if (parCle != null) {
+                                            android.util.Log.d("Hoca8Extractor", "adresse vidéo prise dans « ${parCle.first} »")
+                                            android.os.Handler(android.os.Looper.getMainLooper()).post { resolve(parCle.second) }
+                                        } else resolveDepuisCorps(texte, adresse)   // dernier recours
+                                    }
+                                    "${r.code}\n$texte"
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.w("Hoca8Extractor", "envoi /turnstile/ relayé : ${e.message}")
+                                ""
                             }
                         }
                     }, "Hoca8Bridge")
@@ -213,18 +341,25 @@ open class Hoca8Extractor : Extractor() {
                             //   pas d'injection, HLS.js garde le m3u8 en mémoire, écran noir
                             //   (le site, lui, joue). La liste blanche par nom d'hôte casse à
                             //   CHAQUE changement d'hébergeur ; on la garde, mais on y ajoute
-                            //   une règle GÉNÉRIQUE : tout document HTML chargé dans une
-                            //   SOUS-FRAME (Accept text/html, pas la frame principale), hors
-                            //   pubs (BLOCKED_HOSTS, déjà écartées plus haut) et hors façade
+                            //   une règle GÉNÉRIQUE : tout document HTML, hors pubs
+                            //   (BLOCKED_HOSTS, déjà écartées plus haut) et hors façade
                             //   cartelive/bolaloca/embedme, est une page de lecteur → hook.
                             //   Le hook ne fait que surveiller XHR/fetch pour repérer un
                             //   .m3u8 : inoffensif dans une iframe qui n'en charge pas.
+                            // 2026-11-15 (SportsOnline, vu au journal) : le lecteur affiche la vérification
+                            //   Cloudflare dans une sous-frame ; la règle générique y injectait notre
+                            //   script et la vérification ne se terminait jamais (aucun flux capté).
+                            //   On laisse cette frame telle quelle.
+                            // 2026-11-15 (correctif) : la règle ne visait que les SOUS-frames
+                            //   (`!isForMainFrame`). La page principale de SportsOnline prend le même
+                            //   403 que ses iframes : on la refait aussi passer par OkHttp.
                             val accept = request.requestHeaders?.get("Accept").orEmpty()
                             val estFacade = hostLower.contains("cartelive") ||
                                 hostLower.contains("bolaloca") || hostLower.contains("embedme")
-                            val estIframeHtml = !request.isForMainFrame &&
-                                accept.contains("text/html") && !estFacade &&
-                                !path.endsWith(".js") && !path.endsWith(".json")
+                            val estVerification = hostLower.contains("challenges.cloudflare.com")
+                            val estDocHtml = !estVerification && !estFacade &&
+                                accept.contains("text/html") && !path.endsWith(".js") &&
+                                !path.endsWith(".json")
                             val estPageEmbed =
                                 (hostLower.contains("hoca8.com") && path.contains("/footy.php")) ||
                                 (hostLower.contains("barecrop.net") && path.contains("/embed/")) ||
@@ -232,9 +367,9 @@ open class Hoca8Extractor : Extractor() {
                                 (hostLower.contains("lockpop.net") && path.contains("/embed/")) ||
                                 (hostLower.contains("instream.click") &&
                                     (path.contains("hlsspanich.php") || path.contains("player.php"))) ||
-                                estIframeHtml
-                            if (estIframeHtml) android.util.Log.d("Hoca8Extractor", "iframe lecteur (règle générique) : $reqUrl")
-                            if (estPageEmbed && !estIframeHtml) dernierEmbedUrl = reqUrl   // hôtes connus seulement
+                                estDocHtml
+                            if (estDocHtml) android.util.Log.d("Hoca8Extractor", "document HTML refait sans en-tête d'appli : $reqUrl")
+                            if (estPageEmbed && !estDocHtml) dernierEmbedUrl = reqUrl   // hôtes connus seulement
                             if (estPageEmbed && request.method?.uppercase() == "GET") {
                                 try {
                                     val client = okhttp3.OkHttpClient.Builder()
@@ -255,6 +390,7 @@ open class Hoca8Extractor : Extractor() {
                                         )
                                         .header("User-Agent", ANDROID_CHROME_UA)
                                         .header("Accept", "text/html,application/xhtml+xml")
+                                        .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
                                         .build()
                                     val resp = client.newCall(req).execute()
                                     // 2026-10-25 : réponse lue SANS LIMITE → un « iframe » qui renvoyait
@@ -323,6 +459,11 @@ open class Hoca8Extractor : Extractor() {
                             view.evaluateJavascript(HOOK_M3U8_JS, null)
                         }
 
+                        // 2026-11-15 (diagnostic SportsOnline) : réponses en erreur reçues par la WebView.
+                        override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+                            android.util.Log.d("Hoca8Extractor", "HTTP ${errorResponse?.statusCode} ← ${request?.method} ${request?.url.toString().substringBefore('?').take(110)}")
+                        }
+
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                             if (view == null || resolved) return
                             android.util.Log.d("Hoca8Extractor", "onPageFinished: $finishedUrl")
@@ -331,12 +472,24 @@ open class Hoca8Extractor : Extractor() {
                             // 2026-05-17 v7 : démarre un poll qui scanne window.*
                             //   variables où HLS.js / players P2P stockent l'URL.
                             view.evaluateJavascript(POLL_VARS_JS, null)
+                            // 2026-11-15 : si le jeton est arrivé tard et que la page a
+                            //   déjà renoncé à son envoi, on le rejoue nous-mêmes.
+                            view.postDelayed({
+                                if (!resolved) {
+                                    view.evaluateJavascript(
+                                        "try{window.__hoca8_turnstile_retry&&window.__hoca8_turnstile_retry()}catch(e){}",
+                                        null
+                                    )
+                                }
+                            }, 8_000L)
                             view.postDelayed({
                                 if (!resolved) {
                                     android.util.Log.w("Hoca8Extractor", "Timeout — no stream captured")
                                     resolve(null)
                                 }
-                            }, 15_000L)
+                            // 15 → 20 s après la fin du chargement : c'est CE délai-ci qui tombait en premier
+                            //   (page finie en ~1 s), il doit suivre le délai de garde ci-dessus.
+                            }, 20_000L)
                         }
 
                         override fun onReceivedError(
@@ -429,14 +582,20 @@ open class Hoca8Extractor : Extractor() {
             })();
         """.trimIndent()
 
+        /** 2026-11-15 (SportsOnline) : le relais du POST de vérification ne couvrait
+         *  que `fetch`. Le lecteur passe par XMLHttpRequest → le POST partait avec
+         *  l'en-tête de l'appli, prenait 403, et le relais n'était jamais appelé.
+         *  On couvre désormais les DEUX, en respectant le corps et le type de
+         *  contenu réellement envoyés par la page, et on note la dernière adresse
+         *  de vérification pour pouvoir la rejouer si le jeton arrive en retard. */
         private val HOOK_M3U8_JS = """
             (function() {
                 if (window.__hoca8_hooked) return;
                 window.__hoca8_hooked = true;
+
                 function report(u) {
                     if (typeof u !== 'string') return;
                     if (!u || u.indexOf('.m3u8') === -1) return;
-                    // Skip jsdelivr/cdnjs (lib URLs)
                     if (u.indexOf('jsdelivr.net') !== -1 || u.indexOf('cdnjs.cloudflare') !== -1) return;
                     try {
                         if (typeof Hoca8Bridge !== 'undefined') {
@@ -444,14 +603,63 @@ open class Hoca8Extractor : Extractor() {
                         }
                     } catch(e) {}
                 }
-                // Hook XMLHttpRequest.open
-                try {
-                    var origOpen = XMLHttpRequest.prototype.open;
-                    XMLHttpRequest.prototype.open = function(method, url) {
-                        report(url);
-                        return origOpen.apply(this, arguments);
-                    };
-                } catch(e) {}
+
+                function absolue(u) {
+                    try { return new URL(String(u), location.href).href } catch (e) { return '' }
+                }
+
+                function estVerif(u) {
+                    return typeof u === 'string' && u.indexOf('/turnstile/') !== -1;
+                }
+
+                function corpsTexte(c) {
+                    try {
+                        if (c == null) return '';
+                        if (typeof c === 'string') return c;
+                        if (typeof URLSearchParams !== 'undefined' && c instanceof URLSearchParams) return c.toString();
+                        if (typeof FormData !== 'undefined' && c instanceof FormData) {
+                            var o = [];
+                            c.forEach(function (v, k) { o.push(encodeURIComponent(k) + '=' + encodeURIComponent(v)); });
+                            return o.join('&');
+                        }
+                    } catch (e) {}
+                    return String(c);
+                }
+
+                function relayer(u, corps, type) {
+                    try {
+                        if (typeof Hoca8Bridge === 'undefined' || !Hoca8Bridge.poster) return null;
+                        var abs = absolue(u);
+                        if (!abs) return null;
+                        window.__hoca8_turnstile = abs;
+                        var rep = String(Hoca8Bridge.poster(abs, corps == null ? '' : corps, type || '', String(location.href)) || '');
+                        var coupe = rep.indexOf('\n');
+                        if (coupe <= 0) return null;
+                        var code = parseInt(rep.slice(0, coupe), 10) || 0;
+                        if (code < 100) return null;
+                        return { code: code, corps: rep.slice(coupe + 1) };
+                    } catch (e) { return null; }
+                }
+
+                function typeEntete(h) {
+                    try {
+                        if (!h) return '';
+                        if (typeof h.forEach === 'function' && !Array.isArray(h)) {
+                            var t = '';
+                            h.forEach(function (v, k) { if (String(k).toLowerCase() === 'content-type') t = v; });
+                            return t;
+                        }
+                        if (Array.isArray(h)) {
+                            for (var i = 0; i < h.length; i++) {
+                                if (h[i] && String(h[i][0]).toLowerCase() === 'content-type') return h[i][1];
+                            }
+                            return '';
+                        }
+                        for (var k in h) if (String(k).toLowerCase() === 'content-type') return h[k];
+                    } catch (e) {}
+                    return '';
+                }
+
                 // Hook fetch
                 try {
                     var origFetch = window.fetch;
@@ -459,12 +667,86 @@ open class Hoca8Extractor : Extractor() {
                         window.fetch = function(input, init) {
                             var u = (typeof input === 'string') ? input : (input && input.url) || '';
                             report(u);
+                            if (estVerif(u)) {
+                                var corps = init && init.body != null ? corpsTexte(init.body) : '';
+                                var type = init ? typeEntete(init.headers) : '';
+                                var r = relayer(u, corps, type);
+                                if (r) {
+                                    return Promise.resolve(new Response(r.corps, {
+                                        status: r.code,
+                                        headers: { 'Content-Type': type || 'application/json' }
+                                    }));
+                                }
+                            }
                             return origFetch.apply(this, arguments);
                         };
                     }
                 } catch(e) {}
+
+                // Hook XMLHttpRequest (c'est ce chemin qu'utilise le lecteur SportsOnline)
+                try {
+                    var origOpen = XMLHttpRequest.prototype.open;
+                    var origSend = XMLHttpRequest.prototype.send;
+                    var origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+
+                    XMLHttpRequest.prototype.open = function(method, url) {
+                        this.__h_meth = method;
+                        this.__h_url = url;
+                        this.__h_type = '';
+                        report(url);
+                        return origOpen.apply(this, arguments);
+                    };
+
+                    XMLHttpRequest.prototype.setRequestHeader = function(k, v) {
+                        if (String(k).toLowerCase() === 'content-type') this.__h_type = v;
+                        return origSetHeader.apply(this, arguments);
+                    };
+
+                    XMLHttpRequest.prototype.send = function(corps) {
+                        var self = this;
+                        if (estVerif(self.__h_url) && String(self.__h_meth).toUpperCase() === 'POST') {
+                            var r = relayer(self.__h_url, corpsTexte(corps), self.__h_type || '');
+                            if (r) {
+                                Object.defineProperty(self, 'readyState', { get: function () { return 4 }, configurable: true });
+                                Object.defineProperty(self, 'status', { get: function () { return r.code }, configurable: true });
+                                Object.defineProperty(self, 'statusText', { get: function () { return '' }, configurable: true });
+                                Object.defineProperty(self, 'responseText', { get: function () { return r.corps }, configurable: true });
+                                Object.defineProperty(self, 'response', { get: function () { return r.corps }, configurable: true });
+                                self.getAllResponseHeaders = function () { return 'content-type: application/json' + String.fromCharCode(13, 10) };
+                                self.getResponseHeader = function (n) {
+                                    return String(n).toLowerCase() === 'content-type' ? 'application/json' : null;
+                                };
+                                setTimeout(function () {
+                                    try { self.dispatchEvent(new Event('readystatechange')); } catch (e) {}
+                                    try { if (self.onreadystatechange) self.onreadystatechange(); } catch (e) {}
+                                    try { self.dispatchEvent(new ProgressEvent('load')); } catch (e) {}
+                                    try { if (self.onload) self.onload(); } catch (e) {}
+                                    try { self.dispatchEvent(new ProgressEvent('loadend')); } catch (e) {}
+                                }, 0);
+                                return;
+                            }
+                        }
+                        return origSend.apply(this, arguments);
+                    };
+                } catch(e) {}
+
+                // Rejeu si le jeton arrive après l'abandon de la page.
+                window.__hoca8_turnstile_retry = function () {
+                    try {
+                        if (!window.__hoca8_turnstile) return;
+                        var el = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+                        var jeton = el && el.value;
+                        if (!jeton) return;
+                        relayer(window.__hoca8_turnstile,
+                            'cf-turnstile-response=' + encodeURIComponent(jeton),
+                            'application/x-www-form-urlencoded');
+                    } catch (e) {}
+                };
             })();
         """.trimIndent()
+
+        /** Clés de la réponse du lecteur qui portent l'adresse de la vidéo, par ordre de préférence. */
+        private val CLES_ADRESSE_VIDEO = listOf("stream_url_nop2p", "stream_url", "url_nop2p", "url", "m3u8")
 
         private val BLOCKED_HOSTS = listOf(
             "googlesyndication", "doubleclick", "adservice",

@@ -156,6 +156,7 @@ object BackupRegistry {
         "aplouf" to "aplouf",
         "AnimeSama" to "AnimeSama (animes)",
         "VoirAnime" to "VoirAnime (animes)",
+        "Animamix" to "Animamix (animes)",
         "FrenchManga" to "FrenchManga (animes)",
         "VoirDrama" to "VoirDrama (dramas)",
         "DessinAnime" to "DessinAnime",
@@ -291,7 +292,7 @@ object BackupRegistry {
      *  Un système d'alerte bruyant finit ignoré → on ne compte QUE dans leur périmètre. */
     private val ANIME_ORIENTED_SOURCES = setOf(
         "DessinAnime", "DessinAnimeNet", "AniCloud", "AnimeSama",
-        "VoirAnime", "FrenchManga", "FrenchAnime", "FRAnime", "Franime",
+        "VoirAnime", "FrenchManga", "FrenchAnime", "FRAnime", "Franime", "Animamix",
     )
     private val DRAMA_ORIENTED_SOURCES = setOf("VoirDrama", "Dramacool", "DramaCool")
 
@@ -2450,7 +2451,11 @@ object BackupRegistry {
             // 2026-07-12 (user) : providers SPÉCIALISÉS anime/dessins animés qui n'hébergent AUCUN
             //   film live-action → à sauter quand le contenu est confirmé non-animation. DessinAnime
             //   EXCLU de cette liste (user « dessin animé lui doit recevoir tout » = contenu mixte).
-            val animeOnlyProviders = setOf("AnimeSama", "VoirAnime", "FrenchManga", "FrenchAnime", "FRAnime", "Franime")
+            // 2026-11-13 (user : Bilan « Animamix 9 % ») : Animamix AJOUTÉ. Son nom ne contient ni
+            //   « Anime » ni « Manga » : il était donc interrogé aussi pour les films et séries
+            //   classiques (214 appareils contre ~155 pour les autres sources d'animés), où il ne
+            //   trouve jamais rien — appels inutiles et taux de réussite faussé.
+            val animeOnlyProviders = setOf("AnimeSama", "VoirAnime", "FrenchManga", "FrenchAnime", "FRAnime", "Franime", "Animamix")
             val skipAnimeOnly = notAnimationConfirmed && !isAnimeContent
             if (skipAnimeOnly) Log.i(TAG, "fetchAll contenu NON-animation confirmé (genre 16 absent) → skip providers anime-only")
 

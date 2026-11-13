@@ -29,12 +29,17 @@ object WebflixProvider {
     private const val BASE = "https://webflix.art"
     private val gson = Gson()
 
-    private val client = OkHttpClient.Builder()
+    // 2026-11-15 (bilan des sources : films trouvés 40 % → 23 % → 12 % en trois jours) — vu au
+    //   journal sur l'Oppo, en Wi-Fi sans VPN : « Unable to resolve host "webflix.art" ». L'adresse
+    //   n'est plus résolue par le DNS de l'opérateur, alors que le site répond (testé depuis le PC
+    //   sous VPN). Ce client avait son propre réglage, donc le DNS du téléphone : il part maintenant
+    //   du client commun de l'appli, qui résout par son DNS indépendant comme les autres sources.
+    private val client by lazy { com.streamflixreborn.streamflix.utils.NetworkClient.default.newBuilder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS)
         .followRedirects(true)
-        .build()
+        .build() }
 
     private data class FastfluxResponse(
         val success: Boolean = false,

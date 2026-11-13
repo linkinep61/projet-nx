@@ -302,6 +302,8 @@ abstract class Extractor {
             HydraxExtractor(),
             // 2026-05-15 : ajout Hoca8 pour chaînes sport/Canal+ Live de LiveTvHub
             Hoca8Extractor(),
+            // 2026-11-15 : pages de chaîne SportsOnline (même montage que les façades Multi Live).
+            SportsOnlineExtractor(),
             // 2026-05-15 : Freeshot pour les ~48 chaînes FR de freeshot.live
             FreeshotExtractor(),
             MailRuExtractor(),

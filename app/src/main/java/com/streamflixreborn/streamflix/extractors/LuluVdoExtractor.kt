@@ -44,6 +44,10 @@ class LuluVdoExtractor : Extractor() {
         //   jwplayer + m3u8, sur le même schéma d'URL `/e/<id>`. Il manquait juste
         //   le domaine dans cette liste.
         "https://livavid.sbs",
+        // 2026-11-17 (user : « chez nous, le lecteur 3 est cassé ») : 3e lecteur des séries Wiflix,
+        //   « No extractors found » au banc. Même cas : la page se présente comme Lulustream
+        //   (`<title>… - Lulustream.mp4</title>`), même schéma `/e/<id>`.
+        "https://lplaygo.com",
     )
 
     companion object {

@@ -4997,7 +4997,7 @@ class PlayerTvFragment : Fragment() {
                     || wvUrl.contains("luluvid") || wvUrl.contains("luluvdoo")
                     // 2026-11-02 (banc Superman, « Livavid » / « Premium 1 HD » en 403) : miroirs
                     //   LuluStream absents d'ici → flux data: lu sans la WebView → segments refusés.
-                    || wvUrl.contains("livavid") || wvUrl.contains("lulust.com")
+                    || wvUrl.contains("livavid") || wvUrl.contains("lulust.com") || wvUrl.contains("lplaygo")
         }
 
         /** Dropload : flux dropcdn lu par la WebView partagée de DroploadExtractor. */

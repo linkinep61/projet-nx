@@ -17,6 +17,7 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
+import com.streamflixreborn.streamflix.utils.TMDb3.w500
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -183,6 +184,11 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                         parseHomeItem(item)
                     }
                     if (recentShows.isNotEmpty()) {
+                        // 2026-11-13 : les images des ajouts récents manquent chez le site (404) et
+                        //   le rattrapage de jaquette de l'appli ne se déclenche pas sur cette erreur
+                        //   (vérifié : rangée restée grise, aucune fiche redemandée). On contrôle donc
+                        //   ici, en parallèle et sans jamais retarder l'accueil de plus de 8 s.
+                        kotlinx.coroutines.withTimeoutOrNull(8_000) { reparerAffiches(recentShows) }
                         categories.add(Category(name = "Nouveau", list = recentShows))
                     }
                 }
@@ -354,9 +360,9 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
 
         val title = document.selectFirst(".post-title h1, .post-title h3")
             ?.text()?.trim() ?: ""
-        val poster = improveImageUrl(
+        val poster = afficheOuSecours(improveImageUrl(
             document.selectFirst(".summary_image img")?.attr("src")
-        )
+        ), title)
         val overview = document.selectFirst(".description-summary .summary__content")
             ?.text()?.trim()
 
@@ -398,9 +404,9 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
 
         val title = document.selectFirst(".post-title h1, .post-title h3")
             ?.text()?.trim() ?: ""
-        val poster = improveImageUrl(
+        val poster = afficheOuSecours(improveImageUrl(
             document.selectFirst(".summary_image img")?.attr("src")
-        )
+        ), title)
         val overview = document.selectFirst(".description-summary .summary__content")
             ?.text()?.trim()
 
@@ -672,6 +678,108 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
     }
 
     // ==================== HELPERS ====================
+
+    /**
+     * 2026-11-13 (user : « dans Nouveau, trop de jaquettes grises ») — depuis le passage du site
+     * sur son nouveau domaine, les images des AJOUTS RÉCENTS n'existent plus chez lui : vignette,
+     * grande taille et image de la fiche répondent toutes 404 (vérifié dans Chrome, 11 nouveautés
+     * sur 14). La fiche rend alors l'affiche TMDB à la place ; le rattrapage de jaquette de l'appli
+     * (ArtworkRepair, qui redemande la fiche après un 404) la reporte ensuite sur les cartes.
+     * En cas de doute (réseau, TMDB muet) on garde l'adresse du site : jamais pire qu'avant.
+     */
+    private val affichesSecours = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private suspend fun afficheOuSecours(urlSite: String?, titre: String): String? {
+        if (titre.isBlank()) return urlSite
+        affichesSecours[titre]?.let { return it }
+        if (!urlSite.isNullOrBlank() && imageExiste(urlSite)) return urlSite
+        val tmdb = runCatching { afficheTmdb(titre) }.getOrNull() ?: return urlSite
+        affichesSecours[titre] = tmdb
+        Log.d("VoirAnimeProvider", "affiche du site absente (404) -> TMDB pour « $titre »")
+        return tmdb
+    }
+
+    /** Remplace, dans une rangée, les affiches absentes du site par celles de TMDB. */
+    private suspend fun reparerAffiches(items: List<Any>) = coroutineScope {
+        items.map { item ->
+            async {
+                runCatching {
+                    when (item) {
+                        is Movie -> item.poster = afficheOuSecours(item.poster, item.title)
+                        is TvShow -> item.poster = afficheOuSecours(item.poster, item.title)
+                    }
+                }
+            }
+        }.awaitAll()
+    }
+
+    /** Vrai sauf si le site répond explicitement 404 (toute autre erreur = on garde l'image). */
+    private suspend fun imageExiste(url: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            // Referer OBLIGATOIRE : sans lui le site répond 403 à TOUTES les images, vivantes ou
+            //   non (mesuré : sans référent 403/403 ; avec, 200 pour la vivante et 404 pour la morte).
+            NetworkClient.default.newCall(
+                okhttp3.Request.Builder().url(url).head().header("Referer", baseUrl).build()
+            ).execute().use { it.code != 404 }
+        }.getOrDefault(true)
+    }
+
+    private suspend fun afficheTmdb(titre: String): String? {
+        if (!UserPreferences.enableTmdb) return null
+        val propre = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(titre)
+            .replace(Regex("""\s*\((?:VF|VOSTFR|VO)\)\s*$""", RegexOption.IGNORE_CASE), "").trim()
+        // 2e essai SANS le suffixe de saison : « Saint Seiya: The Lost Canvas 2 », « Lupin III:
+        //   PART IV », « No Doubt in Us 2 » ne donnent rien chez TMDB, le titre nu si.
+        val sansSuffixe = propre.replace(
+            Regex("""[\s:\-–]+(?:\d+|part(?:ie)?\s+\w+|saison\s+\d+|season\s+\d+)\s*$""", RegexOption.IGNORE_CASE), ""
+        ).trim()
+        for (q in listOf(propre, sansSuffixe).filter { it.length >= 2 }.distinct()) {
+            afficheTmdbPour(q)?.let { return it }
+        }
+        return null
+    }
+
+    private suspend fun afficheTmdbPour(propre: String): String? {
+        val resultats = TMDb3.Search.multi(propre, language = "fr-FR").results
+        // Comparaison SANS ponctuation ni espaces : TMDB écrit « Saint Seiya : The Lost Canvas »
+        //   (espace avant les deux-points) là où le site écrit « Saint Seiya: The Lost Canvas » —
+        //   la comparaison brute ne retenait donc aucune affiche (vu au journal le 13/11).
+        fun nu(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
+        val propreNu = nu(propre)
+        fun colle(t: String?): Boolean {
+            val n = nu(t ?: return false)
+            return n.length >= 3 && (n == propreNu || n.contains(propreNu) || propreNu.contains(n))
+        }
+        // Animation d'abord (langue d'origine asiatique), sinon tout titre concordant.
+        val asiatiques = setOf("ja", "ko", "zh")
+        val candidats = resultats.filter {
+            when (it) {
+                is TMDb3.Movie -> it.posterPath != null && (colle(it.title) || colle(it.originalTitle))
+                is TMDb3.Tv -> it.posterPath != null && (colle(it.name) || colle(it.originalName))
+                else -> false
+            }
+        }
+        // Genre 16 = animation. Sans cette préférence, « Lupin III » prenait l'affiche du film en
+        //   prises de vues réelles de 2014 (japonais lui aussi) au lieu de l'animé.
+        val choisi = candidats.firstOrNull {
+            when (it) {
+                is TMDb3.Movie -> 16 in it.genresIds
+                is TMDb3.Tv -> 16 in it.genresIds
+                else -> false
+            }
+        } ?: candidats.firstOrNull {
+            when (it) {
+                is TMDb3.Movie -> it.originalLanguage in asiatiques
+                is TMDb3.Tv -> it.originalLanguage in asiatiques
+                else -> false
+            }
+        } ?: candidats.firstOrNull()
+        return when (choisi) {
+            is TMDb3.Movie -> choisi.posterPath?.w500
+            is TMDb3.Tv -> choisi.posterPath?.w500
+            else -> null
+        }
+    }
 
     private fun improveImageUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null

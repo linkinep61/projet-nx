@@ -471,6 +471,8 @@ object SportHub {
         com.streamflixreborn.streamflix.sport.providers.ChaineDirect.ID to "ChaineDirect",
         // 2026-10-28 (user : ajouter xonaflix au dossier Sport) : matchs + chaînes, lecture native.
         XonaFlix.ID to "XonaFlix",
+        // 2026-11-15 (user : ajouter SportsOnline) : matchs du planning, page lue par son extracteur.
+        com.streamflixreborn.streamflix.sport.providers.SportsOnline.ID to "SportsOnline",
     )
     /** Ordre des serveurs d'une tuile : RénéVéo (sondé, rapide), les portails, puis les pages
      *  web du module sport/ (lues dans la WebView du grand lecteur, donc en dernier pour une
@@ -481,8 +483,10 @@ object SportHub {
         "ola", "vegeta", "vavoo", com.streamflixreborn.streamflix.sport.providers.StreamedPk.ID,
         com.streamflixreborn.streamflix.sport.providers.DaddyLive.ID,
         // 2026-10-27 : ChaineDirect rejoint les bouquets (page web lue dans la WebView → avec les sources web).
-        com.streamflixreborn.streamflix.sport.providers.ChaineDirect.ID, DamiTv.ID)
+        com.streamflixreborn.streamflix.sport.providers.ChaineDirect.ID,
+        com.streamflixreborn.streamflix.sport.providers.SportsOnline.ID, DamiTv.ID)
     private val SOURCES_WEB = setOf(DamiTv.ID, com.streamflixreborn.streamflix.sport.providers.StreamedPk.ID,
+        com.streamflixreborn.streamflix.sport.providers.SportsOnline.ID,
         com.streamflixreborn.streamflix.sport.providers.DaddyLive.ID, com.streamflixreborn.streamflix.sport.providers.ChaineDirect.ID)
 
     // ────────────────────────────────────────────────────────── Sous-dossiers (chargés au clic)
@@ -1214,6 +1218,11 @@ object SportHub {
         //   ne gardent que le français.
         val nouvelles = parCle.values.map { a ->
             val rubriqueFinale = when {
+                // 2026-11-15 (user : « celles qui sont françaises, on les met dans l'onglet sport » ;
+                //   vu sur l'Oppo : « France vs Turkey · UEFA Nations League », commenté en français,
+                //   rangé dans Foot d'ailleurs parce que le nom contient « Turkey ») : un match qui a
+                //   une chaîne en français ne reste jamais dans « Foot d'ailleurs ».
+                a.francais && a.rubrique == FOOT_MONDE -> AUTRES_MATCHS
                 a.francais -> a.rubrique
                 !a.cle.startsWith("c_") && a.rubrique in RUBRIQUES_VO -> RUBRIQUES_VO.getValue(a.rubrique)
                 else -> FOOT_MONDE

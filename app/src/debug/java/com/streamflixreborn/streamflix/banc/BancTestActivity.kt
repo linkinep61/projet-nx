@@ -69,6 +69,10 @@ class BancTestActivity : ComponentActivity() {
 
     private class Ligne(val server: Video.Server, val source: String, val vue: TextView) {
         @Volatile var video: Video? = null
+        /** 2026-11-15 (user : « le banc doit ignorer le contrôle de durée sur les sources en direct,
+         *  plutôt que baisser le seuil ») : une chaîne en direct n'a pas de durée, seulement une
+         *  fenêtre de quelques dizaines de secondes — ce n'est ni une pub ni un extrait. */
+        @Volatile var enDirect: Boolean = false
     }
 
     private class Sonde(val ok: Boolean, val cause: String, val demarrageMs: Long?, val mbits: Double?, val av: String = "")
@@ -157,7 +161,8 @@ class BancTestActivity : ComponentActivity() {
     /** Lancement depuis le PC : adb shell am start -n …/BancTestActivity --es q "titre" [--es tmdb 123 --es type tv --ei s 1 --ei e 2] */
     private fun lireIntent() {
         val i = intent ?: return
-        i.getStringExtra("url")?.takeIf { it.isNotBlank() }?.let { lancerUrl(it); return }
+        // `--ez direct true` : l'adresse est une chaîne en direct (cf. Ligne.enDirect).
+        i.getStringExtra("url")?.takeIf { it.isNotBlank() }?.let { debitDemande = i.getBooleanExtra("debit", false); lancerUrl(it, i.getBooleanExtra("direct", false)); return }
         if (i.getBooleanExtra("revue", false)) {
             // 2026-11-12 : revue de toutes les sources (voir RevueSources).
             travail?.cancel()
@@ -253,7 +258,41 @@ class BancTestActivity : ComponentActivity() {
 
     // 2026-11-12 (essai d'un nouvel hébergeur) : test d'UNE adresse de lecteur donnée
     //   (adb … --es url "https://…"), sans passer par les sources : extraction puis lecture.
-    private fun lancerUrl(url: String) {
+    // 2026-11-15 (diagnostic, user : VidMoLy démarre puis ne charge plus) : `--ez debit true` télécharge
+    //   les premiers morceaux du flux HORS du lecteur (même pile réseau que lui, HttpURLConnection),
+    //   pour savoir si le blocage vient du réseau du téléphone ou du lecteur. Journal : étiquette BANC.
+    private var debitDemande = false
+    private fun mesurerDebit(v: Video) {
+        fun ouvrir(u: String): java.net.HttpURLConnection = (java.net.URL(u).openConnection() as java.net.HttpURLConnection).apply {
+            connectTimeout = 15_000; readTimeout = 30_000
+            (v.headers ?: emptyMap()).forEach { (k, x) -> setRequestProperty(k, x) }
+        }
+        fun texte(u: String) = ouvrir(u).inputStream.bufferedReader().use { it.readText() }
+        fun lignesUtiles(s: String) = s.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+        var liste = v.source
+        var corps = texte(liste)
+        if (!corps.contains("#EXTINF")) { liste = java.net.URL(java.net.URL(liste), lignesUtiles(corps).first()).toString(); corps = texte(liste) }
+        val morceaux = lignesUtiles(corps).take(6).map { java.net.URL(java.net.URL(liste), it).toString() }
+        android.util.Log.i("BANC", "debit : ${morceaux.size} morceaux sur ${java.net.URL(liste).host}")
+        morceaux.forEachIndexed { i, u ->
+            val t0 = SystemClock.elapsedRealtime(); var total = 0L; var trous = 0; var dernier = t0
+            try {
+                val c = ouvrir(u)
+                c.inputStream.use { flux ->
+                    val tampon = ByteArray(65536)
+                    while (true) {
+                        val n = flux.read(tampon); if (n < 0) break
+                        val m = SystemClock.elapsedRealtime(); if (m - dernier > 2_000) trous++; dernier = m; total += n
+                    }
+                }
+                android.util.Log.i("BANC", "debit : morceau ${i + 1} : $total o en ${SystemClock.elapsedRealtime() - t0} ms (HTTP ${c.responseCode}, trous>2s $trous)")
+            } catch (e: Exception) {
+                android.util.Log.w("BANC", "debit : morceau ${i + 1} : ECHEC après ${SystemClock.elapsedRealtime() - t0} ms, $total o reçus, trous>2s $trous : $e")
+            }
+        }
+    }
+
+    private fun lancerUrl(url: String, enDirect: Boolean = false) {
         travail?.cancel()
         lignes.clear(); liste.removeAllViews()
         nbOk = 0; nbKo = 0; nbEnCours = 0; collecteFinie = false; fichierTitre = null
@@ -261,6 +300,7 @@ class BancTestActivity : ComponentActivity() {
             titreCourant = "Adresse directe"
             ecrireDebut("Adresse directe", "0")
             val l = ajouterLigne(Video.Server(id = "direct", name = "Direct · ${android.net.Uri.parse(url).host}", src = url))
+            l.enDirect = enDirect
             afficher(l, Color.LTGRAY, "◌", "extraction…")
             val t0 = SystemClock.elapsedRealtime()
             val video = try {
@@ -278,8 +318,9 @@ class BancTestActivity : ComponentActivity() {
                 video.needsWebViewClick -> "navigateur requis (clic)"
                 else -> null
             }
+            if (refus == null && debitDemande) withContext(Dispatchers.IO) { runCatching { mesurerDebit(video) }.onFailure { android.util.Log.w("BANC", "debit : $it") } }
             if (refus != null) terminer(l, Sonde(false, refus, null, null), tEx)
-            else { afficher(l, Color.WHITE, "▶", "lecture en cours (8 s)…"); terminer(l, sonder(video), tEx) }
+            else { afficher(l, Color.WHITE, "▶", "lecture en cours (8 s)…"); terminer(l, sonder(video, l.enDirect), tEx) }
             collecteFinie = true; ecrireFin(); majResume()
         }
     }
@@ -440,7 +481,7 @@ class BancTestActivity : ComponentActivity() {
         val wvUrl = v.webViewUrl.orEmpty().lowercase()
         if (src.contains("dropcdn.io")) com.streamflixreborn.streamflix.extractors.DroploadExtractor.sharedWebView?.let { return it }
         val lulu = wvUrl.isNotBlank() && (listOf("tnmr.org", "luluvdo", "lulustream", "luluvid", "lulucdn").any { src.contains(it) } ||
-            listOf("luluvdo", "lulustream", "luluvid", "livavid", "lulust.com").any { wvUrl.contains(it) })
+            listOf("luluvdo", "lulustream", "luluvid", "livavid", "lulust.com", "lplaygo").any { wvUrl.contains(it) })
         if (lulu && src.startsWith("data:")) com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView?.let { return it }
         if (v.webViewUrl != null && (src.startsWith("data:") || src.contains("cfglobalcdn.com")))
             com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView?.let { return it }
@@ -512,7 +553,7 @@ class BancTestActivity : ComponentActivity() {
         }
     }
 
-    private suspend fun sonder(v: Video): Sonde = withContext(Dispatchers.Main) {
+    private suspend fun sonder(v: Video, enDirect: Boolean = false): Sonde = withContext(Dispatchers.Main) {
         val octets = AtomicLong(0)
         val ecoute = object : TransferListener {
             override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
@@ -571,8 +612,8 @@ class BancTestActivity : ComponentActivity() {
             //   suffisent pas, une pub ou un extrait passait pour « OK ». On lit la DURÉE totale du
             //   média : moins de 2 min pour un film / un épisode = pub, bande-annonce ou extrait.
             val dureeMedia = p.duration
-            val dureeTxt = if (dureeMedia > 0) "%dh%02d".format(dureeMedia / 3_600_000, (dureeMedia / 60_000) % 60) else "durée ?"
-            if (dureeMedia in 1..DUREE_MIN_MS) return@withContext Sonde(false,
+            val dureeTxt = if (enDirect) "direct" else if (dureeMedia > 0) "%dh%02d".format(dureeMedia / 3_600_000, (dureeMedia / 60_000) % 60) else "durée ?"
+            if (!enDirect && dureeMedia in 1..DUREE_MIN_MS) return@withContext Sonde(false,
                 "pub / extrait : la vidéo ne dure que ${dureeMedia / 1000} s", tDemarrage, mbits)
             if (lu < LECTURE_EXIGEE_MS) return@withContext Sonde(false,
                 "démarre puis bloque : ${lu / 1000} s lues en ${duree / 1000} s", tDemarrage, mbits)
@@ -584,7 +625,7 @@ class BancTestActivity : ComponentActivity() {
             // 2026-11-05 (user : « Enlève le fait qu'on doit avancer jusqu'à la fin de la vidéo ») :
             //   saut à 90 % désactivé. Remettre à true pour le réactiver.
             val sautVersLaFin = false
-            if (sautVersLaFin && image && son && dureeMedia > DUREE_MIN_MS && p.isCurrentMediaItemSeekable) {
+            if (sautVersLaFin && !enDirect && image && son && dureeMedia > DUREE_MIN_MS && p.isCurrentMediaItemSeekable) {
                 val cible = dureeMedia * 9 / 10
                 val cibleTxt = "%dh%02d".format(cible / 3_600_000, (cible / 60_000) % 60)
                 p.seekTo(cible)

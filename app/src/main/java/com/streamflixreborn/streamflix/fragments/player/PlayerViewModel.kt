@@ -1540,6 +1540,9 @@ class PlayerViewModel(
         val isAnimeProvider = providerName.contains("Anime", ignoreCase = true) ||
             providerName.contains("Manga", ignoreCase = true) ||
             providerName.equals("Franime", ignoreCase = true) ||
+            // 2026-11-13 : « Animamix » ne contient ni « Anime » ni « Manga » -> jamais reconnu
+            //   comme source d'animés (user : « il n'appelle pas les autres providers animés »).
+            providerName.equals("Animamix", ignoreCase = true) ||
             providerName.equals("DessinAnime", ignoreCase = true)
         // 2026-06-03 (user "patch qui attend qui est vraiment du FR. Si y a pas on se rabat
         //   sur VOSTFR/VO. Sur tous les providers SAUF anime") : si le 1er lot ne contient que

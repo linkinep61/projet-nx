@@ -2252,7 +2252,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                     Log.w("Wiflix", "getServers($id) → id sans '/' (TMDB numérique?), tentative recherche par titre")
                     return searchServersByTitle(id, videoType)
                 }
-                val (tvShowId, rel) = parts
+                val (tvShowId, relBrut) = parts
 
                 val document = try {
                     val doc = service.getTvShow(tvShowId)
@@ -2262,6 +2262,20 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 // 2026-07-31 : diagnostic — combien de lecteurs la page expose-t-elle vraiment,
                 //   et combien en perd-on au filtrage ? (user : « pourquoi les serveurs Wiflix
                 //   n'apparaissent pas ? » alors que le site en affiche une quinzaine).
+                // 2026-11-17 (user : « les serveurs marqués FR donnent du VOSTFR ») : la page a DEUX blocs
+                //   par épisode, ep<N>vf (VF) et ep<N>vs (VOSTFR). Deux défauts :
+                //   1) aucun nom de lecteur ne disait sa langue → tout passait pour du français ;
+                //   2) la collecte des serveurs (CrossProviderResolver) ne résout qu'UN bloc, et le
+                //      VOSTFR est listé en premier → la VF n'était jamais prise.
+                //   Désormais chaque lecteur porte sa langue, et un id « slug/ep4vf+ep4vs » lit les deux
+                //   blocs dans la même page (aucune requête de plus). `decalage` garde des id uniques.
+                var decalage = 0
+                relBrut.split("+").filter { it.isNotBlank() }.flatMap { rel ->
+                val langueBloc = when {
+                    rel == "blocvostfr" || Regex("^ep\\d+vs$").matches(rel) -> " (VOSTFR)"
+                    rel == "blocfr" || Regex("^ep\\d+vf$").matches(rel) -> " (VF)"
+                    else -> ""
+                }
                 val allAnchors = document.select("div.$rel a")
                 val keptAnchors = allAnchors.filter { ignoreSource(nomLecteur(it)) == false }
                 val fxSerie = resoudreFx(keptAnchors, document.html(), "${baseUrl}serie-en-streaming/$tvShowId")
@@ -2305,10 +2319,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         //   s'écrasaient mutuellement et un seul survivait. On suffixe donc
                         //   par l'index pour garantir l'unicité (l'affichage, lui, ne change pas).
                         Video.Server(
-                            id = "${serviceName ?: spanText.ifEmpty { "lecteur" }}_$index",
-                            name = displayName,
+                            id = "${serviceName ?: spanText.ifEmpty { "lecteur" }}_${index + decalage}",
+                            name = displayName + langueBloc,
                             src = src,
                     )
+                }.also { decalage += allAnchors.size }
                 }
             }
 

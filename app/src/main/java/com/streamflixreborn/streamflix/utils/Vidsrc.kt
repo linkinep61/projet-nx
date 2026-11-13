@@ -79,11 +79,19 @@ object Vidsrc {
             abandonSiTitre = Regex("""(?i)(player|joueur|lecteur)?"""),
             delaiAbandonMs = 12_000L,
         ) ?: throw Exception("Vidsrc : flux non capté (titre inconnu ou lecteur indisponible)")
-        Log.i(TAG, "flux capté : ${r.url.substringBefore("/pl/")}/pl/…")
+        Log.i(TAG, "flux capté : ${r.url.substringBefore("/pl/")}/pl/… (en-têtes vus : ${r.headers.keys})")
+        // 2026-11-13 (bilan des sources : « MoviesFree, lectures réussies 18 % contre 75 %, erreur
+        //   principale : refusé ») — la playlist ne se lit PLUS sans en-tête : notre lecteur recevait
+        //   403 (vu au banc). On transmet donc ceux que leur propre lecteur envoie (Referer, Origin).
+        fun entete(nom: String) = r.headers.entries.firstOrNull { it.key.equals(nom, true) }?.value
         return Video(
             source = r.url,
             type = MimeTypes.APPLICATION_M3U8,
-            headers = mapOfNotNull("User-Agent" to r.headers["User-Agent"]),
+            headers = mapOfNotNull(
+                "User-Agent" to entete("User-Agent"),
+                "Referer" to entete("Referer"),
+                "Origin" to entete("Origin"),
+            ),
         )
     }
 

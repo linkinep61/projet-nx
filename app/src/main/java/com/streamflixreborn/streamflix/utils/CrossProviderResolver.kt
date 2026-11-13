@@ -336,7 +336,13 @@ object CrossProviderResolver {
         videoType: Video.Type,
         timeoutMs: Long = 15_000,
     ): List<Video.Server> {
-        val resolvedId = resolveServerId(provider, match, videoType) ?: return emptyList()
+        val idResolu = resolveServerId(provider, match, videoType) ?: return emptyList()
+        // 2026-11-17 (user : Wiflix « FR » qui donne du VOSTFR) : la page Wiflix a un bloc VF et un bloc
+        //   VOSTFR par épisode, et la résolution n'en rend qu'un (le VOSTFR, listé en premier). On
+        //   demande les deux, VF d'abord ; le provider étiquette chaque lecteur avec sa langue.
+        val resolvedId = if (provider.name == "Wiflix")
+            Regex("^(.+)/(ep\\d+)v[sf]$").find(idResolu)?.groupValues?.let { g -> "${g[1]}/${g[2]}vf+${g[2]}vs" } ?: idResolu
+        else idResolu
         return try {
             withTimeoutOrNull(timeoutMs) { provider.getServers(resolvedId, videoType) } ?: emptyList()
         } catch (e: Exception) {
