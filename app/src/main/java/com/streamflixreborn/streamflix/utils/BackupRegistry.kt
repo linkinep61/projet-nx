@@ -125,6 +125,9 @@ object BackupRegistry {
         // 2026-10-26 (user : « ajoute Videm, c'est un truc qu'on n'a pas ») : Videm (videm.xyz),
         //   par TMDB — seulement ses serveurs en français.
         "Videm" to "Videm (VF, par TMDB)",
+        // 2026-11-23 (user : « voir si on peut les intégrer comme backup ») : geil.to, liens
+        //   d'hébergeurs (voe, dood...) par TMDB - seulement ceux marqués en français.
+        "Geil" to "Geil (VF, par TMDB)",
         "Movix" to "Movix",
         "Frembed" to "Frembed",
         "Vidzy" to "Vidzy (par TMDB)",
@@ -1898,6 +1901,14 @@ object BackupRegistry {
             //   l'aveugle). Simple requête HTTP (pas de page cachée) → gardé en mode léger.
             if (!resolvedTmdbId.isNullOrBlank()) launch { emit("Videm") {
                 com.streamflixreborn.streamflix.utils.Videm.serveursFrancais(
+                    resolvedTmdbId!!, key.isMovie, key.season, key.episode)
+            } }
+
+            // ── GEIL (geil.to, par TMDB, liens d'hébergeurs FRANÇAIS seulement) ─────────
+            // 2026-11-23 (user : « voir si on peut les intégrer comme backup ») : une requête JSON
+            //   légère, liens voe/dood... lus par nos extracteurs habituels → gardé en mode léger.
+            if (!resolvedTmdbId.isNullOrBlank()) launch { emit("Geil") {
+                com.streamflixreborn.streamflix.utils.Geil.serveursFrancais(
                     resolvedTmdbId!!, key.isMovie, key.season, key.episode)
             } }
 

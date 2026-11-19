@@ -51,6 +51,11 @@ object OlaTvProvider : Provider, IptvProvider {
 
     // OLA TV API
     private const val OLA_TV_API = "http://iptvdroid.monster/IP11/api.php"
+    // 2026-11-20 : OLA TV 42.0 a deplace son backend sur IP12 (nouvelles commandes gt_svr / gt_svr_mc).
+    //   On AJOUTE cette source sans retirer IP11. Un cid prefixe "12:" (venu de live-cids "cids_ip12")
+    //   est route vers IP12 ; les cids nus restent sur IP11. Aucune regression cote IP11.
+    private const val OLA_TV_API_IP12 = "http://iptvdroid.monster/IP12/api.php"
+    private const val OLA_IP12_PREFIX = "12:"
     private const val OLA_TV_AES_KEY = "3234567890123453"
     private const val OLA_TV_SECRET = "MRZEREZIS"
     // The cid whose category_name = "2020" is the primary FR server (user-confirmed).
@@ -199,13 +204,20 @@ object OlaTvProvider : Provider, IptvProvider {
             liveCidsClient.newCall(req).execute().use { resp ->
                 val body = resp.body?.string()
                 if (resp.isSuccessful && !body.isNullOrBlank()) {
-                    val arr = JSONObject(body).optJSONArray("cids")
+                    val racine = JSONObject(body)
+                    val arr = racine.optJSONArray("cids")
                     if (arr != null && arr.length() > 0) {
                         val list = ArrayList<String>(arr.length())
                         val seen = HashSet<String>()
                         for (i in 0 until arr.length()) {
                             val c = arr.optString(i).trim()
                             if (c.isNotEmpty() && seen.add(c)) list.add(c)
+                        }
+                        // 2026-11-20 : serveurs OLA 42.0 (IP12), prefixes "12:" pour etre routes vers IP12.
+                        val arr12 = racine.optJSONArray("cids_ip12")
+                        if (arr12 != null) for (i in 0 until arr12.length()) {
+                            val c = arr12.optString(i).trim()
+                            if (c.isNotEmpty() && seen.add(OLA_IP12_PREFIX + c)) list.add(OLA_IP12_PREFIX + c)
                         }
                         if (list.isNotEmpty()) {
                             olaLiveCids = list
@@ -413,6 +425,64 @@ object OlaTvProvider : Provider, IptvProvider {
         // Also "&" → "and" to keep parity.
         return s.replace("+", "plus").replace("&", "and")
             .replace(RX_NON_ALNUM, "").replace("sports", "sport")
+    }
+
+    // 2026-11-23 (user : « les cartes de l'accueil ne correspondent pas, regroupe les bons
+    //   serveurs au bon endroit ») : les cartes cherchent une clé ÉCRITE EN DUR ("beinsports1")
+    //   alors que norm() donne "beinsport1" → carte vide malgré 221 flux. Et les variantes FR
+    //   ("BEIN SPORTS FR 1", "SP: FR: Bein Sport 1", "FR0: …") avaient chacune leur case.
+    //   cleCarte() range sous la clé de la carte tout ce qui lui correspond. Même règle que
+    //   cle_carte() du robot (olatv/noms_app.py) : ne modifier l'une qu'avec l'autre.
+    private val ALIAS_CARTES = mapOf(
+        "nationalgeo" to "nationalgeographic", "nationalgeochannel" to "nationalgeographic",
+        "bfmparis" to "bfmparisidf",
+        "canalcinema" to "canalpluscinema",
+        "canalseries" to "canalplusseries",
+        "canalfamily" to "canalplusfamily",
+        "canaldocs" to "canalplusdocs",
+        "canalsport" to "canalplussport",
+        "canalfoot" to "canalplusfoot",
+        "canalgrandecran" to "canalplusgrandecran",
+        "canalboxoffice" to "canalplusboxoffice",
+        "cinepremier" to "cinepluspremier",
+        "cinefrisson" to "cineplusfrisson",
+        "cineemotion" to "cineplusemotion",
+        "cinefamiz" to "cineplusfamiz",
+        "cineclub" to "cineplusclub",
+        "cineclassic" to "cineplusclassic",
+        "cinepolar" to "polarplus",
+        "cinepluspolar" to "polarplus",
+        "cinepluspolarplus" to "polarplus",
+        "rmcsportlive1" to "rmcsport1",
+        "rmcsportlive2" to "rmcsport2",
+        "rmcsportlive3" to "rmcsport3",
+        "rmcsportlive4" to "rmcsport4",
+        "beinfrench1" to "beinsports1", "beinfrench2" to "beinsports2", "beinfrench3" to "beinsports3",
+    )
+    private val MARQUE_FR_PREFIXE = Regex("^[\\W_]*(?:vip\\s*[:|]\\s*(?:fr[a0-9]?\\s*[:|\\-]\\s*)?|(?:sp\\s*[:|]\\s*)?\\^?\\s*fr[a0-9]?\\s*[:|\\-]\\s*)", RegexOption.IGNORE_CASE)
+    private val MARQUE_FR_MOT = Regex("\\b(fr|french|francais|français)\\b(?=\\s*\\d)", RegexOption.IGNORE_CASE)
+    private val cartesParCle: Map<String, String> by lazy {
+        val m = HashMap<String, String>()
+        for (c in curatedChannels) {
+            m.putIfAbsent(c.key, c.key); m.putIfAbsent(norm(c.displayName), c.key); m.putIfAbsent(norm(c.key), c.key)
+        }
+        for ((a, k) in ALIAS_CARTES) m.putIfAbsent(a, k)
+        m
+    }
+    private fun cleCarte(nom: String): String {
+        val k = norm(nom)
+        cartesParCle[k]?.let { return it }
+        val k2 = norm(nom.replace(MARQUE_FR_PREFIXE, "").replace(MARQUE_FR_MOT, " "))
+        return cartesParCle[k2] ?: k
+    }
+
+    /** Carte de l'accueil à masquer : registre chargé mais AUCUN flux pour elle (chaîne arrêtée
+     *  ou absente de tous les serveurs : France Ô, Numéro 23, Toonami…). Registre pas encore
+     *  chargé → on n'en masque aucune. */
+    private fun carteVide(cle: String): Boolean = registreCompletCharge && synchronized(registryLock) {
+        // OLA : le cache disque (anciennes clés) est lu AVANT le registre complet → on attend
+        //   ce dernier, sinon une carte pleine (beIN Sports 1) était masquée à tort (vu sur l'Oppo).
+        channelRegistry.size > 500 && channelRegistry[cle]?.streams.isNullOrEmpty()
     }
 
     /** Extract the variant label ("HD", "FHD", "+1", "FR") from a raw channel name so
@@ -1471,9 +1541,14 @@ object OlaTvProvider : Provider, IptvProvider {
 
     private fun tirerMacCredentials(cid: String, enCache: Boolean): MacCredentials? {
         try {
-            val b64 = olaBuildPayload("getToken128910", mapOf("cid" to cid))
+            // Routage IP11/IP12 : un cid prefixe "12:" vise le backend OLA 42.0 (gt_svr_mc).
+            val estIp12 = cid.startsWith(OLA_IP12_PREFIX)
+            val cidReel = if (estIp12) cid.substring(OLA_IP12_PREFIX.length) else cid
+            val apiUrl = if (estIp12) OLA_TV_API_IP12 else OLA_TV_API
+            val methode = if (estIp12) "gt_svr_mc" else "getToken128910"
+            val b64 = olaBuildPayload(methode, mapOf("cid" to cidReel))
             val formBody = FormBody.Builder().add("data", b64).build()
-            val req = Request.Builder().url(OLA_TV_API).post(formBody)
+            val req = Request.Builder().url(apiUrl).post(formBody)
                 .header("User-Agent", USER_AGENT).build()
             val body = probeClient.newCall(req).execute().body?.string() ?: return null
             val jsonStr = try {
@@ -1670,7 +1745,7 @@ object OlaTvProvider : Provider, IptvProvider {
                 if (!com.streamflixreborn.streamflix.utils.IptvLangFilter.isFrCompatible(ch.name)) {
                     continue
                 }
-                val key = norm(ch.name)
+                val key = cleCarte(ch.name)
                 if (key.isBlank()) continue
                 val info = channelRegistry.getOrPut(key) {
                     val displayName = baseDisplayName(ch.name)
@@ -1731,7 +1806,7 @@ object OlaTvProvider : Provider, IptvProvider {
         if (paires.isEmpty()) return 0
         var t = System.nanoTime()
         if (!com.streamflixreborn.streamflix.utils.IptvLangFilter.isFrCompatible(nom)) return 0
-        val key = norm(nom)
+        val key = cleCarte(nom)
         if (key.isBlank()) return 0
         val variante = extractVariantLabel(nom)
         mesureNoms += System.nanoTime() - t; t = System.nanoTime()
@@ -2512,6 +2587,7 @@ object OlaTvProvider : Provider, IptvProvider {
         for (catName in categoryOrder) {
             val items = curatedChannels
                 .filter { it.category == catName }
+                .filter { !carteVide(it.key) }
                 .filter { !isChannelBanned("ola::${it.key}") }
                 .map { c ->
                     TvShow(
@@ -2633,7 +2709,8 @@ object OlaTvProvider : Provider, IptvProvider {
             // and ANR the TV RecyclerView on logo loads.
             val curatedKeys = curatedChannels.map { it.key }.toSet()
             val curatedHits = curatedChannels
-                .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(it.displayName, query) }
+                .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspondChaine(it.displayName, query) }
+                .filter { !carteVide(it.key) }
                 .map { c ->
                     TvShow(
                         id = "ola::${c.key}",
@@ -2645,7 +2722,7 @@ object OlaTvProvider : Provider, IptvProvider {
             // Snapshot under lock, allocate outside to keep the lock short.
             val registrySnapshot = synchronized(registryLock) {
                 channelRegistry.entries
-                    .filter { (key, info) -> key !in curatedKeys && com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(info.displayName, query) }
+                    .filter { (key, info) -> key !in curatedKeys && com.streamflixreborn.streamflix.utils.RechercheFloue.correspondChaine(info.displayName, query) }
                     .map { (key, info) -> Triple(key, info.displayName, info.logo) }
             }
             val registryHits = registrySnapshot
@@ -2658,7 +2735,19 @@ object OlaTvProvider : Provider, IptvProvider {
                         providerName = name,
                     )
                 }
-            (curatedHits + registryHits).take(SEARCH_RESULT_LIMIT)
+            // 2026-11-23 (user : « on tape Bing Sport 1, on n'a rien ») : avant, curées puis registre
+            //   par ordre ALPHABÉTIQUE, coupé à 30 → la bonne chaîne FR pouvait ne pas y être. On
+            //   classe désormais tout par pertinence (exact > commence par > contient, FR en avant),
+            //   avec un léger bonus pour les chaînes curées.
+            val R = com.streamflixreborn.streamflix.utils.RechercheFloue
+            val tries = (curatedHits.map { it to R.scoreChaine(it.title, query) + 10 } +
+                registryHits.map { it to R.scoreChaine(it.title, query) })
+                .sortedByDescending { it.second }
+            android.util.Log.d("RechercheChaine", "OLA «$query» ${tries.size} résultats, tête : " +
+                tries.take(10).joinToString(" | ") { "${it.first.title}=${it.second}" })
+            tries.map { it.first }
+                .distinctBy { it.id }
+                .take(SEARCH_RESULT_LIMIT)
         } catch (_: Exception) { emptyList() }
     }
 
@@ -2819,6 +2908,8 @@ object OlaTvProvider : Provider, IptvProvider {
                 compareByDescending<OlaStreamRef> { (it.cid to it.label) in favoriteKeys }
                     .thenByDescending { it.url in probeOkCache }              // known-good first
                     .thenBy { it.url in demotedUrls }                         // known-bad last
+                    // 2026-11-20 : serveurs OLA 42 (IP12), plus riches et a jour, mis en priorite.
+                    .thenByDescending { it.cid.startsWith(OLA_IP12_PREFIX) }
                     // 2026-07-12 (user « les lives 1080/4K chargent mal, prends la plus légère ») :
                     //   parmi les serveurs équivalents, on auto-joue la qualité la PLUS LÉGÈRE
                     //   d'abord (HD 720p = sweet spot → chargement rapide). L'user garde FHD/4K en
@@ -2892,7 +2983,7 @@ object OlaTvProvider : Provider, IptvProvider {
                 Log.d(TAG, "  primary[0] cid=${first.cid} label='${first.label}' cmd=${first.url.take(80)}")
                 initialServers.add(Video.Server(
                     id = "ola_stream::${first.cid}::${first.label}::${first.url}",
-                    name = "OLA TV - ${first.label}",
+                    name = "${if (first.cid.startsWith(OLA_IP12_PREFIX)) "OLA 42" else "OLA TV"} - ${first.label}",
                 ))
             }
             // 2026-06-03 : index local persistant — injecte les URLs pré-résolues
@@ -3023,7 +3114,7 @@ object OlaTvProvider : Provider, IptvProvider {
                     }
                     val server = Video.Server(
                         id = "ola_stream::${stream.cid}::${stream.label}::${stream.url}",
-                        name = "OLA[$key] ${stream.label}",
+                        name = "${if (stream.cid.startsWith(OLA_IP12_PREFIX)) "OLA 42" else "OLA"}[$key] ${stream.label}",
                     )
                     Log.d(TAG, "  → emit OLA[$key] ${stream.label} (cid=${stream.cid})")
                     _additionalServers.emit(server)
@@ -3071,7 +3162,7 @@ object OlaTvProvider : Provider, IptvProvider {
                     if (seenUrls.add(s.url)) {
                         val server = Video.Server(
                             id = "ola_stream::${s.cid}::${s.label}::${s.url}",
-                            name = "OLA[$key] ${s.label}",
+                            name = "${if (s.cid.startsWith(OLA_IP12_PREFIX)) "OLA 42" else "OLA"}[$key] ${s.label}",
                         )
                         Log.d(TAG, "  → late-watch emit OLA[$key] ${s.label} (cid=${s.cid})")
                         _additionalServers.emit(server)

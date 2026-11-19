@@ -69,6 +69,28 @@ abstract class AppDatabase : RoomDatabase() {
             return "${safeProfile}_${sanitizeProviderName(providerName)}.db"
         }
 
+        // 2026-11-23 (crash remonté par un utilisateur : « Database is closed » dans MovieDao.getByIds) :
+        //   au changement de fournisseur ou de profil, l'ancienne base était fermée tout de suite alors
+        //   que des écrans encore vivants (accueil, fiches, recherche...) relisaient dedans via leurs
+        //   flows Room -> plantage. On la met de côté et on ne la ferme que 10 min plus tard, le temps
+        //   que ces écrans passent sur la nouvelle base.
+        private val fermetureDifferee = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "AppDatabase-fermeture").apply { isDaemon = true }
+        }
+
+        private fun fermerPlusTard(db: AppDatabase?) {
+            db ?: return
+            android.util.Log.d("AppDatabase", "ancienne base mise de côté, fermeture dans 10 min")
+            fermetureDifferee.schedule({
+                try {
+                    db.close()
+                    android.util.Log.d("AppDatabase", "ancienne base fermée")
+                } catch (e: Exception) {
+                    android.util.Log.w("AppDatabase", "fermeture différée : ${e.message}")
+                }
+            }, 10, java.util.concurrent.TimeUnit.MINUTES)
+        }
+
         fun setup(context: Context) {
             // 2026-05-12 : à la 1re ouverture après update multi-profil, on
             // renomme les anciens fichiers DB `{provider}.db` → `default_{provider}.db`
@@ -95,7 +117,7 @@ abstract class AppDatabase : RoomDatabase() {
                 INSTANCE?.takeIf {
                     currentProviderName == providerName && currentProfileId == profileId
                 } ?: run {
-                    INSTANCE?.close()
+                    fermerPlusTard(INSTANCE)
                     buildDatabase(profileId, providerName, context).also { instance ->
                         INSTANCE = instance
                         currentProviderName = providerName
@@ -108,7 +130,7 @@ abstract class AppDatabase : RoomDatabase() {
         // Metodo per forzare il cambio di database quando cambia il provider OU profil
         fun resetInstance() {
             synchronized(this) {
-                INSTANCE?.close()
+                fermerPlusTard(INSTANCE)
                 INSTANCE = null
                 currentProviderName = null
                 currentProfileId = null

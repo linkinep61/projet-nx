@@ -93,11 +93,26 @@ object VavooProvider : Provider, IptvProvider {
     //   Avec package="net.vypn.app" le serveur mint un addonSig propre sans
     //   le tag pub VYPN dans le sunshine token retourné côté CDN.
     //   Fallback sur lokke.app/vavoo.tv si vypn.net échoue.
-    private val PING_URLS = listOf(
-        "https://www.vypn.net/api/app/ping",
-        "https://www.lokke.app/api/app/ping",
-        "https://www.vavoo.tv/api/app/ping",
+    // 2026-11-19 (signalement d'un utilisateur : « il y a un souci sur vavoo ») : mesuré hors appli,
+    //   le catalogue répond HTTP 500 « Internal error » sur TOUS les miroirs avec la signature
+    //   demandée comme l'appli VYPN (paquet net.vypn.app), quelle que soit l'adresse de ping.
+    //   Seule combinaison acceptée ce jour : ping lokke.app + paquet « app.lokke.main »
+    //   (catalogue 300 chaînes, résolution et flux HLS OK). Chaque adresse porte donc SON paquet,
+    //   Lokke en premier ; les anciennes restent en secours.
+    private val PING_SOURCES = listOf(
+        "https://www.lokke.app/api/app/ping" to "app.lokke.main",
+        "https://www.vypn.net/api/app/ping" to "net.vypn.app",
+        "https://www.vavoo.tv/api/app/ping" to "net.vypn.app",
     )
+    /** Sources de signature dont le catalogue vient d'être refusé (adresse → heure) : écartées 30 min,
+     *  pour que l'appli passe d'elle-même à la suivante le jour où Vavoo change encore d'avis. */
+    private val sourcesRefusees = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    @Volatile private var sourceSignatureCourante: String? = null
+    private fun signatureRefusee() {
+        sourceSignatureCourante?.let { sourcesRefusees[it] = System.currentTimeMillis() }
+        cachedSignature = null
+        signatureExpiry = 0L
+    }
 
     // ───────── HTTP client ─────────
     // 2026-06-17 (FIX FR métropole — Vavoo retourne status:guest sans VPN VYPN) :
@@ -725,15 +740,20 @@ object VavooProvider : Provider, IptvProvider {
             })
         }
 
-        for (url in PING_URLS) {
+        val candidates = PING_SOURCES.filter { (u, _) -> (sourcesRefusees[u] ?: 0L) < now - 30 * 60_000L }
+            .ifEmpty { PING_SOURCES }
+        for ((url, paquet) in candidates) {
             try {
+                payload.put("package", paquet)
+                payload.getJSONObject("metadata").getJSONObject("version").put("package", paquet)
                 val text = postJson(url, payload)
                 val json = JSONObject(text)
                 val sig = json.optString("addonSig", "")
                 if (sig.isNotBlank()) {
                     cachedSignature = sig
                     signatureExpiry = now + 5 * 60 * 1000 // 5 min
-                    Log.d(TAG, "✓ addonSig obtained from $url")
+                    sourceSignatureCourante = url
+                    Log.d(TAG, "✓ addonSig obtained from $url ($paquet)")
                     return sig
                 }
             } catch (e: Exception) {
@@ -1115,17 +1135,25 @@ object VavooProvider : Provider, IptvProvider {
             kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
                 val t = System.currentTimeMillis()
                 try {
-                    val signature = getAddonSignature()
                     var channels: List<VavooChannel>? = null
 
-                    for (base in BASE_SITES) {
-                        try {
-                            channels = loadCatalogFromBase(base, signature)
-                            Log.d(TAG, "✓ Catalog from $base: ${channels.size} FR channels")
-                            break
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Catalog failed for $base: ${e.message}")
+                    // 2026-11-19 : un catalogue VIDE sur tous les miroirs = signature refusée
+                    //   (HTTP 500) → on écarte cette source de signature et on recommence avec
+                    //   la suivante, au lieu d'afficher un profil vide.
+                    for (essai in PING_SOURCES.indices) {
+                        val signature = getAddonSignature()
+                        for (base in BASE_SITES) {
+                            try {
+                                val recues = loadCatalogFromBase(base, signature)
+                                Log.d(TAG, "✓ Catalog from $base: ${recues.size} FR channels")
+                                if (recues.isNotEmpty()) { channels = recues; break }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Catalog failed for $base: ${e.message}")
+                            }
                         }
+                        if (!channels.isNullOrEmpty()) break
+                        Log.w(TAG, "catalogue vide avec la signature de $sourceSignatureCourante → source de signature suivante")
+                        signatureRefusee()
                     }
 
                     if (channels != null && channels.isNotEmpty()) {
@@ -1451,9 +1479,14 @@ object VavooProvider : Provider, IptvProvider {
         val exacts = synchronized(registryLock) {
             channelRegistry.filter { it.name.lowercase().contains(q) }
         }
-        if (exacts.isNotEmpty()) return exacts.map { it.toTvShow() }
+        if (exacts.isNotEmpty()) return exacts
+            .sortedByDescending { com.streamflixreborn.streamflix.utils.RechercheFloue.scoreChaine(it.name, query) }
+            .map { it.toTvShow() }
         return synchronized(registryLock) {
-            channelRegistry.filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(it.name, query) }
+            // 2026-11-23 : recherche « chaînes » (alias de dictée « bing » → beIN, chiffres
+            //   obligatoires, « + » = « plus ») et classement par pertinence, comme Vegeta/OLA.
+            channelRegistry.filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspondChaine(it.name, query) }
+                .sortedByDescending { com.streamflixreborn.streamflix.utils.RechercheFloue.scoreChaine(it.name, query) }
         }.map { it.toTvShow() }
     }
 

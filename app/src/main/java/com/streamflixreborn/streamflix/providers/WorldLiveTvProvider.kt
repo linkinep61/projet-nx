@@ -1723,6 +1723,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             .asSequence()
             .filter { it.name.lowercase().contains(q) }
             .take(300)  // borne les résultats de frappe (évite de mapper 10k+ matches)
+            .sortedByDescending { com.streamflixreborn.streamflix.utils.RechercheFloue.scoreChaine(it.name, query) }
             .map { channelToTvShow(it) }
             .toList()
         if (exacts.isNotEmpty()) return exacts
@@ -1733,7 +1734,10 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         //   ne tourne donc que lorsque la recherche exacte est bredouille.
         return channelRegistry
             .asSequence()
-            .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(it.name, query) }
+            // 2026-11-23 : recherche « chaînes » (alias de dictée « bing » → beIN, chiffres
+            //   obligatoires, « + » = « plus ») et classement par pertinence, comme Vegeta/OLA.
+            .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspondChaine(it.name, query) }
+            .sortedByDescending { com.streamflixreborn.streamflix.utils.RechercheFloue.scoreChaine(it.name, query) }
             .take(300)
             .map { channelToTvShow(it) }
             .toList()

@@ -292,6 +292,62 @@ object VegetaTvProvider : Provider, IptvProvider {
             .replace(Regex("[^a-z0-9]"), "").replace("sports", "sport")
     }
 
+    // 2026-11-23 (user : « les cartes de l'accueil ne correspondent pas, regroupe les bons
+    //   serveurs au bon endroit ») : les cartes cherchent une clé ÉCRITE EN DUR ("beinsports1")
+    //   alors que norm() donne "beinsport1" → carte vide malgré 221 flux. Et les variantes FR
+    //   ("BEIN SPORTS FR 1", "SP: FR: Bein Sport 1", "FR0: …") avaient chacune leur case.
+    //   cleCarte() range sous la clé de la carte tout ce qui lui correspond. Même règle que
+    //   cle_carte() du robot (refresh_vegetatv.py) : ne modifier l'une qu'avec l'autre.
+    private val ALIAS_CARTES = mapOf(
+        "nationalgeo" to "nationalgeographic", "nationalgeochannel" to "nationalgeographic",
+        "bfmparis" to "bfmparisidf",
+        "canalcinema" to "canalpluscinema",
+        "canalseries" to "canalplusseries",
+        "canalfamily" to "canalplusfamily",
+        "canaldocs" to "canalplusdocs",
+        "canalsport" to "canalplussport",
+        "canalfoot" to "canalplusfoot",
+        "canalgrandecran" to "canalplusgrandecran",
+        "canalboxoffice" to "canalplusboxoffice",
+        "cinepremier" to "cinepluspremier",
+        "cinefrisson" to "cineplusfrisson",
+        "cineemotion" to "cineplusemotion",
+        "cinefamiz" to "cineplusfamiz",
+        "cineclub" to "cineplusclub",
+        "cineclassic" to "cineplusclassic",
+        "cinepolar" to "polarplus",
+        "cinepluspolar" to "polarplus",
+        "cinepluspolarplus" to "polarplus",
+        "rmcsportlive1" to "rmcsport1",
+        "rmcsportlive2" to "rmcsport2",
+        "rmcsportlive3" to "rmcsport3",
+        "rmcsportlive4" to "rmcsport4",
+        "beinfrench1" to "beinsports1", "beinfrench2" to "beinsports2", "beinfrench3" to "beinsports3",
+    )
+    private val MARQUE_FR_PREFIXE = Regex("^[\\W_]*(?:vip\\s*[:|]\\s*(?:fr[a0-9]?\\s*[:|\\-]\\s*)?|(?:sp\\s*[:|]\\s*)?\\^?\\s*fr[a0-9]?\\s*[:|\\-]\\s*)", RegexOption.IGNORE_CASE)
+    private val MARQUE_FR_MOT = Regex("\\b(fr|french|francais|français)\\b(?=\\s*\\d)", RegexOption.IGNORE_CASE)
+    private val cartesParCle: Map<String, String> by lazy {
+        val m = HashMap<String, String>()
+        for (c in curatedChannels) {
+            m.putIfAbsent(c.key, c.key); m.putIfAbsent(norm(c.displayName), c.key); m.putIfAbsent(norm(c.key), c.key)
+        }
+        for ((a, k) in ALIAS_CARTES) m.putIfAbsent(a, k)
+        m
+    }
+    private fun cleCarte(nom: String): String {
+        val k = norm(nom)
+        cartesParCle[k]?.let { return it }
+        val k2 = norm(nom.replace(MARQUE_FR_PREFIXE, "").replace(MARQUE_FR_MOT, " "))
+        return cartesParCle[k2] ?: k
+    }
+
+    /** Carte de l'accueil à masquer : registre chargé mais AUCUN flux pour elle (chaîne arrêtée
+     *  ou absente de tous les serveurs : France Ô, Numéro 23, Toonami…). Registre pas encore
+     *  chargé → on n'en masque aucune. */
+    private fun carteVide(cle: String): Boolean = synchronized(registryLock) {
+        channelRegistry.size > 500 && channelRegistry[cle]?.streams.isNullOrEmpty()
+    }
+
     private fun extractVariantLabel(raw: String): String {
         val parts = mutableListOf<String>()
         Regex(
@@ -834,7 +890,7 @@ object VegetaTvProvider : Provider, IptvProvider {
                 if (cleaned.isBlank()) continue
 
                 synchronized(registryLock) {
-                    val key = norm(cleaned)
+                    val key = cleCarte(cleaned)
                     if (key.isBlank()) return@synchronized
                     val info = channelRegistry.getOrPut(key) {
                         ChannelInfo(
@@ -1016,7 +1072,7 @@ object VegetaTvProvider : Provider, IptvProvider {
                     if (rawName in seenNames) return
                     seenNames.add(rawName)
                     val streamUrl = resolveStreamCmd(baseUrl, mac, cmd) ?: return
-                    val key = norm(rawName)
+                    val key = cleCarte(rawName)
                     if (key.isBlank()) return
                     val info = channelRegistry.getOrPut(key) {
                         ChannelInfo(
@@ -1846,6 +1902,7 @@ object VegetaTvProvider : Provider, IptvProvider {
             val items = curatedChannels
                 .filter { it.category == catName }
                 .filter { !isChannelBanned("vegeta::${it.key}") }
+                .filter { !carteVide(it.key) }
                 .map { c ->
                     TvShow(
                         id = "vegeta::${c.key}",
@@ -1964,7 +2021,8 @@ object VegetaTvProvider : Provider, IptvProvider {
             // so a generic query doesn't ANR the TV RecyclerView on logo loads.
             val curatedKeys = curatedChannels.map { it.key }.toSet()
             val curatedHits = curatedChannels
-                .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(it.displayName, query) }
+                .filter { com.streamflixreborn.streamflix.utils.RechercheFloue.correspondChaine(it.displayName, query) }
+                .filter { !carteVide(it.key) }
                 .map { c ->
                     TvShow(
                         id = "vegeta::${c.key}",
@@ -1975,7 +2033,7 @@ object VegetaTvProvider : Provider, IptvProvider {
                 }
             val registrySnapshot = synchronized(registryLock) {
                 channelRegistry.entries
-                    .filter { (key, info) -> key !in curatedKeys && com.streamflixreborn.streamflix.utils.RechercheFloue.correspond(info.displayName, query) }
+                    .filter { (key, info) -> key !in curatedKeys && com.streamflixreborn.streamflix.utils.RechercheFloue.correspondChaine(info.displayName, query) }
                     .map { (key, info) -> Triple(key, info.displayName, info.logo) }
             }
             val registryHits = registrySnapshot
@@ -1988,7 +2046,19 @@ object VegetaTvProvider : Provider, IptvProvider {
                         providerName = name,
                     )
                 }
-            (curatedHits + registryHits).take(SEARCH_RESULT_LIMIT)
+            // 2026-11-23 (user : « on tape Bing Sport 1, on n'a rien ») : avant, curées puis registre
+            //   par ordre ALPHABÉTIQUE, coupé à 30 → la bonne chaîne FR pouvait ne pas y être. On
+            //   classe désormais tout par pertinence (exact > commence par > contient, FR en avant),
+            //   avec un léger bonus pour les chaînes curées.
+            val R = com.streamflixreborn.streamflix.utils.RechercheFloue
+            val tries = (curatedHits.map { it to R.scoreChaine(it.title, query) + 10 } +
+                registryHits.map { it to R.scoreChaine(it.title, query) })
+                .sortedByDescending { it.second }
+            android.util.Log.d("RechercheChaine", "Vegeta «$query» ${tries.size} résultats, tête : " +
+                tries.take(10).joinToString(" | ") { "${it.first.title}=${it.second}" })
+            tries.map { it.first }
+                .distinctBy { it.id }
+                .take(SEARCH_RESULT_LIMIT)
         } catch (_: Exception) { emptyList() }
     }
 
