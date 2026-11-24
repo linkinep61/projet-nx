@@ -182,6 +182,10 @@ class BancTestActivity : ComponentActivity() {
         champTitre.setText(q ?: "tmdb:$tmdb")
         if (s > 0) champSaison.setText("$s")
         if (e > 0) champEpisode.setText("$e")
+        // 2026-11-25 : `--ez dl true` = en plus, lance le VRAI téléchargement (DownloadManager.enqueue,
+        //   comme le bouton « télécharger ») de chaque serveur testé qui se lit. À combiner avec
+        //   `--es seul …` pour ne pas remplir le téléphone. Suivi : étiquette DownloadManager.
+        telechargerVrai = i.getBooleanExtra("dl", false)
         lancer(q, tmdb, i.getStringExtra("type"), s, e, rouges = i.getBooleanExtra("rouges", false),
             seul = i.getStringExtra("seul"))
     }
@@ -198,6 +202,8 @@ class BancTestActivity : ComponentActivity() {
     //   on peut pas faire ça dans le banc ? ») : `seul` = ne tester que les serveurs dont le nom
     //   (« Source · Serveur ») contient ce texte. Toutes les sources sont encore interrogées, mais
     //   seuls les serveurs retenus sont extraits et lus : un essai ciblé prend 1 min au lieu de 10.
+    private var telechargerVrai = false
+    private var typeCourant: Video.Type? = null
     private fun lancer(q: String?, tmdb: String?, type: String?, s: Int, e: Int, rouges: Boolean = false, seul: String? = null) {
         travail?.cancel()
         lignes.clear(); liste.removeAllViews()
@@ -212,6 +218,7 @@ class BancTestActivity : ComponentActivity() {
                 is Video.Type.Episode -> vt.tvShow.id to "${vt.tvShow.title} S${vt.season.number}E${vt.number}"
             }
             titreCourant = if (rouges) "$titre (rouges seulement)" else titre
+            typeCourant = vt
             // Mode « rouges » : on relit le dernier rapport DE CE TITRE (un fichier par titre/épisode,
             //   donc d'autres tests entre-temps ne le perdent pas) et on saute seulement les VERTS -
             //   un serveur nouveau, absent du test précédent, est testé.
@@ -412,7 +419,26 @@ class BancTestActivity : ComponentActivity() {
                 l.video = v
             }
             afficher(l, Color.WHITE, "▶", "lecture en cours (8 s)…")
-            sonder(v)
+            val s = sonder(v)
+            // 2026-11-25 (user : « VOE, avant, on le téléchargeait bien, aujourd'hui ça ne fonctionne
+            //   plus ») - même contrôle que l'audit des téléchargements (DownloadManager.sonder : mêmes
+            //   clients et en-têtes que le vrai téléchargement, sans rien écrire), fait sur le lien
+            //   encore frais. Une ligne « DL » par serveur dans le rapport.
+            val dl = when {
+                v.source.startsWith("data:") -> "KO  source data: (navigateur requis)"
+                else -> try { withTimeout(40_000L) { com.streamflixreborn.streamflix.download.DownloadManager.sonder(v) } }
+                    catch (ex: TimeoutCancellationException) { "KO  délai dépassé (40 s)" }
+                    catch (ex: CancellationException) { throw ex }
+                    catch (ex: Throwable) { "KO  ${ex.javaClass.simpleName} ${ex.message?.take(90)}" }
+            }
+            ecrireLigne("DL\t${l.source}\t${l.server.name}\t${if (s.ok) "lit" else "ne lit pas"}\t${dl.replace('\t', ' ').replace('\n', ' ')}")
+            val vt = typeCourant
+            if (telechargerVrai && s.ok && vt != null) {
+                ecrireLigne("DL-VRAI\t${l.source}\t${l.server.name}\tmis en file")
+                runCatching { com.streamflixreborn.streamflix.download.DownloadManager.enqueue(v, vt, "BANC", l.server.name) }
+                    .onFailure { ecrireLigne("DL-VRAI\t${l.source}\t${l.server.name}\tKO ${it.javaClass.simpleName} ${it.message?.take(90)}") }
+            }
+            s
         }
         terminer(l, sonde, tExtraction)
     }

@@ -64,6 +64,21 @@ object LocalIptvChannelIndex {
     // ── Stream URLs pré-résolues : channelKey → { cid → m3u8Url } ──
     private val streamUrlMap = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
 
+    // ── Date d'enregistrement de chaque URL pré-résolue : channelKey → { cid → epochMs } ──
+    // 2026-11-25 (user : « on a trop de CID HS… on garde sans faire exprès des CID qui ne sont pas
+    //   frais et qui empêchent de lancer des vidéos directement fonctionnelles ») - MESURÉ sur
+    //   l'appareil : 3 606 adresses gardées pour 88 chaînes, AUCUNE datée, les serveurs datés
+    //   remontant à ~6 mois ; à l'ouverture de TF1, 28 des 30 adresses sondées étaient mortes, et
+    //   elles étaient placées avant les serveurs frais. Désormais :
+    //     • chaque adresse est datée, et n'est proposée que pendant [URL_FRAICHE_MS] ;
+    //     • une adresse trouvée morte est OUBLIÉE (elle ne revient que si une lecture la revoit
+    //       vivante) - fini la « résurrection » automatique au bout de 24 h, sans nouveau test ;
+    //     • les adresses sans date (anciennes versions, graine embarquée) ne sont pas reprises.
+    private val urlDateMap = ConcurrentHashMap<String, ConcurrentHashMap<String, Long>>()
+
+    /** Durée pendant laquelle une adresse enregistrée est encore proposée. */
+    private const val URL_FRAICHE_MS = 24L * 3600L * 1000L
+
     // ── Banlist URL → epochMs d'expiration. Persistante 24h. ──
     private val deadUrlsMap = ConcurrentHashMap<String, Long>()
 
@@ -135,6 +150,9 @@ object LocalIptvChannelIndex {
 
         Log.d(TAG, "loadLocalCache TOTAL: ${channelIndex.size} chaînes, " +
                 "${channelIndex.values.sumOf { it.size }} CIDs (user cache=$userLoaded)")
+        // 2026-11-25 : des adresses périmées viennent d'être écartées → le fichier est réécrit tout de
+        //   suite sans elles (sinon il gardait ses ~580 Ko jusqu'au prochain enregistrement).
+        if (dirty) saveLocalCache(force = true)
         return channelIndex.isNotEmpty()
     }
 
@@ -143,6 +161,8 @@ object LocalIptvChannelIndex {
     private fun parseAndMerge(root: org.json.JSONObject, source: String) {
         var newChannels = 0
         var newCids = 0
+        var urlsGardees = 0
+        var urlsEcartees = 0
         for (key in root.keys()) {
             val chObj = root.getJSONObject(key)
             val cidsArr = chObj.optJSONArray("cids") ?: continue
@@ -176,15 +196,25 @@ object LocalIptvChannelIndex {
             }
             if (chObj.has("urls")) {
                 val urlObj = chObj.getJSONObject("urls")
+                val dates = chObj.optJSONObject("ut")
                 val map = streamUrlMap.getOrPut(key) { ConcurrentHashMap() }
+                val dmap = urlDateMap.getOrPut(key) { ConcurrentHashMap() }
+                val maintenant = System.currentTimeMillis()
                 for (cid in urlObj.keys()) {
+                    // Sans date, ou trop vieille : pas reprise (cf. urlDateMap).
+                    val date = dates?.optLong(cid, 0L) ?: 0L
+                    if (date <= 0L || maintenant - date >= URL_FRAICHE_MS) { urlsEcartees++; continue }
                     if (source == "user" || !map.containsKey(cid)) {
                         map[cid] = urlObj.getString(cid)
+                        dmap[cid] = date
+                        urlsGardees++
                     }
                 }
+                if (urlsEcartees > 0 && source == "user") dirty = true      // fichier à réécrire sans elles
             }
         }
-        Log.d(TAG, "  parseAndMerge[$source]: +$newChannels chaînes, +$newCids CIDs")
+        Log.d(TAG, "  parseAndMerge[$source]: +$newChannels chaînes, +$newCids CIDs, " +
+            "adresses gardées $urlsGardees, écartées (sans date ou périmées) $urlsEcartees")
     }
 
     /** Flush en SharedPrefs (throttle 30s sauf si force=true). */
@@ -206,6 +236,9 @@ object LocalIptvChannelIndex {
                 }
                 streamUrlMap[key]?.takeIf { it.isNotEmpty() }?.let { m ->
                     val o = org.json.JSONObject(); for ((c, v) in m) o.put(c, v); chObj.put("urls", o)
+                }
+                urlDateMap[key]?.takeIf { it.isNotEmpty() }?.let { m ->
+                    val o = org.json.JSONObject(); for ((c, v) in m) o.put(c, v); chObj.put("ut", o)
                 }
                 root.put(key, chObj)
             }
@@ -266,25 +299,21 @@ object LocalIptvChannelIndex {
         val urls = streamUrlMap[channelKey] ?: return emptyList()
         if (urls.isEmpty()) return emptyList()
         val latencies = cidLatencyMap[channelKey]
+        val dates = urlDateMap[channelKey]
         val now = System.currentTimeMillis()
 
+        // 2026-11-25 : seulement les adresses FRAÎCHES et non marquées mortes (cf. urlDateMap).
+        //   Les autres ne sont plus proposées du tout (avant : mortes en bas de liste, puis
+        //   remontées d'office parmi les vivantes au bout de 24 h).
         val alive = mutableListOf<Triple<String, String, Long>>()  // cid, url, latency
-        val dead = mutableListOf<Triple<String, String, Long>>()
-
         for ((cid, url) in urls) {
-            val latency = latencies?.get(cid) ?: DEFAULT_LATENCY_MS
+            val date = dates?.get(cid) ?: 0L
+            if (date <= 0L || now - date >= URL_FRAICHE_MS) continue
             val expireAt = deadUrlsMap[url]
-            if (expireAt != null && expireAt > now) {
-                dead.add(Triple(cid, url, latency))
-            } else {
-                // Si TTL expiré, on retire de la banlist (resurrection)
-                if (expireAt != null) deadUrlsMap.remove(url)
-                alive.add(Triple(cid, url, latency))
-            }
+            if (expireAt != null && expireAt > now) continue
+            alive.add(Triple(cid, url, latencies?.get(cid) ?: DEFAULT_LATENCY_MS))
         }
-
-        return (alive.sortedBy { it.third } + dead.sortedBy { it.third })
-            .map { it.first to it.second }
+        return alive.sortedBy { it.third }.map { it.first to it.second }
     }
 
     // ── Probe HEAD parallèle : évite de re-prober pendant qu'un probe est actif ──
@@ -376,6 +405,11 @@ object LocalIptvChannelIndex {
      *  sur @Synchronized → bloque le main thread quand il lit getCachedStreamUrls
      *  → ANR sur input. Le throttle naturel (autre reportXxx) flushera. */
     fun markUrlDead(url: String, ttlMs: Long = DEAD_URL_TTL_MS) {
+        // 2026-11-25 : une adresse morte est OUBLIÉE de l'index (cf. urlDateMap).
+        for ((chaine, m) in streamUrlMap) {
+            val cids = m.entries.filter { it.value == url }.map { it.key }
+            for (cid in cids) { m.remove(cid); urlDateMap[chaine]?.remove(cid) }
+        }
         if (url.isBlank()) return
         deadUrlsMap[url] = System.currentTimeMillis() + ttlMs
         dirty = true
@@ -449,6 +483,7 @@ object LocalIptvChannelIndex {
     fun reportStreamUrl(channelKey: String, cid: String, url: String) {
         val m = streamUrlMap.getOrPut(channelKey) { ConcurrentHashMap() }
         m[cid] = url
+        urlDateMap.getOrPut(channelKey) { ConcurrentHashMap() }[cid] = System.currentTimeMillis()
         dirty = true
         saveLocalCache()
     }
@@ -456,6 +491,7 @@ object LocalIptvChannelIndex {
     /** Invalide une URL de stream (HEAD a échoué). */
     fun invalidateStreamUrl(channelKey: String, cid: String) {
         if (streamUrlMap[channelKey]?.remove(cid) != null) {
+            urlDateMap[channelKey]?.remove(cid)
             dirty = true
             saveLocalCache()
         }
@@ -471,7 +507,7 @@ object LocalIptvChannelIndex {
         val urls = streamUrlMap[channelKey] ?: return
         val toRemove = urls.entries.filter { it.value == url }.map { it.key }
         if (toRemove.isNotEmpty()) {
-            toRemove.forEach { urls.remove(it) }
+            toRemove.forEach { urls.remove(it); urlDateMap[channelKey]?.remove(it) }
             dirty = true
             saveLocalCache()
         }
@@ -493,6 +529,7 @@ object LocalIptvChannelIndex {
         cidLatencyMap.clear()
         cidLastSeenMap.clear()
         streamUrlMap.clear()
+        urlDateMap.clear()
         deadUrlsMap.clear()
         if (persistOnDisk) {
             prefs().edit().remove(KEY_DATA).remove(KEY_DEAD).remove(KEY_TIMESTAMP).apply()

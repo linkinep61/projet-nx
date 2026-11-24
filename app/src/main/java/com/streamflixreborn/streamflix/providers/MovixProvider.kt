@@ -336,6 +336,24 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     // par clé (tmdbId, season, episode) pendant 5 min.
     // (Le cache d'EXTRACTION m3u8 est séparé, géré dans Extractor.kt avec
     // sa propre TTL — plus court car les m3u8 expirent vite.)
+    /**
+     * 2026-11-24 (banc Zootopie 2, avant la v1.8.18) : les liens Emmmmbed que rend l'API Movix
+     *   portent un jeton (`?t=<JWT>`) valable 30 min. Mesuré sur 8 films : TOUS créés il y a
+     *   ~206 h, donc TOUS expirés — Movix ne les renouvelle plus, le serveur finit en rouge
+     *   (« failed to capture mp4 »). Jeton expiré = lien mort : on ne l'affiche pas. S'ils
+     *   repartent un jour, les liens frais repasseront tout seuls.
+     */
+    private fun jetonExpire(url: String): Boolean {
+        if (!url.contains("emmmmbed", ignoreCase = true)) return false
+        val jwt = url.substringAfter("t=", "").substringBefore('&')
+        val charge = jwt.split('.').getOrNull(1) ?: return false
+        return runCatching {
+            val json = String(android.util.Base64.decode(charge, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP))
+            val exp = org.json.JSONObject(json).optLong("exp", 0L)
+            exp > 0 && exp < System.currentTimeMillis() / 1000 - 60
+        }.getOrDefault(false)
+    }
+
     private const val SERVERS_CACHE_TTL_MS = 5L * 60L * 1000L
     private data class CachedServers(val servers: List<Video.Server>, val expiresAtMs: Long)
     private val serversCache = ConcurrentHashMap<String, CachedServers>()
@@ -2862,6 +2880,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                             tmdbMovix.player_links?.flatMap { it.avecMiroir() }?.forEach { link ->
                                 val url = link.decoded_url ?: return@forEach
                                 if (url.isBlank()) return@forEach
+                                if (jetonExpire(url)) return@forEach
                                 val lang = if (link.language?.lowercase()?.contains("french") == true) "VF"
                                     else link.language ?: ""
                                 val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
@@ -3250,6 +3269,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                             tmdbMovix.current_episode?.player_links?.flatMap { it.avecMiroir() }?.forEach { link ->
                                 val url = link.decoded_url ?: return@forEach
                                 if (url.isBlank()) return@forEach
+                                if (jetonExpire(url)) return@forEach
                                 val lang = if (link.language?.lowercase()?.contains("french") == true) "VF"
                                     else link.language ?: ""
                                 val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"

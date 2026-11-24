@@ -52,7 +52,8 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
 
     override fun open(dataSpec: DataSpec): Long {
         uriCourante = dataSpec.uri
-        val estManifeste = dataSpec.uri.path?.endsWith(".m3u8", ignoreCase = true) == true
+        val estManifeste = dataSpec.uri.path?.endsWith(".m3u8", ignoreCase = true) == true ||
+            estListeAJeton(dataSpec.uri)
         if (!estManifeste) {
             passePlat = true
             val spec = avecCleVidzy(dataSpec)
@@ -89,7 +90,7 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
         } else {
             texte
         }
-        val octets = ivExplicites(filtre, dataSpec.uri).toByteArray(Charsets.UTF_8)
+        val octets = jetonPropage(ivExplicites(filtre, dataSpec.uri), dataSpec.uri).toByteArray(Charsets.UTF_8)
         donnees = octets
         position = 0
         return octets.size.toLong()
@@ -114,6 +115,40 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
         position = 0
         passePlat = true
         uriCourante = null
+    }
+
+    /** Liste de lecture Vidsrc (MoviesFree) : chemin « /pl/<long identifiant> » + `?token=`, sans extension. */
+    private fun estListeAJeton(uri: Uri): Boolean =
+        uri.path?.contains("/pl/") == true && RE_PL.containsMatchIn(uri.path ?: "") &&
+            runCatching { uri.getQueryParameter("token") }.getOrNull() != null
+
+    /**
+     * 2026-11-24 (banc : MoviesFree « refusé par le serveur (HTTP 403) ») - JETON RECOPIÉ.
+     *   La liste principale passe (200), mais ses sous-listes et morceaux y sont écrits SANS le
+     *   `?token=` ; c'est le lecteur du site qui le recopie sur chaque requête suivante. ExoPlayer
+     *   ne le fait pas → page de blocage (403) dès la sous-liste. On recopie donc le jeton de la
+     *   liste sur chaque adresse qu'elle contient (lignes et attributs URI="…") qui n'en a pas.
+     *   Uniquement pour ces listes « /pl/…?token= » ; toute autre liste ressort intacte.
+     */
+    private fun jetonPropage(texte: String, uri: Uri): String {
+        if (!estListeAJeton(uri)) return texte
+        val jeton = runCatching { uri.getQueryParameter("token") }.getOrNull() ?: return texte
+        fun avecJeton(adresse: String): String {
+            if (adresse.isBlank() || adresse.startsWith("data:") || adresse.contains("token=")) return adresse
+            val sep = if (adresse.contains('?')) "&" else "?"
+            return adresse + sep + "token=" + Uri.encode(jeton)
+        }
+        var n = 0
+        val sortie = texte.lines().joinToString("\n") { l ->
+            when {
+                l.isBlank() -> l
+                !l.startsWith("#") -> { n++; avecJeton(l.trim()) }
+                l.contains("URI=\"") -> RE_URI.replace(l) { m -> n++; "URI=\"" + avecJeton(m.groupValues[1]) + "\"" }
+                else -> l
+            }
+        }
+        Log.d(TAG, "jeton recopié sur $n adresse(s) - ${uri.path?.takeLast(40)}")
+        return sortie
     }
 
     /**
@@ -188,5 +223,7 @@ class FiltreManifesteHls(private val delegue: DataSource) : DataSource {
 
     private companion object {
         const val TAG = "FiltreManifesteHls"
+        val RE_PL = Regex("""/pl/[A-Za-z0-9_\-]{40,}""")
+        val RE_URI = Regex("""URI="([^"]*)"""")
     }
 }

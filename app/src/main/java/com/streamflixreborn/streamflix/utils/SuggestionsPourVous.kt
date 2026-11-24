@@ -89,7 +89,11 @@ object SuggestionsPourVous {
                 is Episode -> item.tvShow?.id?.toIntOrNull()?.let { it to true }
                 else -> null
             }
-        }.distinct().take(GRAINES)
+        // 2026-11-24 (tour des profils avant la v1.8.18) : sur FrenchStream, les identifiants
+        //   MAISON (15133767…) sont aussi numériques et partaient chez TMDB → une rafale de 404 à
+        //   chaque ouverture de l'accueil. Un identifiant TMDB reste sous 5 millions (films ~1,6 M,
+        //   séries ~0,3 M en 2026) : au-delà, ce n'en est pas un.
+        }.filter { it.first in 1..5_000_000 }.distinct().take(GRAINES)
 
         if (graines.isEmpty()) return@withContext emptyList()
 

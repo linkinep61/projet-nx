@@ -507,7 +507,7 @@ object DownloadManager {
         val m = (e.message ?: "").lowercase()
         return m.contains("http 404") || m.contains("http 403") || m.contains("http 410") ||
             m.contains("http 401") || m.contains("enospc") || m.contains("no space left") ||
-            m.contains("page web reçue")
+            m.contains("page web reçue") || m.contains("son séparé")
     }
 
     /**
@@ -541,7 +541,35 @@ object DownloadManager {
 
     private val CODES_A_REESSAYER = setOf(403, 429, 500, 502, 503, 504)
 
-    private fun appel(request: Request, client: OkHttpClient = clientTelechargement): Response {
+    // 2026-11-25 (banc, contrôle des téléchargements : serveurs qui se LISENT mais ne se téléchargent pas)
+    //   Deux retouches faites sur CHAQUE requête de téléchargement, avant l'envoi :
+    //   • « Accept-Encoding » retiré. Les en-têtes captés dans le navigateur caché (Vidnest…) le
+    //     contiennent ; quand on le pose soi-même, OkHttp ne décompresse plus la réponse → la liste
+    //     de lecture arrivait en gzip brut (« playlist invalide »). Sans lui, OkHttp gère seul.
+    //   • Jeton recopié. Les listes « /pl/<long identifiant>?token=… » (MoviesFree) écrivent leurs
+    //     sous-listes et morceaux SANS le jeton, que leur lecteur recopie à chaque requête (même
+    //     correctif que FiltreManifesteHls côté lecture). On retient le jeton par hôte et on
+    //     l'ajoute aux requêtes de ce même hôte qui n'en ont pas.
+    private val RE_LISTE_A_JETON = Regex("""/pl/[A-Za-z0-9_\-]{40,}""")
+    private val jetonsParHote = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun preparer(requete: Request): Request {
+        var r = requete
+        if (r.header("Accept-Encoding") != null) r = r.newBuilder().removeHeader("Accept-Encoding").build()
+        val url = r.url
+        val jeton = url.queryParameter("token")
+        if (jeton != null) {
+            if (RE_LISTE_A_JETON.containsMatchIn(url.encodedPath)) jetonsParHote[url.host] = jeton
+        } else {
+            jetonsParHote[url.host]?.let { j ->
+                r = r.newBuilder().url(url.newBuilder().addQueryParameter("token", j).build()).build()
+            }
+        }
+        return r
+    }
+
+    private fun appel(requete: Request, client: OkHttpClient = clientTelechargement): Response {
+        val request = preparer(requete)
         val hote = request.url.host
         if (hote in hotesTlsCompatible) return clientCompatible.newCall(request).execute()
         val r = try {
@@ -923,8 +951,19 @@ object DownloadManager {
 
         // VOD path: parse all segments and download in parallel as before
         val segBaseUrl = dossierDe(mediaPlaylistUrl)
-        val segments = parseSegmentPlaylist(playlistBody, segBaseUrl)
-        if (segments.isEmpty()) throw Exception("No segments found in HLS playlist")
+        val morceaux = parseSegmentPlaylist(playlistBody, segBaseUrl)
+        if (morceaux.isEmpty()) throw Exception("No segments found in HLS playlist")
+        // 2026-11-25 (banc : Vidnest, épisode « terminé » mais fichier illisible, durée inconnue) -
+        //   HLS en MP4 FRAGMENTÉ : la liste déclare un morceau d'initialisation (#EXT-X-MAP) que
+        //   chaque morceau suppose déjà lu. On ne le téléchargeait pas → fichier sans en-tête.
+        //   Il est désormais pris EN PREMIER, et le fichier sort en .mp4 (init + morceaux collés =
+        //   MP4 fragmenté valide). Rien ne change pour les listes en .ts.
+        if (withContext(Dispatchers.IO) { sonAbsent(download.sourceUrl, playlistBody, mediaPlaylistUrl, morceaux, headers) })
+            throw Exception("son séparé de l'image : ce serveur ne peut pas être téléchargé")
+        val carte = RE_CARTE.find(playlistBody)?.groupValues?.get(1)
+        val fmp4 = carte != null
+        val segments = if (carte != null) listOf(resoudreUrl(mediaPlaylistUrl, carte)) + morceaux else morceaux
+        if (fmp4) Log.d(TAG, "HLS en MP4 fragmenté : morceau d'initialisation ajouté en tête")
 
         Log.d(TAG, "HLS parallel download: ${segments.size} segments × $PARALLEL_CONNECTIONS connections for ${download.id}")
 
@@ -1010,7 +1049,9 @@ object DownloadManager {
                                         output.write(buffer, 0, bytesRead)
                                     }
                                 }
-                                retirerFauxEntete(tmpFile)   // 2026-09-27 : segments déguisés en PNG
+                                // 2026-09-27 : segments déguisés en PNG. Pas en MP4 fragmenté : la
+                                //   recherche d'un début de TS y trouverait de faux positifs.
+                                if (!fmp4) retirerFauxEntete(tmpFile)
                                 tmpFile.renameTo(segFile) // atomic completion marker
                             }
                         } finally {
@@ -1043,8 +1084,9 @@ object DownloadManager {
         //   fichier final, en .ts. Une entrée mise en file avant ce changement porte encore
         //   un nom en .mp4 → on rectifie l'extension, comme pour l'enregistrement direct.
         val segFiles = segments.indices.map { i -> File(tempDir, "seg_${String.format("%05d", i)}") }
-        val sortie = if (file.extension.equals("ts", ignoreCase = true)) file
-            else File(file.parentFile, file.nameWithoutExtension + ".ts")
+        val extension = if (fmp4) "mp4" else "ts"
+        val sortie = if (file.extension.equals(extension, ignoreCase = true)) file
+            else File(file.parentFile, file.nameWithoutExtension + ".$extension")
         if (sortie.absolutePath != file.absolutePath) {
             dao.updateFilePath(download.id, sortie.absolutePath)
         }
@@ -1305,10 +1347,11 @@ object DownloadManager {
             }
             val segs = parseSegmentPlaylist(body, dossierDe(mediaUrl))
             if (segs.isEmpty()) return@withContext "KO  0 segment"
+            if (sonAbsent(src, body, mediaUrl, segs, headers)) return@withContext "KO  son séparé de l'image (fichier muet)"
             val notes = buildList {
                 if (!body.contains("#EXT-X-ENDLIST")) add("LIVE")
                 if (Regex("#EXT-X-KEY:METHOD=(?!NONE)").containsMatchIn(body)) add("CHIFFRÉ(clé non gérée)")
-                if (body.contains("#EXT-X-MAP")) add("fMP4(init non géré)")
+                if (body.contains("#EXT-X-MAP")) add("MP4 fragmenté")
             }
             val fmts = mutableListOf<String>()
             for (i in 0 until minOf(2, segs.size)) {
@@ -1323,7 +1366,7 @@ object DownloadManager {
                         else "${format(b)} ${b.size / 1024}Ko"
                 }
             }
-            val bon = fmts.all { it.startsWith("TS") || it.startsWith("MP4") || it.startsWith("AAC") } && notes.none { it.startsWith("CHIFFRÉ") || it.startsWith("fMP4") }
+            val bon = fmts.all { it.startsWith("TS") || it.startsWith("MP4") || it.startsWith("AAC") } && notes.none { it.startsWith("CHIFFRÉ") }
             "${if (bon) "OK " else "KO "} HLS ${segs.size} seg [${fmts.joinToString()}]" + if (notes.isNotEmpty()) " ${notes.joinToString()}" else ""
         } else {
             val r = try { appel(req(src, "bytes=0-1048575")) } catch (e: Exception) {
@@ -1351,6 +1394,60 @@ object DownloadManager {
      *     le téléchargement enregistrait un fichier vide, marqué en plus comme LIVE.
      *   Les adresses relatives (y compris « /chemin ») sont résolues comme un navigateur.
      */
+    /** Sources dont la liste principale déclare une piste audio à part (#EXT-X-MEDIA … URI=). */
+    private val audioDeclareAPart: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * 2026-11-25 (banc : Vidnest, épisode téléchargé SANS LE SON, annoncé « terminé ») - SON ABSENT ?
+     *   Certaines listes servent l'image et le son dans deux flux séparés ; coller les morceaux
+     *   vidéo donne alors un film muet. La déclaration seule ne suffit pas pour le savoir : Vidzy
+     *   déclare un son à part mais le met AUSSI dans ses morceaux vidéo (vérifié sur un fichier
+     *   téléchargé : h264 + aac). On regarde donc dans le flux lui-même :
+     *     • MP4 fragmenté → le morceau d'initialisation contient-il une piste « soun » ?
+     *     • TS            → le premier morceau contient-il des paquets audio ?
+     *   Vrai seulement si on a PU lire et qu'il n'y a pas de son ; le moindre doute → faux.
+     *   Réunir image et son demanderait un vrai mixage (retiré le 2026-09-27, trop long) : on
+     *   refuse donc clairement, pour que l'utilisateur prenne un autre serveur.
+     */
+    private fun sonAbsent(sourceUrl: String, playlistBody: String, mediaUrl: String, morceaux: List<String>, headers: Map<String, String>): Boolean {
+        if (sourceUrl !in audioDeclareAPart) return false
+        fun lire(u: String): ByteArray? = try {
+            appel(Request.Builder().url(u).header("User-Agent", Extractor.DEFAULT_USER_AGENT)
+                .apply { headers.forEach { (k, v) -> header(k, v) } }.build()).use { r ->
+                if (!r.isSuccessful) null else r.body?.source()?.let { s -> s.request(4_000_000); s.buffer.readByteArray(minOf(s.buffer.size, 4_000_000L)) }
+            }
+        } catch (_: Exception) { null }
+        val carte = RE_CARTE.find(playlistBody)?.groupValues?.get(1)
+        if (carte != null) {
+            val b = lire(resoudreUrl(mediaUrl, carte)) ?: return false
+            if (b.size < 16) return false
+            return !String(b, Charsets.ISO_8859_1).contains("soun")
+        }
+        val b = lire(morceaux.firstOrNull() ?: return false) ?: return false
+        var o = debutTs(b)
+        if (o < 0) return false
+        var paquets = 0
+        while (o + 188 <= b.size) {
+            if (b[o] != 0x47.toByte()) return false          // plus du TS : on ne conclut pas
+            paquets++
+            val debutUnite = (b[o + 1].toInt() and 0x40) != 0
+            val adaptation = (b[o + 3].toInt() and 0x30) shr 4
+            if (debutUnite && (adaptation == 1 || adaptation == 3)) {
+                var c = o + 4
+                if (adaptation == 3) c += 1 + (b[o + 4].toInt() and 0xFF)
+                if (c + 4 <= o + 188 && b[c] == 0.toByte() && b[c + 1] == 0.toByte() && b[c + 2] == 1.toByte()) {
+                    val id = b[c + 3].toInt() and 0xFF
+                    if (id in 0xC0..0xDF || id == 0xBD) return false     // paquet audio trouvé
+                }
+            }
+            o += 188
+        }
+        return paquets > 2000        // assez de flux lu (≈ 370 Ko) sans un seul paquet audio
+    }
+
+    private val RE_CARTE = Regex("""#EXT-X-MAP:[^\n]*URI="([^"]+)"""")
+    private val RE_AUDIO_SEPARE = Regex("""#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI="[^"]+"""")
+
     private suspend fun fetchHlsPlaylist(sourceUrl: String, headers: Map<String, String>): Pair<String, String> {
         var url = sourceUrl
         repeat(4) {
@@ -1365,6 +1462,8 @@ object DownloadManager {
             }
             val body = rep.body?.string() ?: throw Exception("Empty HLS playlist")
             rep.close()
+            // La liste principale déclare une piste audio à part : à contrôler (cf. sonAbsent).
+            if (body.contains("#EXT-X-STREAM-INF") && RE_AUDIO_SEPARE.containsMatchIn(body)) audioDeclareAPart.add(sourceUrl)
             val suivante: String? = when {
                 body.contains("#EXT-X-STREAM-INF") ->
                     parseMasterPlaylist(body, dossierDe(url))

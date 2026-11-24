@@ -1128,6 +1128,7 @@ object OlaTvProvider : Provider, IptvProvider {
             probeOkCache.add(url)
             if (!channelKey.isNullOrBlank()) {
                 workingChannelUrls[channelKey] = url
+                workingChannelDates[channelKey] = System.currentTimeMillis()
                 saveWorkingChannelUrls()
                 // Alimente l'index local : si on a le CID, on stocke la latence + URL.
                 if (!cid.isNullOrBlank()) {
@@ -1150,6 +1151,13 @@ object OlaTvProvider : Provider, IptvProvider {
     // Saved to disk so that even after app restart, we try the best server first.
     private const val WORKING_URLS_FILE = "olatv_working_urls.json"
     private val workingChannelUrls = java.util.concurrent.ConcurrentHashMap<String, String>()
+    // 2026-11-25 (user : « on garde sans faire exprès des CID qui ne sont pas frais ») : la
+    //   « dernière adresse qui a marché » était gardée SANS date et proposée en tête indéfiniment.
+    //   Elle est maintenant datée et n'est reprise que pendant 24 h ; une entrée sans date
+    //   (ancienne version) est abandonnée au chargement.
+    private val workingChannelDates = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val WORKING_URL_FRAICHE_MS = 24L * 60 * 60 * 1000L
+    private const val CLE_DATES_WORKING = "__dates"
 
     // ───────── Persistent dead-domain blacklist ─────────
     // Domains that returned NXDOMAIN, connection refused, or repeated failures.
@@ -1308,13 +1316,19 @@ object OlaTvProvider : Provider, IptvProvider {
             val json = org.json.JSONObject(f.readText())
             var loaded = 0
             var skipped = 0
+            val dates = json.optJSONObject(CLE_DATES_WORKING)
+            val maintenant = System.currentTimeMillis()
             json.keys().forEach { key ->
+                if (key == CLE_DATES_WORKING) return@forEach
+                val date = dates?.optLong(key, 0L) ?: 0L
+                if (date <= 0L || maintenant - date >= WORKING_URL_FRAICHE_MS) { skipped++; return@forEach }
                 val url = json.getString(key)
                 // Only keep direct stream URLs — MAC portal resolved URLs contain
                 // ephemeral tokens that expire. Discard them on load to avoid playing
                 // the wrong channel (expired tokens can redirect to default streams).
                 if (isDirectStreamUrl(url)) {
                     workingChannelUrls[key] = url
+                    workingChannelDates[key] = date
                     loaded++
                 } else {
                     Log.d(TAG, "Skipping cached URL for '$key' — looks like expired MAC portal URL")
@@ -1350,6 +1364,9 @@ object OlaTvProvider : Provider, IptvProvider {
         try {
             val json = org.json.JSONObject()
             workingChannelUrls.forEach { (k, v) -> json.put(k, v) }
+            val dates = org.json.JSONObject()
+            workingChannelDates.forEach { (k, v) -> if (workingChannelUrls.containsKey(k)) dates.put(k, v) }
+            json.put(CLE_DATES_WORKING, dates)
             java.io.File(StreamFlixApp.instance.filesDir, WORKING_URLS_FILE).writeText(json.toString())
         } catch (e: Exception) {
             Log.w(TAG, "Failed to save working URLs: ${e.message}")
@@ -2950,7 +2967,9 @@ object OlaTvProvider : Provider, IptvProvider {
             // to disk), inject it as the FIRST server. This URL is a resolved direct URL
             // (not a MAC portal placeholder), so getVideo will play it immediately without
             // any handshake — instant channel switch for known-good channels.
-            val fastTrackUrl = workingChannelUrls[key]
+            val fastTrackUrl = workingChannelUrls[key]?.takeIf {
+                System.currentTimeMillis() - (workingChannelDates[key] ?: 0L) < WORKING_URL_FRAICHE_MS
+            }
             val initialServers = mutableListOf<Video.Server>()
             if (!fastTrackUrl.isNullOrBlank()) {
                 Log.d(TAG, "  fast-track for '$key': ${fastTrackUrl.take(80)}")
@@ -2993,7 +3012,10 @@ object OlaTvProvider : Provider, IptvProvider {
             val cachedFastTracks = com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex
                 .getCachedStreamUrls(key)
                 .sortedByDescending { (_, u) -> if (u in demotedUrls) -1.0 else hostScore(u) }
-            val FAST_TRACK_UI_CAP = 30
+            // 2026-11-25 : 30 → 8. Les adresses gardées sont désormais fraîches (< 24 h) et vivantes
+            //   (cf. LocalIptvChannelIndex.urlDateMap) ; inutile d'en empiler 30 devant les serveurs
+            //   du jour.
+            val FAST_TRACK_UI_CAP = 8
             var ftAdded = 0
             for ((cid, url) in cachedFastTracks) {
                 if (ftAdded >= FAST_TRACK_UI_CAP) break

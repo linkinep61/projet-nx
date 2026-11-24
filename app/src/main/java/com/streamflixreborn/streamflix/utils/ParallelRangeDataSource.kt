@@ -138,6 +138,18 @@ class ParallelRangeDataSource(
             } else if (r.code == 206) {
                 val depart = r.header("Content-Range")?.let { Regex("""bytes\s+(\d+)-""").find(it)?.groupValues?.get(1)?.toLongOrNull() }
                 if (depart != null && depart != debut) {
+                    // 2026-11-27 (user : notre Outlander S1E1 ne part qu'au bout de plusieurs essais,
+                    //   sur l'Oppo comme sur une autre télé) - relevé au journal : pour ce segment,
+                    //   TOUTE demande de plage reçoit « bytes 1125181-1478395/2891252 », mais le GET
+                    //   SANS plage rend bien le fichier complet (c'est pourquoi Chrome et le
+                    //   téléchargement le lisent). Avant d'abandonner, on prend donc le segment
+                    //   ENTIER, une seule fois, et tous ses morceaux y sont découpés.
+                    val total = r.header("Content-Range")?.substringAfter('/')?.toLongOrNull()
+                    segmentEntier(gen, cible, total)?.let { tout ->
+                        if (ecrit && fin == C.LENGTH_UNSET.toLong()) fin = tout.size.toLong()
+                        val a = debut.coerceAtMost(tout.size.toLong()).toInt()
+                        return tout.copyOfRange(a, (debut + taille).coerceAtMost(tout.size.toLong()).toInt())
+                    }
                     // 2026-11-01 (relevé sur la télé, puis vérifié au curl) : le CDN Vidara répond
                     //   parfois « 206 bytes 0-65535 » QUEL QUE SOIT l'octet demandé — un bout de
                     //   remplacement (lien périmé, ou trop de demandes à la fois). Avant ces contrôles,
@@ -169,6 +181,37 @@ class ParallelRangeDataSource(
             if (corps.size >= 256 * 1024) Log.d(TAG, "morceau ${corps.size / 1024} Ko en ${System.currentTimeMillis() - t0} ms (${r.protocol})")
             return corps
         }
+    }
+
+    // Segment pris ENTIER quand ses plages reviennent fausses (cf. « morceau mal placé »).
+    @Volatile private var entier: ByteArray? = null
+    @Volatile private var entierGen = -1
+    private val verrouEntier = Any()
+
+    /** Le segment complet par un GET sans plage, gardé pour les autres morceaux du même segment.
+     *  Null si le serveur ne rend pas un fichier complet de la taille [total] annoncée. */
+    private fun segmentEntier(gen: Int, cible: String, total: Long?): ByteArray? = synchronized(verrouEntier) {
+        if (entierGen == gen) return@synchronized entier
+        entierGen = gen; entier = null
+        val corps = runCatching {
+            val req = Request.Builder().url(cible).apply {
+                header("User-Agent", NetworkClient.USER_AGENT)
+                (entetes + proprietes).forEach { (k, v) -> header(k, v) }
+            }.build()
+            client.newCall(req).execute().use { r ->
+                val plage = r.header("Content-Range")?.let { Regex("""bytes\s+(\d+)-(\d+)/(\d+)""").find(it)?.groupValues }
+                val complet = r.code == 200 || (r.code == 206 && plage != null && plage[1] == "0" &&
+                    plage[2].toLongOrNull()?.plus(1) == plage[3].toLongOrNull())
+                if (!complet) null else r.body?.bytes()
+            }
+        }.getOrNull()
+        if (corps != null && corps.isNotEmpty() && (total == null || corps.size.toLong() == total)) {
+            Log.w(TAG, "plages fausses sur ce segment → pris ENTIER (${corps.size / 1024} Ko) et découpé sur place")
+            entier = corps
+        } else {
+            Log.w(TAG, "segment entier indisponible (${corps?.size ?: -1} o, attendu $total)")
+        }
+        entier
     }
 
     /**

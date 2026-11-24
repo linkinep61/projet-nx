@@ -874,6 +874,10 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                 val srcUrl = src.url ?: return@mapNotNull null
                 // URLs relatives → on les préfixe avec baseUrl
                 val absoluteUrl = if (srcUrl.startsWith("http")) srcUrl else "$baseUrl$srcUrl"
+                // 2026-11-24 (banc Zootopie 2 : « format illisible ») : multiup.us redirige vers une page
+                //   parking publicitaire (ww19.multiup.us, vérifié dans Chrome) — domaine mort, aucun
+                //   lecteur derrière. On ne l'affiche plus.
+                if (absoluteUrl.contains("multiup.us", ignoreCase = true)) return@mapNotNull null
                 val label = buildString {
                     append(src.name ?: src.provider ?: "Nakios")
                     src.quality?.takeIf { it.isNotBlank() }?.let { append(" — $it") }
@@ -1430,6 +1434,11 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                 Video(source = src, type = mimeType, headers = h)
             }
         } else {
+            // 2026-11-24 (banc Zootopie 2, Server #4 : « format illisible » après 25 s) : un lien
+            //   multiup.us arrivait encore ici par la lecture directe (page parking publicitaire,
+            //   domaine mort - cf. filtre de la liste plus haut) → verdict immédiat.
+            if (src.contains("multiup.us", ignoreCase = true))
+                throw Exception("multiup : hébergeur fermé (page parking)")
             // Tente d'utiliser un extracteur connu (DoodLa, Voe, Filemoon, etc.)
             try {
                 com.streamflixreborn.streamflix.extractors.Extractor.extract(src)

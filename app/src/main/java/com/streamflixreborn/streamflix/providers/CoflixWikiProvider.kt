@@ -577,6 +577,13 @@ object CoflixWikiProvider {
         for (i in 0 until servers.length()) {
             val s = servers.optJSONObject(i) ?: continue
             val serverLink = s.optString("server_link").takeIf { it.isNotBlank() } ?: continue
+            // 2026-11-24 (banc Zootopie 2) : « Server #6 » arrive avec un CODE NU (« BpxMpyNIaWLA »),
+            //   que leur propre lecteur met tel quel en iframe → rien ne se charge, même sur le site.
+            //   Pas une adresse = serveur mort d'office : on ne l'affiche pas.
+            if (!serverLink.startsWith("http")) continue
+            // 2026-11-24 (banc Zootopie 2, « 1 (VF) ») : multiup.us = page parking publicitaire,
+            //   hébergeur fermé (vérifié dans Chrome) → pas affiché.
+            if (serverLink.contains("multiup.us", ignoreCase = true)) continue
             val serverVersion = s.optString("version").ifBlank { langLabel }
 
             val hosterDomain = serverLink.substringAfter("://").substringBefore("/").lowercase()

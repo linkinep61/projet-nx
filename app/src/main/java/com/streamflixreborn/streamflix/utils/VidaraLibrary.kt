@@ -59,8 +59,8 @@ object VidaraLibrary {
         val titre: String get() = nomBrut.substringBeforeLast('.', nomBrut).trim()
         /** Nom LISIBLE (sans l'identifiant TMDB de tete). Cf. VoeLibrary.titreAffiche. */
         val titreAffiche: String
-            get() = titre.replace(RE_ID_TETE, "").replace(RE_TV_TETE, "").replace(RE_NUM_SITE, "")
-                .trim().ifBlank { titre }
+            get() = lisible(titre.replace(RE_ID_TETE, "").replace(RE_TV_TETE, "").replace(RE_NUM_SITE, "")
+                .trim()).ifBlank { titre }
         val embed: String get() = "$EMBED/e/$code"
     }
 
@@ -332,6 +332,8 @@ object VidaraLibrary {
      *   distinctes chez TMDB). Fiche = /tv/{id} (nom + affiche de la serie).
      */
     private val RE_TV_TETE = Regex("""^(?i)tv(\d{2,8})\s*-\s*""")
+    /** Numéro de série écrit en FIN par les téléchargements de l'appli (« … [tv-253].ts »). */
+    private val RE_TV_FIN = Regex("""(?i)\[tv-(\d{2,8})]""")
     private val ROMAINS = mapOf(
         "ii" to 2, "iii" to 3, "iv" to 4, "v" to 5, "vi" to 6,
         "vii" to 7, "viii" to 8, "ix" to 9, "x" to 10,
@@ -492,10 +494,27 @@ object VidaraLibrary {
                 Log.d(TAG, "Vidara : rattachement serie TMDB $tmdbId S${saison}E${episode} -> ${exactsTv.size}")
                 return exactsTv.map { fabrique(it) }
             }
+            // 2026-11-27 (user : « mauvais match sur notre serveur Vidara : Outlander: Blood of My
+            //   Blood S1E1 → notre épisode d'Outlander normal ») - le fichier « tv56570 - Outlander -
+            //   S01E01 » porte le numéro TMDB d'OUTLANDER, mais faute de fichier au numéro demandé on
+            //   retombait sur la comparaison par titre, où « Outlander » ⊂ « Outlander: Blood of My
+            //   Blood » passe (règle faite pour « Mushoku Tensei » ⊂ « Mushoku Tensei: Jobless… »).
+            //   Un fichier qui porte le numéro d'une AUTRE série est donc écarté d'office ; la
+            //   comparaison par titre ne sert plus qu'aux fichiers sans numéro (786 sur 5 911).
+            val idDemande = tmdbId?.takeIf { it.isNotBlank() && it.all(Char::isDigit) }
+            var autresSeries = 0
             val episodes = fichiers.filter { f ->
                 val propre = sansPrefixe(f.titre)
-                marque.containsMatchIn(propre) && serieCorrespond(propre, marque, titresConnus)
+                if (!marque.containsMatchIn(propre)) return@filter false
+                val idFichier = RE_TV_TETE.find(f.titre)?.groupValues?.get(1)
+                    ?: RE_TV_FIN.find(f.titre)?.groupValues?.get(1)
+                if (idDemande != null && idFichier != null && idFichier != idDemande) {
+                    if (serieCorrespond(propre, marque, titresConnus)) autresSeries++
+                    return@filter false
+                }
+                serieCorrespond(propre, marque, titresConnus)
             }
+            if (autresSeries > 0) Log.d(TAG, "Vidara : $autresSeries fichier(s) au bon titre mais d'une AUTRE série (numéro ≠ $idDemande) écarté(s)")
             if (episodes.isNotEmpty()) {
                 Log.d(TAG, "Vidara : rattachement S${saison}E${episode} -> ${episodes.size}")
             }
@@ -829,12 +848,51 @@ object VidaraLibrary {
      * Rend null si le nom ne porte pas d'annee exploitable.
      */
     private fun cleRechercheDe(f: Fichier): String? {
-        val brut = f.titre.replace(RE_NUM_SITE, "").trim()
-        val m = RE_ANNEE_FIN.find(brut) ?: return null
-        val annee = m.groupValues[1]
-        val titre = brut.removeRange(m.range).trim().trim('-', '.', '_').trim()
-        if (titre.isBlank()) return null
+        val (titre, annee) = titreEtAnnee(f.titre) ?: return null
         return "q:${titre.lowercase()}|$annee"
+    }
+
+    // 2026-11-24 (user : « dans ONYX Films, Nouveaux films n'a pas les jaquettes ») : sur 80 dépôts
+    //   récents, ~29 noms portaient une année que RE_ANNEE_FIN ne voyait pas : suivie de la qualité
+    //   (« Kill (2024) FHD », « Flight Risk (2025) MULT FHD ») ou sans parenthèses (« John Wick 2
+    //   2017 FHD », « Coeur de Dragon 1 (DragonHeart 1) 1996 FHD », « … - 2012 ») → aucune
+    //   recherche, tuile grise. On retire la qualité en fin de nom, on accepte l'année nue, et le
+    //   titre alternatif entre parenthèses est écarté. Toujours PAS de recherche sans année.
+    private val RE_QUALITE_FIN = Regex(
+        """(?i)[\s\-_.]*[\[(]?\b(?:HD|FHD|SD|UHD|4K|HDR|MULTI?|VFF?|VFQ|VOSTFR|TRUEFRENCH|FRENCH|1080p|720p|2160p|HEVC|x26[45]|WEB(?:-?DL)?|BluRay)\b[\])]?\s*$""")
+    private val RE_QUALITE_MOT = Regex(
+        """(?i)\b(?:FHD|UHD|HDR|MULTI?|VFF|VFQ|VOSTFR|TRUEFRENCH|1080p|720p|2160p|HEVC|x26[45])\b""")
+    private val RE_ANNEE_LIBRE = Regex("""[\s\-_.]*\(?((?:19|20)\d{2})\)?\s*$""")
+    private val RE_ANNEE_NUE = Regex("""[\s\-_.]+((?:19|20)\d{2})\s*$""")
+    private val RE_PARENTHESES = Regex("""\s*\([^)]*\)""")
+    private val ANNEE_MAX = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR) + 1
+
+    private fun sansQualite(nom: String): String {
+        var t = nom.trim()
+        while (true) {
+            val n = t.replace(RE_QUALITE_FIN, "").trim()
+            if (n == t || n.isBlank()) return t
+            t = n
+        }
+    }
+
+    /** « John Wick 2 2017 FHD » → « John Wick 2 (2017) » (affichage). */
+    private fun lisible(nom: String): String {
+        val t = sansQualite(nom)
+        val m = RE_ANNEE_NUE.find(t) ?: return t
+        if (m.groupValues[1].toInt() > ANNEE_MAX || m.range.first == 0) return t
+        return t.substring(0, m.range.first).trimEnd(' ', '-', '_', '.') + " (" + m.groupValues[1] + ")"
+    }
+
+    /** (titre à chercher, année) ; null sans année exploitable (« Asher », « 1917 », « Blade Runner 2049 »). */
+    private fun titreEtAnnee(brut: String): Pair<String, String>? {
+        val s = sansQualite(brut.replace(RE_NUM_SITE, ""))
+        val m = RE_ANNEE_LIBRE.find(s) ?: return null
+        val annee = m.groupValues[1]
+        if (annee.toInt() > ANNEE_MAX) return null
+        val titre = s.substring(0, m.range.first).replace(RE_PARENTHESES, "").replace(RE_QUALITE_MOT, " ")
+            .replace(Regex("""\s+"""), " ").trim().trim('-', '.', '_').trim()
+        return if (titre.isBlank()) null else titre to annee
     }
 
     /** Identifiant direct s'il existe, sinon cle de recherche par titre + annee. */
@@ -938,6 +996,24 @@ object VidaraLibrary {
         if (sep <= 0) return null
         val titre = corps.substring(0, sep)
         val annee = corps.substring(sep + 1)
+        // 2026-11-24 : « Coeur de Dragon 1 » ne sort pas chez TMDB, « Coeur de Dragon » oui.
+        rechercherTmdb(titre, annee, false)?.let { return it }
+        val sansVolet = titre.replace(Regex("""\s+\d{1,2}$"""), "")
+        if (sansVolet != titre && sansVolet.isNotBlank()) rechercherTmdb(sansVolet, annee, false)?.let { return it }
+        // TMDB ne trouve pas les titres longs écrits sans « : » (« Détective Dee La Légende des
+        //   rois célestes » → rien ; « Donjons & Dragons 3 » → trouvé). On raccourcit mot par mot,
+        //   4 essais au plus, 2 mots minimum, et le résultat doit COMMENCER par ces mots.
+        val mots = titre.split(' ').filter { it.isNotBlank() }
+        var n = mots.size - 1
+        var essais = 0
+        while (n >= 2 && essais < 4) {
+            rechercherTmdb(mots.take(n).joinToString(" "), annee, true)?.let { return it }
+            n--; essais++
+        }
+        return null
+    }
+
+    private fun rechercherTmdb(titre: String, annee: String, debutSeulement: Boolean): Fiche? {
         val q = java.net.URLEncoder.encode(titre, "UTF-8")
         val req = okhttp3.Request.Builder()
             .url("https://api.themoviedb.org/3/search/movie?api_key=${BuildConfig.TMDB_API_KEY}" +
@@ -945,7 +1021,19 @@ object VidaraLibrary {
             .header("Accept", "application/json").build()
         return NetworkClient.default.newCall(req).execute().use { r ->
             val resultats = JSONObject(r.body?.string().orEmpty()).optJSONArray("results")
-            val premier = resultats?.takeIf { it.length() > 0 }?.optJSONObject(0)
+                ?: return@use null
+            // 2026-11-24 : le filtre year= de TMDB est large (« Vendetta » 2022 rendait « V pour
+            //   Vendetta » de 2006). On ne garde qu'un résultat sorti l'année dite (±1), en
+            //   préférant un titre identique.
+            val an = annee.toIntOrNull() ?: return@use null
+            val bons = (0 until resultats.length()).mapNotNull { resultats.optJSONObject(it) }
+                .filter { (it.optString("release_date").take(4).toIntOrNull() ?: -99) in (an - 1)..(an + 1) }
+            fun n(x: String) = java.text.Normalizer.normalize(x, java.text.Normalizer.Form.NFD)
+                .replace(Regex("\\p{M}+"), "").replace("œ", "oe").lowercase().replace(Regex("[^a-z0-9]"), "")
+            val premier = bons.firstOrNull { n(it.optString("title")) == n(titre) || n(it.optString("original_title")) == n(titre) }
+                ?: (if (debutSeulement) bons.firstOrNull {
+                        n(it.optString("title")).startsWith(n(titre)) || n(it.optString("original_title")).startsWith(n(titre)) }
+                    else bons.firstOrNull())
                 ?: return@use null
             val t = premier.optString("title").ifBlank { premier.optString("original_title") }
             val p = premier.optString("poster_path").takeIf { it.isNotBlank() }

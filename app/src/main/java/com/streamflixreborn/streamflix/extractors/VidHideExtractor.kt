@@ -128,7 +128,13 @@ class VidHideExtractor: Extractor() {
         }
         Log.d(TAG, "Final URL: $completeUrl")
 
-        return Video(source = completeUrl, subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(unPacked, link))
+        // 2026-11-24 (banc The Last of Us S2E1, Coflix Boston « Smoothpre » et « Vidhideplus » : flux
+        //   trouvé mais « ne démarre pas en 25 s, 0 Ko reçus » sur dramiyos-cdn.com) : le flux était lu
+        //   SANS Referer/Origin, alors qu'un navigateur envoie toujours ceux de la page du lecteur. Les
+        //   serveurs de cette famille (EarnVids) refusent ou font traîner les demandes sans eux.
+        val pageLecteur = URL(link).protocol + "://" + URL(link).host
+        return Video(source = completeUrl, subtitles = com.streamflixreborn.streamflix.utils.SousTitresHebergeur.depuisPage(unPacked, link),
+            headers = mapOf("Referer" to "$pageLecteur/", "Origin" to pageLecteur, "User-Agent" to Extractor.DEFAULT_USER_AGENT))
     }
 
     private interface Service {

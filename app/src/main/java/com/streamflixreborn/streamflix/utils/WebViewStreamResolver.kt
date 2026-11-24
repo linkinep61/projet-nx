@@ -384,16 +384,24 @@ object WebViewStreamResolver {
                     if (!capturedHeaders.containsKey("Referer")) {
                         // Referer = la page en cours dans la WebView (= entryUrl
                         // ou sa redirection — view.url est le plus à jour).
-                        val ref = view?.url ?: referer ?: entryUrl
+                        // 2026-11-24 (plantage au banc, SPlayer) : `view.url` lu ICI = depuis un fil réseau
+                        //   (shouldInterceptRequest) → « All WebView methods must be called on the same
+                        //   thread » → l'appli PLANTE dès qu'un flux part sans Referer. On lit l'adresse
+                        //   mémorisée sur le fil principal (onPageStarted / onPageFinished).
+                        val ref = pageCourante ?: referer ?: entryUrl
                         capturedHeaders["Referer"] = ref
                     }
+                    // 2026-11-24 (SPlayer : flux capté à 3 s mais « non capté » au bout de 22 s) :
+                    //   `view?.post` ne s'exécutait jamais — la requête venait d'un lecteur hls.js
+                    //   tournant dans un worker, où `view` n'est pas utilisable. On repasse sur le
+                    //   fil principal par un Handler, et on se sert de NOTRE WebView.
                     if (lireJsApresCapture == null) {
-                        view?.post {
+                        Handler(Looper.getMainLooper()).post {
                             resolve(Resolved(url = reqUrl, headers = capturedHeaders))
                         }
                     } else if (captureEnCours.compareAndSet(false, true)) {
-                        view?.post {
-                            val wv = view ?: return@post
+                        Handler(Looper.getMainLooper()).post {
+                            val wv = webView
                             var essais = 0
                             fun lire() {
                                 if (resolved) return
@@ -421,7 +429,16 @@ object WebViewStreamResolver {
                 return null
             }
 
+            /** Adresse de la page, notée sur le fil principal (lisible depuis tous les fils). */
+            @Volatile var pageCourante: String? = null
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                if (url != null) pageCourante = url
+                super.onPageStarted(view, url, favicon)
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
+                if (url != null) pageCourante = url
                 if (!resolved && view != null && jsAuChargement != null && !jsLance) {
                     jsLance = true
                     view.postDelayed({ if (!resolved) view.evaluateJavascript(jsAuChargement) { r ->

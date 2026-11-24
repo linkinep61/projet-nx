@@ -58,6 +58,9 @@ class SmoothpreExtractor : Extractor() {
             userAgent = Extractor.DEFAULT_USER_AGENT,
         )
         var html = document.toString()
+        // Origine présentée au serveur vidéo : celle sous laquelle on a OBTENU la page (le jeton du flux
+        //   y est lié).
+        var origineFlux = mainLink
         Log.d(TAG, "HTML length=${html.length}")
         // 2026-11-03 (banc The Last of Us S2E1, Coflix Boston · Smoothpre) : vérifié dans le navigateur,
         //   la page répond « L'intégration de vidéos est restreinte pour ce domaine » (4 Ko, sans script)
@@ -85,6 +88,7 @@ class SmoothpreExtractor : Extractor() {
                 Extractor.sharedClient.newCall(req).execute().use { it.body?.string().orEmpty() }
             }
             Log.d(TAG, "nouvel essai : HTML length=${html.length}")
+            origineFlux = "https://lecteurvideo.com"
         }
 
         val packedJS = Regex("(eval\\(function\\(p,a,c,k,e,d\\)(.|\\n)*?)</script>")
@@ -133,7 +137,12 @@ class SmoothpreExtractor : Extractor() {
         }
         Log.d(TAG, "Subtitles found: ${subtitles.size}")
 
-        return Video(source = absoluteUrl, subtitles = subtitles)
+        // 2026-11-24 (banc The Last of Us S2E1, Coflix Boston « Smoothpre » et « Vidhideplus » : flux
+        //   trouvé mais « ne démarre pas en 25 s, 0 Ko reçus » sur dramiyos-cdn.com) : le flux était lu
+        //   SANS Referer/Origin, alors qu'un navigateur envoie toujours ceux de la page du lecteur. Les
+        //   serveurs de cette famille (EarnVids) refusent ou font traîner les demandes sans eux.
+        return Video(source = absoluteUrl, subtitles = subtitles,
+            headers = mapOf("Referer" to "$origineFlux/", "Origin" to origineFlux, "User-Agent" to Extractor.DEFAULT_USER_AGENT))
     }
 
     private interface Service {

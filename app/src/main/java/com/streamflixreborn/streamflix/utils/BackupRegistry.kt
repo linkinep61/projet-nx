@@ -2843,6 +2843,71 @@ object BackupRegistry {
                                 }
                             }
                         }
+                        // 2026-11-24 (banc One Piece S1E1, avant la v1.8.18) : FrenchStream acceptait
+                        //   « One Piece - Saison 1 » — la série de 2023 (épisodes d'1 h) — pour l'ANIMÉ de 1999 :
+                        //   le résultat de recherche ne porte pas d'année, donc rien ne pouvait l'écarter
+                        //   (rangAnnee = 1, « inconnue »). Dans ce cas seulement, on ouvre la fiche chez la
+                        //   source pour lire son année : écart > 1 an → refus. Films et saisons 1 uniquement
+                        //   (la fiche d'une saison 5 porte l'année de CETTE saison). Fiche muette ou trop
+                        //   lente (4 s) → on garde le résultat, comme avant.
+                        run {
+                            val m = match ?: return@run
+                            val voulue = anneeVoulue ?: return@run
+                            if (ficheIndex != null || anneeDe(m) != null) return@run
+                            if (!key.isMovie && (key.season ?: 1) > 1) return@run
+                            val idM = (m as? com.streamflixreborn.streamflix.models.Movie)?.id
+                                ?: (m as? com.streamflixreborn.streamflix.models.TvShow)?.id ?: return@run
+                            if (!resolvedTmdbId.isNullOrBlank() && idM == resolvedTmdbId) return@run
+                            // Fiche lue UNE fois : année + genres.
+                            val fiche = kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching {
+                                    if (key.isMovie) p.getMovie(idM).let { it.released?.get(java.util.Calendar.YEAR) to it.genres.map { g -> g.name } }
+                                    else p.getTvShow(idM).let { it.released?.get(java.util.Calendar.YEAR) to it.genres.map { g -> g.name } }
+                                }.onFailure { Log.d(TAG, "DIAG [${p.name}] fiche illisible : ${it.javaClass.simpleName} ${it.message?.take(80)}") }.getOrNull() }
+                            }
+                            val anneeFiche = fiche?.first
+                            // 2026-11-24 (même banc) : la fiche FrenchStream de « One Piece - Saison 1 » (série
+                            //   de 2023) n'a PAS d'année non plus → on regarde ses genres : un ANIMÉ demandé
+                            //   face à une fiche aux genres connus mais sans « Animation » = autre œuvre.
+                            val genresFiche = fiche?.second.orEmpty()
+                            var animeContreLive = isAnimeContent && genresFiche.isNotEmpty() &&
+                                genresFiche.none { it.contains("anim", ignoreCase = true) }
+                            // Fiche muette (ni année ni genres, cas de FrenchStream « One Piece - Saison 1 ») :
+                            //   on demande à TMDB s'il existe une série NON animée du même titre. Si oui,
+                            //   l'ambiguïté est réelle → « pas de serveur plutôt qu'un mauvais serveur ».
+                            if (!animeContreLive && isAnimeContent && !key.isMovie && anneeFiche == null && genresFiche.isEmpty() &&
+                                com.streamflixreborn.streamflix.BuildConfig.TMDB_API_KEY.isNotBlank()) {
+                                animeContreLive = kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching {
+                                        fun nt(t: String) = java.text.Normalizer.normalize(t, java.text.Normalizer.Form.NFD)
+                                            .replace(Regex("\\p{M}+"), "").lowercase().replace(Regex("[^a-z0-9]"), "")
+                                        val q = java.net.URLEncoder.encode(key.title, "UTF-8")
+                                        val req = okhttp3.Request.Builder()
+                                            .url("https://api.themoviedb.org/3/search/tv?api_key=${com.streamflixreborn.streamflix.BuildConfig.TMDB_API_KEY}&language=fr-FR&query=$q")
+                                            .build()
+                                        NetworkClient.default.newCall(req).execute().use { r ->
+                                            val res = org.json.JSONObject(r.body?.string().orEmpty()).optJSONArray("results") ?: return@use false
+                                            (0 until res.length()).mapNotNull { res.optJSONObject(it) }.any { o ->
+                                                val memeTitre = nt(o.optString("name")) == nt(key.title) || nt(o.optString("original_name")) == nt(key.title)
+                                                val genres = o.optJSONArray("genre_ids")
+                                                val anime = genres != null && (0 until genres.length()).any { genres.optInt(it) == 16 }
+                                                memeTitre && !anime && o.optInt("id").toString() != resolvedTmdbId
+                                            }
+                                        }
+                                    }.getOrNull() }
+                                } ?: false
+                                if (animeContreLive) Log.i(TAG, "DIAG [${p.name}] fiche muette + série non animée homonyme sur TMDB → doute")
+                            }
+                            if (anneeFiche != null && kotlin.math.abs(anneeFiche - voulue) > 1) {
+                                Log.i(TAG, "DIAG [${p.name}] REFUS '${titreDe(m)}' : fiche de $anneeFiche, œuvre de $voulue (autre œuvre homonyme)")
+                                match = null
+                            } else if (animeContreLive) {
+                                Log.i(TAG, "DIAG [${p.name}] REFUS '${titreDe(m)}' : animé demandé, fiche sans genre Animation $genresFiche (version en prises de vue réelles ?)")
+                                match = null
+                            } else {
+                                Log.d(TAG, "DIAG [${p.name}] année de la fiche '${titreDe(m)}' : ${anneeFiche ?: "inconnue"} (voulue $voulue), genres $genresFiche, animé demandé=$isAnimeContent")
+                            }
+                        }
                         if (match == null) {
                             Log.i(TAG, "DIAG [${p.name}] AUCUN MATCH → 0 serveurs (total ${System.currentTimeMillis()-t0}ms)")
                             // Page de la base refusée par les garde-fous → recherche habituelle.

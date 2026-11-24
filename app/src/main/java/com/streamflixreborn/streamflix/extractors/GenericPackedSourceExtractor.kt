@@ -178,6 +178,14 @@ class Mp4UploadExtractor : GenericPackedSourceExtractor() {
     override val aliasUrls = listOf("https://www.mp4upload.com")
 }
 
+// 2026-11-24 (banc Zootopie 2, Movix « Superplayer » : « No extractors found ») : page XFileSharing
+//   + JW Player, script « packed » (eval(p,a,c,k,e,d)) qui donne le m3u8 — vérifié dans Chrome,
+//   la vidéo se lance. Même mécanique que les autres de ce fichier.
+class SuperplayerExtractor : GenericPackedSourceExtractor() {
+    override val name = "Superplayer"
+    override val mainUrl = "https://superplayer.ws"
+}
+
 class StreamlareExtractor : GenericPackedSourceExtractor() {
     override val name = "Streamlare"
     override val mainUrl = "https://streamlare.com"

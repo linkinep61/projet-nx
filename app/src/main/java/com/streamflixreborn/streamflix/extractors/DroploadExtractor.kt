@@ -157,7 +157,51 @@ class DroploadExtractor : Extractor() {
             throw Exception("Dropload: Packed JS not found")
         }
         val scriptData = html.substring(debutPack).substringBefore("</script>")
-        return depuisScript(scriptData, referer)
+        val direct = depuisScript(scriptData, referer)
+        // 2026-11-24 (banc : 403 sur r1/ds1.dropcdn.io, alors que Chrome lit) : le site fabrique
+        //   pour une requête « hors navigateur » un lien que son CDN refuse ensuite (refusé même
+        //   rejoué dans Chrome). On vérifie donc le lien ; s'il est refusé, on ouvre la page dans
+        //   le navigateur intégré (comme pour la page de vérification) et on lit à travers lui.
+        val code = codeHttp(direct.source, direct.headers ?: emptyMap())
+        android.util.Log.d("DroploadExtractor", "vérif. du flux direct : HTTP $code")
+        if (code != 401 && code != 403) return direct
+        return viaNavigateur(link, origineLien, referer)
+            ?: throw Exception("Dropload: flux refusé (HTTP $code) et non capté par le navigateur intégré")
+    }
+
+    private suspend fun codeHttp(url: String, entetes: Map<String, String>): Int =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                c.connectTimeout = 6_000; c.readTimeout = 6_000
+                entetes.forEach { (k, v) -> c.setRequestProperty(k, v) }
+                try { c.responseCode } finally { c.disconnect() }
+            }.getOrDefault(-1)
+        }
+
+    /** Page ouverte dans un vrai navigateur intégré ; le lecteur lira ensuite À TRAVERS lui. */
+    private suspend fun viaNavigateur(link: String, origineLien: String, referer: String): Video? {
+        val uaWebView = android.webkit.WebSettings.getDefaultUserAgent(
+            com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext)
+        val capte = runCatching {
+            com.streamflixreborn.streamflix.utils.WebViewStreamResolver.resolve(
+                entryUrl = link,
+                referer = origineLien,
+                userAgent = uaWebView,
+                timeoutMs = 20_000L,
+                clickPlay = true,
+                attach = true,
+            )
+        }.getOrNull()
+        val url = capte?.url?.takeIf { it.startsWith("http") && (it.contains(".m3u8") || it.contains(".mp4")) }
+        android.util.Log.d("DroploadExtractor", "navigateur intégré : ${url?.substringBefore('?')?.takeLast(60) ?: "rien capté"}")
+        if (url == null) return null
+        preparerWebViewPartagee(uaWebView, referer)
+        val entetes = LinkedHashMap<String, String>()
+        entetes["User-Agent"] = capte.headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value ?: uaWebView
+        entetes["Referer"] = "$referer/"
+        entetes["Origin"] = referer
+        return Video(source = url, headers = entetes, extraBuffering = true)
     }
 
     private fun depuisScript(scriptData: String, referer: String): Video {

@@ -342,6 +342,17 @@ object FileSearchProvider {
                 } else {
                     val re = seRegex ?: continue
                     if (!re.containsMatchIn(nName) && !re.containsMatchIn(nCompact)) continue
+                    // 2026-11-24 (banc One Piece S1E1 = l'animé de 1999) : FileSearch proposait
+                    //   « One.Piece.2023.S01E01… » — la série de 2023, homonyme. Les noms de série
+                    //   portent l'année de la SÉRIE juste avant SxxExx : si une année y figure et
+                    //   qu'elle s'écarte de plus d'un an, c'est une autre œuvre. Sans année → inchangé.
+                    if (year != null && year > 1900) {
+                        val avantSE = rawName.uppercase().split(Regex("""S\d{1,2}\s*[EX]\d{1,3}""")).first()
+                        // (une année qui fait partie du TITRE — « 1923 », série de 2022 — n'est pas l'année de la série)
+                        val annees = Regex("""(?<!\d)(19\d{2}|20\d{2})(?!\d)""").findAll(avantSE).map { it.value.toInt() }
+                            .filter { a -> wantNorm.none { it.contains(a.toString()) } }.toList()
+                        if (annees.isNotEmpty() && annees.none { kotlin.math.abs(it - year) <= 1 }) continue
+                    }
                 }
 
                 // 3) FILTRE LANGUE : on écarte les fichiers 100 % anglais (aucun marqueur FR audio

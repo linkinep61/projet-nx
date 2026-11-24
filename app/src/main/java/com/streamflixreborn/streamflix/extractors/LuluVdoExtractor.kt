@@ -48,6 +48,10 @@ class LuluVdoExtractor : Extractor() {
         //   « No extractors found » au banc. Même cas : la page se présente comme Lulustream
         //   (`<title>… - Lulustream.mp4</title>`), même schéma `/e/<id>`.
         "https://lplaygo.com",
+        // 2026-11-24 (banc One Piece, FrenchManga « Luluvid » : « No extractors found ») : ancien
+        //   miroir LuluStream, `vidhsareup.io/embed-<id>.html`. Le domaine n'existe plus (DNS), mais
+        //   le MÊME identifiant répond sur lulustream.com (vérifié dans Chrome) → on y redirige.
+        "https://vidhsareup.io",
     )
 
     companion object {
@@ -227,8 +231,9 @@ class LuluVdoExtractor : Extractor() {
         val linkHost = try {
             java.net.URL(link).let { "${it.protocol}://${it.host}" }
         } catch (_: Exception) { mainUrl.trimEnd('/') }
+            .let { if (it.contains("vidhsareup", ignoreCase = true)) mainUrl.trimEnd('/') else it }
 
-        val fileCode = link.trimEnd('/').substringAfterLast("/").substringBefore(".")
+        val fileCode = link.trimEnd('/').substringAfterLast("/").substringBefore(".").removePrefix("embed-")
         Log.d(TAG, "Extracting file_code=$fileCode from $linkHost")
 
         // 2026-07-31 (user « avoir le serveur sans passer par le site, c'est le mieux ») :

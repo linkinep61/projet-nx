@@ -48,7 +48,9 @@ object Vidsrc {
                     .build()
                 client.newCall(req).execute().use { r ->
                     val corps = r.body?.string().orEmpty()
-                    val code = Regex(""""status_code"\s*:\s*(\d+)""").find(corps)?.groupValues?.get(1)?.toIntOrNull()
+                    // 2026-11-24 : l'API renvoie désormais « "status_code":"200" » (texte entre guillemets)
+                    //   → on accepte le nombre avec ou sans guillemets.
+                    val code = Regex(""""status_code"\s*:\s*"?(\d+)"?""").find(corps)?.groupValues?.get(1)?.toIntOrNull()
                     val res = when (code) {
                         200 -> true
                         404 -> false
@@ -70,13 +72,21 @@ object Vidsrc {
             timeoutMs = 25_000L,
             attach = true,
             toucherCentre = true,
-            motifsFlux = listOf("/pl/H4sI"),
+            // 2026-11-24 (banc : « flux non capté », Chrome lit) : la liste de lecture ne commence plus
+            //   par « /pl/H4sI » (relevé : /pl/lph8…, morceaux déguisés en page-N.html) → on vise
+            //   n'importe quel « /pl/ » suivi d'un long identifiant, sans dépendre de son début.
+            motifsUrlFlux = listOf(Regex("""/pl/[A-Za-z0-9_\-]{40,}""")),
+            clickPlay = true,
             // 2026-10-22 (user : « il arrive vite mais parfois il met du temps à se lancer, comme
             //   s'il arrivait même s'il n'avait pas de contenu ») — Vidsrc est proposé sans savoir si
             //   l'épisode existe chez lui (ex. The Iceblade Sorcerer S02E02, diffusé mais absent). Vérifié
             //   au navigateur : la page prend le titre de l'œuvre (« … · S01 E01 ») quand elle l'a, et
             //   garde « Player » quand elle ne l'a pas. → abandon au bout de 12 s au lieu de 25.
-            abandonSiTitre = Regex("""(?i)(player|joueur|lecteur)?"""),
+            // 2026-11-24 (banc Zootopie 2, « flux non capté » alors que Chrome lit le film) : l'ancien
+            //   motif `(?i)(player|joueur|lecteur)?` (groupe FACULTATIF) correspondait à n'importe quel
+            //   titre → abandon systématique à 12 s, même quand la page avait trouvé l'œuvre. On ne vise
+            //   plus que le titre resté générique (« Player », ou vide).
+            abandonSiTitre = Regex("""(?i)^\s*(player|joueur|lecteur)?\s*$"""),
             delaiAbandonMs = 12_000L,
         ) ?: throw Exception("Vidsrc : flux non capté (titre inconnu ou lecteur indisponible)")
         Log.i(TAG, "flux capté : ${r.url.substringBefore("/pl/")}/pl/… (en-têtes vus : ${r.headers.keys})")

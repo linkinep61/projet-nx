@@ -295,6 +295,8 @@ abstract class Extractor {
             StreamlareExtractor(), // streamlare.com (packed)
             NinjaStreamExtractor(),// ninjastream (packed, rotating)
             UchExtractor(),        // uch (packed, rotating)
+            SuperplayerExtractor(), // superplayer.ws (packed, 2026-11-24)
+            SplayerExtractor(),     // fr.splayer.site (WebView, 2026-11-24)
             GoodstreamExtractor(),
             LamovieExtractor(),
             UqloadExtractor(),
